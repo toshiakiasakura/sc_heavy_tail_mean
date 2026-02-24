@@ -63,3 +63,36 @@ end
 Distributions.pdf(d::ZeroTruncConvolutedDist, k::Int64) = pdf(d.conv_d, k) / (1 - d.p0)
 Distributions.logpdf(d::ZeroTruncConvolutedDist, k::Int64) = log(pdf(d,k))
 Distributions.ccdf(d::ZeroTruncConvolutedDist, k::Int64) = ccdf(d.conv_d, k) / (1 - d.p0)
+
+##### Zero-Inflated BNB #####
+
+Base.@kwdef struct ZeroInfBNB <: DiscreteUnivariateDistribution
+    π0::Real
+    α::Real
+    β::Real
+    r::Real
+    d::ZeroInfDist = ZeroInfDist(π0, BNB(α, β, r))
+end
+
+Base.@kwdef struct ZeroInfBNB2 <: DiscreteUnivariateDistribution
+    π0::Real
+    m::Real
+    v::Real
+    η::Real
+    d::ZeroInfDist = ZeroInfDist(π0, BNB2(m, v, η))
+end
+
+ZeroInfBNB2(π0::Real, bnb2::BNB2) = ZeroInfBNB2(; π0 = π0, m = bnb2.m, v = bnb2.v, η = bnb2.η)
+
+for T in (ZeroInfBNB, ZeroInfBNB2)
+    @eval begin
+        Base.length(d::$T) = 1
+        Base.iterate(d::$T) = (d, nothing)
+        Base.iterate(d::$T, ::Nothing) = nothing
+        Distributions.logpdf(d::$T, k::Int64) = logpdf(d.d, k)
+        Distributions.pdf(d::$T, k::Int64)    = pdf(d.d, k)
+        Distributions.mean(d::$T)             = mean(d.d)
+        Distributions.rand(d::$T)             = rand(d.d)
+        Distributions.rand(d::$T, n::Int64)   = rand(d.d, n)
+    end
+end

@@ -88,6 +88,28 @@ d   = get_BNB2(chn)
 	Turing.@addlogprob! ll
 end
 
+"""Fit a Zero-Inflated Beta Negative Binomial (ZeroInfBNB2) to a `DegreeDist`.
+
+Parameters sampled:
+- `log_m_bnb`: log mean  (m > 0)
+- `log_v_bnb`: log v = α-1  (v > 0)
+- `log_η_bnb`: log tailness index η  (η > 0)
+- `π0`: zero-inflation probability ~ Beta(1.5, 1.5)
+"""
+@model function model_ZeroInfBNB2(dd::DegreeDist)
+	log_m_bnb ~ Normal(log(5.0), 1.5)
+	log_v_bnb ~ Normal(0.0, 1.5)
+	log_η_bnb ~ Normal(0.0, 1.5)
+	π0 ~ Beta(1.5, 1.5)
+
+	m = exp(log_m_bnb)
+	v = exp(log_v_bnb)
+	η = exp(log_η_bnb)
+	dist = ZeroInfBNB2(; π0 = π0, m = m, v = v, η = η)
+	ll = calculate_loglikelihood(dd, dist)
+	Turing.@addlogprob! ll
+end
+
 @model function model_ZeroInfConvDist(dd_all::DegreeDist, dd_hm::DegreeDist, prior_dic)
 	μ_obs_ln ~ prior_dic["hm_p1"]
 	log_σ_ln ~ prior_dic["hm_p2"]

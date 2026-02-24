@@ -70,6 +70,32 @@ function get_BNB2(chn::Chains)::BNB2
 	return BNB2(; m = m, v = v, η = η)
 end
 
+make_BNB2(log_m, log_v, log_η) = BNB2(; m = exp(log_m), v = exp(log_v), η = exp(log_η))
+make_ZeroInfBNB2(log_m, log_v, log_η, π0) = ZeroInfBNB2(; π0 = π0, m = exp(log_m), v = exp(log_v), η = exp(log_η))
+
+"""Return one `BNB2` per posterior draw from a `model_BNB2` chain."""
+function get_vec_BNB2_from_chn(chn::Chains)::Vector{BNB2}
+	log_m = vec(Array(chn[:log_m_bnb]))
+	log_v = vec(Array(chn[:log_v_bnb]))
+	log_η = vec(Array(chn[:log_η_bnb]))
+	return make_BNB2.(log_m, log_v, log_η)
+end
+
+"""Reconstruct a `ZeroInfBNB2` from the posterior median of a `model_ZeroInfBNB2` chain."""
+function get_ZeroInfBNB2(chn::Chains)::ZeroInfBNB2
+	med = Dict(p => median(chn[p]) for p in names(chn, :parameters))
+	return make_ZeroInfBNB2(med[:log_m_bnb], med[:log_v_bnb], med[:log_η_bnb], med[:π0])
+end
+
+"""Return one `ZeroInfBNB2` per posterior draw from a `model_ZeroInfBNB2` chain."""
+function get_vec_ZeroInfBNB2_from_chn(chn::Chains)::Vector{ZeroInfBNB2}
+	log_m = vec(Array(chn[:log_m_bnb]))
+	log_v = vec(Array(chn[:log_v_bnb]))
+	log_η = vec(Array(chn[:log_η_bnb]))
+	π0    = vec(Array(chn[:π0]))
+	return make_ZeroInfBNB2.(log_m, log_v, log_η, π0)
+end
+
 function get_ZeroInfDist(chn::Chains, key::String)
 	if key == "ZeroInfNegativeBinomial"
 		return get_ZeroInfNegativeBinomial(chn)
