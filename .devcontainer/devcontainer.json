@@ -1,0 +1,46 @@
+{
+    "name": "sc_heavy_tail_mean",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".."
+    },
+    "mounts": [
+        "source=${localWorkspaceFolder},target=/workdir,type=bind,consistency=cached"
+    ],
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.shell.linux": "/bin/bash",
+                "workbench.editorAssociations": {
+                    "*.ipynb": "jupyter-notebook"
+                },
+                "jupyter.allowLocalServer": true,
+                "jupyter.jupyterServerType": "local"  // Ensures Jupyter uses local server
+            },
+            "extensions": [
+                "julialang.language-julia",
+                "0h7z.vscode-julia-format",
+                "ms-toolsai.jupyter",
+                "donjayamanne.vscode-jupytext",
+                "REditorSupport.r",
+                "RDebugger.r-debugger",
+                "ms-python.python",
+                "znck.grammarly",
+                "janisdd.vscode-edit-csv",
+                "GitHub.copilot",
+                "Gruntfuggly.todo-tree",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "forwardPorts": [
+        8888 // Port for Jupyter Notebook
+    ],
+    "postCreateCommand": "julia --project=/workdir -e 'using Pkg; Pkg.activate(\"/workdir\"); Pkg.instantiate();'",
+    "remoteUser": "jovyan",
+    "workspaceFolder": "/workdir",
+    "shutdownAction": "stopContainer",
+    "containerEnv": {
+        "JULIA_NUM_THREADS": "12"
+    }
+}
