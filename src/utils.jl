@@ -1,10 +1,10 @@
 function default_plot_setting()
-	gr(fontfamily = "Helvetica",
+	gr(fontfamily = "Computer Modern", #"Helvetica",
 		foreground_color_legend = nothing,
 		background_color_legend = nothing,
-		titlefontsize = 11, tickfontsize = 10,
-		legendfontsize = 8, legendtitlefontsize = 8,
-		labelfontsize = 10,
+		#titlefontsize = 11, tickfontsize = 10,
+		#legendfontsize = 10, legendtitlefontsize = 10,
+		#labelfontsize = 11,
 		grid = true, tick_direction = :out,
 		size = (600, 450))
 end

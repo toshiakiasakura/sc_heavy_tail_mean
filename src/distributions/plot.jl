@@ -33,6 +33,11 @@ function plot_ccdf!(pl::Plots.Plot, d::ZeroInfConvolutedDist; kwds...)
 	plot_ccdf!(pl, d_trunc; kwds...)
 end
 
+# ZeroInfBNB / ZeroInfBNB2 wrap a ZeroInfDist — delegate to it
+function plot_ccdf!(pl::Plots.Plot, d::Union{ZeroInfBNB, ZeroInfBNB2}; kwds...)
+	plot_ccdf!(pl, d.d; kwds...)
+end
+
 function plot_pdf!(pl::Plots.Plot, d::UnivariateDistribution;
 		conv_log10 = true, kwds...)
 	k = [(0:9)..., (10:10:90)..., (100:100:900)..., (1000:1000:9000)..., 10000]

@@ -18,6 +18,10 @@ function convert_ZeroInf_to_ZeroTrunc(d::ZeroInfDist)
 		return ZeroTruncPoissonLogNormal(; μ = d.d.μ, σ=d.d.σ)
 	elseif typeof(d.d) == PoissonLomax
 		return ZeroTruncPoissonLomax(; α = d.d.α, θ=d.d.θ)
+	elseif typeof(d.d) == BNB
+		return ZeroTruncBNB(; α = d.d.α, β = d.d.β, r = d.d.r)
+	elseif typeof(d.d) == BNB2
+		return ZeroTruncBNB2(; m = d.d.m, v = d.d.v, η = d.d.η)
 	else
 		error("Unsupported distribution type for convert_ZeroInf_to_ZeroTrunc")
 	end

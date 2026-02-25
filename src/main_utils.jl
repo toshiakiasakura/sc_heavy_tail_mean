@@ -36,6 +36,7 @@ using Turing
 using MCMCChains
 
 include("distributions/main.jl")
+include("utils.jl")
 include("degree_dist.jl")
 include("fit_utils.jl")
 include("turing_utils.jl")

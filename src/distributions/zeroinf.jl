@@ -79,7 +79,7 @@ Base.@kwdef struct ZeroInfBNB2 <: DiscreteUnivariateDistribution
     m::Real
     v::Real
     η::Real
-    d::ZeroInfDist = ZeroInfDist(π0, BNB2(m, v, η))
+    d::ZeroInfDist = ZeroInfDist(π0, BNB2(; m=m, v=v, η=η))
 end
 
 ZeroInfBNB2(π0::Real, bnb2::BNB2) = ZeroInfBNB2(; π0 = π0, m = bnb2.m, v = bnb2.v, η = bnb2.η)
