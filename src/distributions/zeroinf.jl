@@ -6,7 +6,7 @@ end
 ##### ZeroInfDist #####
 Distributions.mean(d::ZeroInfDist) = (1 - d.π0) * mean(d.d)
 
-@memoize function Distributions.logpdf(d::ZeroInfDist, y::Int64)
+function Distributions.logpdf(d::ZeroInfDist, y::Int64)
 	log_one_minus_pi0 = log1p(-d.π0)
 	if y == 0
 		return logaddexp(log(d.π0), log_one_minus_pi0 + logpdf(d.d, 0))

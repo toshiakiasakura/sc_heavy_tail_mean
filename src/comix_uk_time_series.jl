@@ -69,6 +69,42 @@ function create_df_dds_chunk(df::DataFrame, df_part::DataFrame)
     return df_dd_mer
 end
 
+"""
+Variant of `create_df_dds_chunk` that builds degree distributions split by
+contact location (`home`, `work`, `school`, `other`) using `degree_dist_by_location`.
+
+`cnt_home`, `cnt_work`, `cnt_school` may be Bool or the string values
+`"true"`/`"false"`/`"NA"` — both are handled. `"NA"` is treated as `false`.
+"""
+function create_df_dds_chunk_by_settings(df::DataFrame, df_part::DataFrame)
+    to_bool(v) = string(v) == "true"
+
+    d_lis = df_part[:, :mid_date] |> unique
+    df_dd_mer = DataFrame()
+    for d in sort(d_lis)
+        df_tmp      = copy(@subset(df,      :mid_date .== d))
+        df_part_tmp = copy(@subset(df_part, :mid_date .== d))
+        if nrow(df_tmp) == 0 || nrow(df_part_tmp) == 0
+            println("Skipping (no data): $d")
+            continue
+        end
+
+        # degree_dist_by_location expects :part_id_d
+        @rename! df_tmp      :part_id_d = :part_id
+        @rename! df_part_tmp :part_id_d = :part_id
+
+        # Normalise location columns to Bool ("NA" → false)
+        df_tmp[!, :cnt_home]   = to_bool.(df_tmp[:, :cnt_home])
+        df_tmp[!, :cnt_work]   = to_bool.(df_tmp[:, :cnt_work])
+        df_tmp[!, :cnt_school] = to_bool.(df_tmp[:, :cnt_school])
+
+        df_dd = degree_dist_by_location(df_tmp, df_part_tmp)
+        df_dd[!, :key] .= string(d)
+        df_dd_mer = vcat(df_dd_mer, df_dd)
+    end
+    return df_dd_mer
+end
+
 function create_capped_frequencies(df_k::DataFrame)
     df_k_capped = copy(df_k)
     df_below = @subset(df_k_capped, :x .<= 50)

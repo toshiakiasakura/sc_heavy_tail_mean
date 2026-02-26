@@ -117,6 +117,39 @@ function degree_dist_for_all_home_non_home(df::DataFrame; key=:key)
 	return vcat(df_all, df_hm, df_nhm)
 end
 
+"""Build degree distributions split by contact-location boolean columns:
+- `"home"`   : contacts where `cnt_home == true`
+- `"work"`   : contacts where `cnt_work == true`
+- `"school"` : contacts where `cnt_school == true`
+- `"other"`  : contacts where all three flags are `false`
+
+Assumes `:cnt_home`, `:cnt_work`, `:cnt_school` are `Bool` columns with no
+missing values. Participants with zero contacts in a stratum are included
+(count = 0) using `n_part` from `df_part`.
+
+Returns a long DataFrame with columns `:x`, `:y`, `:strat`.
+"""
+function degree_dist_by_location(df::DataFrame, df_part::DataFrame)::DataFrame
+	n_part = df_part[:, :part_id_d] |> unique |> length
+
+	strat_filters = [
+		"home"   => df_ -> @subset(df_, :cnt_home .== true),
+		"work"   => df_ -> @subset(df_, :cnt_work .== true),
+		"school" => df_ -> @subset(df_, :cnt_school .== true),
+		"other"  => df_ -> @subset(df_, :cnt_home .== false,
+		                                   :cnt_work .== false,
+		                                   :cnt_school .== false),
+	]
+
+	df_dd = DataFrame()
+	for (strat, filterfn) in strat_filters
+		cnts = combine(groupby(filterfn(df), :part_id_d), nrow => :cnt)[:, :cnt]
+		dd   = DegreeDist(cnts, n_part)
+		df_dd = vcat(df_dd, dd_to_df(dd, strat))
+	end
+	return df_dd
+end
+
 function add_zero_counts_to_df_deg(df_deg::DataFrame, df_part::DataFrame)
 	n_part = df_part[:, :part_id_d] |> unique |> length
 
