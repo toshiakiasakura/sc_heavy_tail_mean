@@ -10,6 +10,7 @@ ENV DEVCONTAINER=TRUE
 # TODO: Activate checkpoint and install packages.
 RUN R -e "install.packages(c('socialmixr', 'jsonlite', 'here', 'checkpoint', 'cmoceean'), repos = 'https://cran.ism.ac.jp')"
 RUN R -e "install.packages(c('tableone', 'broom'), repos = 'https://cran.ism.ac.jp')"
+RUN R -e "install.packages('MGLM', repos = 'https://cran.ism.ac.jp')"
 
 # Install Node.js 20 and Claude Code CLI
 ARG CLAUDE_CODE_VERSION=latest
