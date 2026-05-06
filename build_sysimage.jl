@@ -1,0 +1,56 @@
+using Pkg
+Pkg.activate(@__DIR__)
+
+using PackageCompiler
+
+packages = [
+    # Data
+    :AbstractMCMC,
+    :CSV,
+    :CategoricalArrays,
+    :DataFrames,
+    :DataFramesMeta,
+    :Distributions,
+    :Glob,
+    :GLM,
+    :Images,
+    :Interpolations,
+    :JLD2,
+    :KernelDensity,
+    :LaTeXStrings,
+    :LogExpFunctions,
+    :Memoization,
+    :Memoize,
+    :Parameters,
+    :Pipe,
+    :QuadGK,
+    :RCall,
+    :SpecialFunctions,
+    :StatsBase,
+    :StringEncodings,
+    :XLSX,
+    # Visualisation
+    :Plots,
+    :StatsPlots,
+    # Bayesian / MCMC
+    :DynamicPPL,
+    :MCMCChains,
+    :Pathfinder,
+    :Turing,
+    # Jupyter
+    :IJulia,
+]
+
+sysimage_path = joinpath(@__DIR__, "sysimage.so")
+
+pkg_list = join(string.(packages), ", ")
+@info "Building sysimage at $sysimage_path — this takes ~15–30 minutes"
+@info "Packages: $pkg_list"
+
+create_sysimage(
+    packages;
+    sysimage_path,
+    precompile_execution_file = joinpath(@__DIR__, "precompile_script.jl"),
+)
+
+@info "Done. Start Julia with:  julia --sysimage sysimage.so"

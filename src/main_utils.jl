@@ -15,7 +15,7 @@ using LogExpFunctions
 using Memoization
 using Parameters
 using Plots
-using Pipe
+import Pipe: @pipe
 using Pkg
 using Printf
 using QuadGK
