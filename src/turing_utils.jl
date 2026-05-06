@@ -175,3 +175,19 @@ function explore_chns(chn::Chains)
 	plot(chn, [:lp, :loglikelihood, :logprior, :tree_depth, :acceptance_rate]) |> display
 	plot(chn) |> display
 end
+
+"""
+Compact summary of a Dirichlet-multinomial regression chain.
+Tags β / γ rows by their natural index and reports convergence.
+"""
+function summarize_dm_fit(chn::Chains)
+	df = extract_chain_info(chn)
+	converged = is_chains_converged(chn)
+	bad = @subset(df, :ess .< 200 .|| :rhat .> 1.1)
+	if nrow(bad) > 0
+		println("Parameters failing convergence (ess < 200 or rhat > 1.1):")
+		display(bad[:, [:parameters, :ess, :rhat]])
+	end
+	println("Converged: ", converged)
+	return df
+end

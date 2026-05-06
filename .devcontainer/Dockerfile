@@ -20,4 +20,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && \
     mkdir -p /home/jovyan/.julia /home/jovyan/.claude && \
     chown jovyan:users /home/jovyan/.julia /home/jovyan/.claude
+
 USER jovyan
+
+# Install RTK (Rust Token Killer) for token-efficient Claude Code sessions
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh && \
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/jovyan/.bashrc

@@ -647,3 +647,134 @@ function transform_comix2(s::String)
         return s
     end
 end
+
+###################################################
+##### Dirichlet-multinomial preparation        ####
+###################################################
+
+"""
+Load raw CoMix-UK contacts + participants with NO age-group or date filtering.
+
+The returned `df` contact table carries `:phys_contact`, `:duration_multi`,
+`:cnt_home` (standardised to "true"/"false"), and `:date` (the participant's
+diary day). `df_part` is the matching participant table with `:date`.
+
+Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
+"""
+function read_comix_uk_contact_raw()
+    df, df_part = read_raw_sc_data_with_sday("comix_uk")
+    df = innerjoin(df, df_part, on = :part_id)
+    standardise_cnt_home_values!(df)
+    rename_part_id_to_uid!(df, df_part)
+    return (df, df_part)
+end
+
+"""
+Load CoMix-UK contacts + participants for the latter half of 2021
+(2021-07-01 ≤ date < 2022-01-01), restricted to adult participants.
+
+The returned `df` contact table carries `:phys_contact`, `:duration_multi`,
+`:cnt_home` (standardised to "true"/"false"), and `:date` (the participant's
+diary day). `df_part` is the matching participant table with `:date`.
+
+Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
+"""
+function read_comix_uk_contact_adult_2021Jul_2021Dec()
+    df, df_part = read_raw_sc_data_with_sday("comix_uk")
+
+    # part_age is an age-group string (e.g. "18-29"); use the categorical filter.
+    df_part = filter_adult_cate(df_part, col = :part_age)
+
+    # Date filter: 2021-07-01 ≤ date < 2022-01-01 on the participant table
+    # (the contact table inherits the filter via inner join).
+    df_part = @subset(df_part, Date(2021, 7, 1) .<= :date .< Date(2022, 1, 1))
+    df = innerjoin(df, df_part, on = :part_id)
+
+    standardise_cnt_home_values!(df)
+    rename_part_id_to_uid!(df, df_part)
+    return (df, df_part)
+end
+
+"""
+Build inputs for `model_dm_logdeg` / `model_dm_logdeg_constprec` for one
+`(setting, outcome)` panel.
+
+- `setting`  ∈ {"home", "non-home"}.
+- `outcome`  ∈ {:duration_multi, :phys_contact}.
+- `K`        — number of categories (5 for duration, 2 for physical).
+- `impute_missing_duration` — when `outcome == :duration_multi`, replace missing
+  duration values with `1` (<5 min). Always drops rows missing the chosen
+  outcome regardless (after imputation, no rows remain missing for duration).
+- `drop_all_missing` — sensitivity flag: if `true`, drop ALL rows where
+  *either* `:duration_multi` or `:phys_contact` is missing/`"NA"` before
+  counting (used for the all-missing-dropped sensitivity analysis).
+
+Each output row is one (`part_id_d`, diary `date`) cell with at least one
+contact in the requested setting.
+
+Returns a `NamedTuple` with fields:
+- `X::Matrix{Float64}` — `[1 log(n)]`, size `N × 2`.
+- `Y::Matrix{Int}`     — counts per category, size `N × K`.
+- `n::Vector{Int}`     — total contacts per cell.
+- `meta::DataFrame`    — `:part_id_d`, `:date`.
+"""
+function prepare_dm_inputs(df_contacts::DataFrame; setting::String,
+                           outcome::Symbol, K::Int,
+                           impute_missing_duration::Bool = true,
+                           drop_all_missing::Bool = false)
+    setting in ("home", "non-home") || error("setting must be \"home\" or \"non-home\"")
+    outcome in (:duration_multi, :phys_contact) ||
+        error("outcome must be :duration_multi or :phys_contact")
+
+    df = copy(df_contacts)
+
+    # Filter by setting using the standardised cnt_home strings.
+    df = setting == "home" ? @subset(df, :cnt_home .== "true") :
+                             @subset(df, :cnt_home .== "false")
+
+    is_missing_val(v) = ismissing(v) || (v isa AbstractString && v == "NA")
+    to_int(v) = v isa AbstractString ? parse(Int, v) : Int(v)
+
+    # Sensitivity policy: drop rows where EITHER outcome is missing.
+    if drop_all_missing
+        df = filter(:duration_multi => !is_missing_val, df)
+        df = filter(:phys_contact   => !is_missing_val, df)
+        df[!, outcome] = [to_int(v) for v in df[:, outcome]]
+    else
+        # Primary policy:
+        #   - duration_multi: impute missing as 1 (<5 min) when imputing,
+        #     otherwise drop missing rows.
+        #   - phys_contact:   drop missing rows.
+        if outcome == :duration_multi
+            if impute_missing_duration
+                df[!, :duration_multi] = [is_missing_val(v) ? 1 : to_int(v)
+                                          for v in df[:, :duration_multi]]
+            else
+                df = filter(:duration_multi => !is_missing_val, df)
+                df[!, :duration_multi] = [to_int(v) for v in df[:, :duration_multi]]
+            end
+        else
+            df = filter(:phys_contact => !is_missing_val, df)
+            df[!, :phys_contact] = [to_int(v) for v in df[:, :phys_contact]]
+        end
+    end
+
+    # Group per (part_id_d, date) and tally per category.
+    grp = combine(groupby(df, [:part_id_d, :date])) do sub
+        counts = zeros(Int, K)
+        for v in sub[:, outcome]
+            if 1 <= v <= K
+                counts[v] += 1
+            end
+        end
+        (; (Symbol("y$k") => counts[k] for k in 1:K)..., n = sum(counts))
+    end
+
+    grp = @subset(grp, :n .> 0)
+
+    Y = Matrix{Int}(grp[:, [Symbol("y$k") for k in 1:K]])
+    n = Vector{Int}(grp[:, :n])
+    X = hcat(ones(length(n)), log.(n))
+    meta = grp[:, [:part_id_d, :date]]
+    return (; X = X, Y = Y, n = n, meta = meta)
+end

@@ -264,3 +264,141 @@ function fit_model_GP(x::Vector{Float64}, model::Function;
 	return sample(model(x), NUTS(max_depth = 10), n_samples;
 		progress = progress)
 end
+
+#########################################################
+##### Dirichlet-multinomial regression on log(deg)  #####
+#########################################################
+
+"""
+Dirichlet-multinomial regression with degree-dependent mean and precision.
+
+- `X::Matrix` is `[1 log(n)]` (size `N × 2`).
+- `Y::Matrix{Int}` is the count matrix (size `N × K`).
+- `n::Vector{Int}` is the row total `sum(Y, dims = 2)[:]`.
+
+η_{i,1} = 0 (reference category); η_{i,k} = β₀_k + β₁_k · log(n_i) for k = 2..K.
+log α0_i = γ₀ + γ₁ · log(n_i).  α_i = softmax(η_i) · α0_i.
+"""
+@model function model_dm_logdeg(X::Matrix, Y::Matrix, n::Vector{Int}; K::Int)
+	N, P = size(X)
+	@assert size(Y) == (N, K)
+	@assert P == 2
+
+	β ~ filldist(Normal(0.0, 1.0), P, K - 1)   # P × (K-1)
+	γ ~ filldist(Normal(0.0, 0.5), P)          # log α0 = γ0 + γ1 · log(n)
+
+	η_rest = X * β                             # N × (K-1)
+	log_α0 = X * γ                             # N
+
+	for i in 1:N
+		ηi = vcat(0.0, view(η_rest, i, :))
+		μi = softmax(ηi)
+		αi = exp(log_α0[i]) .* μi
+		Y[i, :] ~ DirichletMultinomial(n[i], αi)
+	end
+end
+
+"""
+Constant-precision restriction of `model_dm_logdeg`: log α0 = γ0 (no degree
+term in the concentration). Used as the WAIC null when testing whether the
+degree term in the precision is warranted.
+"""
+@model function model_dm_logdeg_constprec(X::Matrix, Y::Matrix, n::Vector{Int}; K::Int)
+	N, P = size(X)
+	@assert size(Y) == (N, K)
+	@assert P == 2
+
+	β  ~ filldist(Normal(0.0, 1.0), P, K - 1)
+	γ0 ~ Normal(0.0, 0.5)
+
+	η_rest = X * β
+
+	for i in 1:N
+		ηi = vcat(0.0, view(η_rest, i, :))
+		μi = softmax(ηi)
+		αi = exp(γ0) .* μi
+		Y[i, :] ~ DirichletMultinomial(n[i], αi)
+	end
+end
+
+"""
+Compute fitted category proportions μ (size `N × K`) from a design matrix `X`
+and a coefficient matrix `β` (size `2 × (K-1)`). Reference category 1 is fixed
+at η = 0; remaining categories use `X * β`.
+"""
+function calc_dm_proportions(X::AbstractMatrix, β::AbstractMatrix)
+	N = size(X, 1)
+	η_rest = X * β                       # N × (K-1)
+	K = size(η_rest, 2) + 1
+	μ = Matrix{Float64}(undef, N, K)
+	for i in 1:N
+		ηi = vcat(0.0, view(η_rest, i, :))
+		μ[i, :] = softmax(ηi)
+	end
+	return μ
+end
+
+"""
+Compute the concentration α0 (size `N`) from a design matrix `X` and γ.
+
+If `γ::AbstractVector`, returns `exp.(X * γ)` (full model).
+If `γ::Real`,           returns `fill(exp(γ), size(X, 1))` (constant precision).
+"""
+calc_dm_alpha0(X::AbstractMatrix, γ::AbstractVector) = exp.(X * γ)
+calc_dm_alpha0(X::AbstractMatrix, γ::Real)           = fill(exp(γ), size(X, 1))
+
+"""
+Per-observation log-likelihood vector for the Dirichlet-multinomial.
+
+Inputs:
+- `Y::Matrix{Int}` (N × K) — observed counts.
+- `n::Vector{Int}` (N)     — row totals.
+- `μ::Matrix`     (N × K) — category proportions.
+- `α0::AbstractVector` or `Real` — per-row concentration.
+
+Returns a length-N vector of `logpdf(DirichletMultinomial(n[i], μ[i,:]·α0[i]), Y[i,:])`.
+"""
+function dm_log_lik_per_obs(Y::Matrix{Int}, n::Vector{Int},
+                            μ::AbstractMatrix, α0)
+	N = size(Y, 1)
+	α0v = α0 isa Real ? fill(α0, N) : α0
+	lp = Vector{Float64}(undef, N)
+	for i in 1:N
+		αi = α0v[i] .* view(μ, i, :)
+		lp[i] = logpdf(DirichletMultinomial(n[i], αi), view(Y, i, :))
+	end
+	return lp
+end
+
+"""
+Build a (S × N) per-draw, per-observation log-likelihood matrix from a Turing
+chain produced by `model_dm_logdeg` or `model_dm_logdeg_constprec`. Suitable
+input for `calc_waic` (`/workdir/src/fit_utils.jl:82`).
+
+`mode == :full`       expects β and γ samples in `chn`.
+`mode == :constprec`  expects β and a scalar γ0 sample in `chn`.
+"""
+function dm_log_lik_matrix(chn::Chains, X::Matrix, Y::Matrix, n::Vector{Int};
+                           K::Int, mode::Symbol = :full)
+	@assert mode in (:full, :constprec)
+	# Flatten parameter draws: (n_iter * n_chain) rows.
+	df = DataFrame(chn)
+	S  = nrow(df)
+	N  = size(Y, 1)
+	loglik = Matrix{Float64}(undef, S, N)
+	# Pre-compute β index labels: β[i, j] for i in 1:2, j in 1:(K-1).
+	β_cols = [Symbol("β[$i, $j]") for i in 1:2, j in 1:(K - 1)]
+	for s in 1:S
+		β = [df[s, β_cols[i, j]] for i in 1:2, j in 1:(K - 1)]
+		μ = calc_dm_proportions(X, β)
+		if mode == :full
+			γ = [df[s, Symbol("γ[$i]")] for i in 1:2]
+			α0 = calc_dm_alpha0(X, γ)
+		else
+			γ0 = df[s, :γ0]
+			α0 = calc_dm_alpha0(X, γ0)
+		end
+		loglik[s, :] = dm_log_lik_per_obs(Y, n, μ, α0)
+	end
+	return loglik
+end
