@@ -708,6 +708,10 @@ Build inputs for `model_dm_logdeg` / `model_dm_logdeg_constprec` for one
 - `drop_all_missing` — sensitivity flag: if `true`, drop ALL rows where
   *either* `:duration_multi` or `:phys_contact` is missing/`"NA"` before
   counting (used for the all-missing-dropped sensitivity analysis).
+- `dropna_keep_n` — if `true`, count NA outcomes into the per-cell degree
+  `n` (the regression predictor), but exclude them from the category counts
+  `Y`. Cells whose observed-outcome count is zero are dropped. Mutually
+  exclusive with `drop_all_missing`.
 
 Each output row is one (`part_id_d`, diary `date`) cell with at least one
 contact in the requested setting.
@@ -715,16 +719,21 @@ contact in the requested setting.
 Returns a `NamedTuple` with fields:
 - `X::Matrix{Float64}` — `[1 log(n)]`, size `N × 2`.
 - `Y::Matrix{Int}`     — counts per category, size `N × K`.
-- `n::Vector{Int}`     — total contacts per cell.
+- `n::Vector{Int}`     — total contacts per cell (full degree).
+- `n_obs::Vector{Int}` — per-cell DM trial size = `rowSums(Y)`. Equals `n`
+  unless `dropna_keep_n = true`, in which case it can be smaller.
 - `meta::DataFrame`    — `:part_id_d`, `:date`.
 """
 function prepare_dm_inputs(df_contacts::DataFrame; setting::String,
                            outcome::Symbol, K::Int,
                            impute_missing_duration::Bool = true,
-                           drop_all_missing::Bool = false)
+                           drop_all_missing::Bool = false,
+                           dropna_keep_n::Bool = false)
     setting in ("home", "non-home") || error("setting must be \"home\" or \"non-home\"")
     outcome in (:duration_multi, :phys_contact) ||
         error("outcome must be :duration_multi or :phys_contact")
+    !(drop_all_missing && dropna_keep_n) ||
+        error("drop_all_missing and dropna_keep_n are mutually exclusive")
 
     df = copy(df_contacts)
 
@@ -734,6 +743,31 @@ function prepare_dm_inputs(df_contacts::DataFrame; setting::String,
 
     is_missing_val(v) = ismissing(v) || (v isa AbstractString && v == "NA")
     to_int(v) = v isa AbstractString ? parse(Int, v) : Int(v)
+
+    if dropna_keep_n
+        # Keep all setting rows so per-cell degree includes NA-outcome contacts.
+        # Y excludes NA values (they contribute nothing to any category); the
+        # DM trial size becomes rowSums(Y) ≤ n.
+        grp = combine(groupby(df, [:part_id_d, :date])) do sub
+            counts  = zeros(Int, K)
+            n_total = nrow(sub)
+            for v in sub[:, outcome]
+                if !is_missing_val(v)
+                    kk = to_int(v)
+                    1 <= kk <= K && (counts[kk] += 1)
+                end
+            end
+            (; (Symbol("y$k") => counts[k] for k in 1:K)...,
+                n = n_total, n_obs = sum(counts))
+        end
+        grp = @subset(grp, :n_obs .> 0)
+        Y     = Matrix{Int}(grp[:, [Symbol("y$k") for k in 1:K]])
+        n     = Vector{Int}(grp[:, :n])
+        n_obs = Vector{Int}(grp[:, :n_obs])
+        X     = hcat(ones(length(n)), log.(n))
+        meta  = grp[:, [:part_id_d, :date]]
+        return (; X = X, Y = Y, n = n, n_obs = n_obs, meta = meta)
+    end
 
     # Sensitivity policy: drop rows where EITHER outcome is missing.
     if drop_all_missing
@@ -776,5 +810,5 @@ function prepare_dm_inputs(df_contacts::DataFrame; setting::String,
     n = Vector{Int}(grp[:, :n])
     X = hcat(ones(length(n)), log.(n))
     meta = grp[:, [:part_id_d, :date]]
-    return (; X = X, Y = Y, n = n, meta = meta)
+    return (; X = X, Y = Y, n = n, n_obs = n, meta = meta)
 end
