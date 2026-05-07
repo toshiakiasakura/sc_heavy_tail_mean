@@ -188,3 +188,244 @@ function plot_ccdf_across_survey(df_dd::DataFrame; col = :key, kwds...)
 	end
 	pl
 end
+
+
+###################################################
+##### Effective (duration-weighted) degree     ####
+###################################################
+
+# Bin midpoints (minutes) for `:duration_multi` levels 1..5.
+# Level 5 (>4h) is capped at the reference t_ref = 300 min so its weight is 1.
+const _DURATION_T_MID = (2.5, 10.0, 37.5, 150.0, 300.0)
+
+_is_dur_na(v) = ismissing(v) || (v isa AbstractString && v == "NA")
+_dur_to_int(v) = v isa AbstractString ? parse(Int, v) : Int(v)
+
+"""
+    duration_weight(d, β)
+
+Per-contact weight from `:duration_multi` ∈ {1..5} and rate β (per minute).
+Missing / `"NA"` → treated as <5 min (level 1) per inst/2_effective_contact_degree.md.
+
+Reference midpoints (min): 1→2.5, 2→10, 3→37.5, 4→150, 5→cap (>4h ⇒ w=1).
+The closed form is `w = 1 - (300 - t_mid) * β` with `t_mid = 300` for level 5.
+"""
+function duration_weight(d, β::Real)
+    d_eff = _is_dur_na(d) ? 1 : _dur_to_int(d)
+    1 <= d_eff <= 5 || error("unexpected :duration_multi value $d")
+    return 1.0 - (300.0 - _DURATION_T_MID[d_eff]) * β
+end
+
+const _DURATION_LABELS = ("<5 min", "5–15 min", "15 min–1 h", "1–4 h", ">4 h")
+
+"""
+    print_duration_weights(β; io=stdout)
+
+Print `duration_weight(d, β)` for each `:duration_multi` level d ∈ 1..5.
+"""
+function print_duration_weights(β::Real; io::IO = stdout)
+    println(io, "duration_weight(d, β = $β /min):")
+    for d in 1:5
+        @printf(io, "  d=%d  %-11s  t_mid=%5.1f min  w=%.6f\n",
+                d, _DURATION_LABELS[d], _DURATION_T_MID[d], duration_weight(d, β))
+    end
+end
+
+"""
+    contact_degrees(df, df_part; setting, weighted=false, β=0.00225)
+
+Vector of degrees, one entry per (`:part_id_d`, `:date`) row in `df_part`.
+
+- `setting ∈ (:all, :home, :nonhome)` filters via `:cnt_home` (`"true"`/`"false"`).
+- `weighted=false` → `Vector{Int}` (count of contacts).
+- `weighted=true`  → `Vector{Float64}` (sum of `duration_weight`, NA → <5min).
+
+Participant-days with no contacts in the chosen setting receive 0 / 0.0.
+"""
+function contact_degrees(df::DataFrame, df_part::DataFrame;
+                         setting::Symbol, weighted::Bool=false, β::Real=0.00225)
+    sub = setting === :home    ? @subset(df, :cnt_home .== "true")  :
+          setting === :nonhome ? @subset(df, :cnt_home .== "false") :
+          setting === :all     ? df :
+          error("setting must be :all, :home, or :nonhome")
+
+    keys_part = unique(@select(df_part, :part_id_d, :date))
+
+    if weighted
+        sub = @transform(sub, :w = duration_weight.(:duration_multi, β))
+        agg = combine(groupby(sub, [:part_id_d, :date]), :w => sum => :deg)
+        joined = leftjoin(keys_part, agg, on = [:part_id_d, :date])
+        return coalesce.(joined.deg, 0.0)
+    else
+        agg = combine(groupby(sub, [:part_id_d, :date]), nrow => :deg)
+        joined = leftjoin(keys_part, agg, on = [:part_id_d, :date])
+        return coalesce.(joined.deg, 0)
+    end
+end
+
+"""
+    dm_expected_weight(fit, n, β)
+
+E[w | n] under the 2j Dirichlet-multinomial fit. `fit.β` is the (P × K=5)
+coefficient matrix from `fit_mglm_dm`. For each participant-day degree `n`,
+proportion vector p(n) is the softmax of `[1 log(n)] · fit.β`; the expected
+weight is `sum(p(n) .* w_levels(β))`.
+"""
+function dm_expected_weight(fit::NamedTuple, n::Integer, β::Real)
+    n == 0 && return 0.0
+    P = size(fit.β, 1)
+    Xn = P == 1 ? reshape([1.0], 1, 1) : reshape([1.0, log(Float64(n))], 1, 2)
+    p = mglm_dm_proportions(fit.β, Xn)               # 1 × 5
+    w_levels = (duration_weight(k, β) for k in 1:5)
+    return sum(p[1, k] * w for (k, w) in enumerate(w_levels))
+end
+
+"""
+    contact_degrees_dm_imputed(df, df_part, fit; setting, β=0.00225)
+
+Vector of weighted degrees per (`:part_id_d`, `:date`). NA contacts are
+imputed softly: each contributes `dm_expected_weight(fit, n, β)` where `n` is
+the participant-day's total contact count in the chosen setting (NA included).
+
+`fit` is an MGLM DM fit produced by `fit_mglm_dm(X, Y)` on the same setting,
+where `X = [1 log(n)]` and `Y` is the 5-column duration count matrix from
+`prepare_dm_inputs(...; outcome=:duration_multi, K=5, dropna_keep_n=true)`.
+
+`setting` must be `:home` or `:nonhome`. For an "all" effective degree,
+combine the two settings per (participant, date).
+"""
+function contact_degrees_dm_imputed(df::DataFrame, df_part::DataFrame,
+                                    fit::NamedTuple;
+                                    setting::Symbol, β::Real=0.00225)
+    sub = setting === :home    ? @subset(df, :cnt_home .== "true")  :
+          setting === :nonhome ? @subset(df, :cnt_home .== "false") :
+          error(":all is not supported here; combine :home + :nonhome instead")
+
+    sub = @transform(sub,
+        :w_obs = ifelse.(_is_dur_na.(:duration_multi),
+                         0.0,
+                         duration_weight.(:duration_multi, β)),
+        :is_na = _is_dur_na.(:duration_multi))
+
+    agg = combine(groupby(sub, [:part_id_d, :date]),
+                  :w_obs => sum => :w_sum,
+                  :is_na => sum => :n_na,
+                  nrow         => :n_tot)
+
+    agg = @transform(agg,
+        :deg = :w_sum .+ :n_na .* dm_expected_weight.(Ref(fit), :n_tot, β))
+
+    keys_part = unique(@select(df_part, :part_id_d, :date))
+    joined = leftjoin(keys_part, @select(agg, :part_id_d, :date, :deg),
+                      on = [:part_id_d, :date])
+    return coalesce.(joined.deg, 0.0)
+end
+
+
+###################################################
+##### Continuous-degree plotting (variants 2,3) ###
+###################################################
+
+"""Empirical CCDF on continuous values, log-y axis. Uses only positive entries."""
+function plot_ccdf_continuous!(plt::Plots.Plot, x::AbstractVector{<:Real};
+                               label = "", color = :auto, kwds...)
+    xs = sort(filter(>(0), x))
+    isempty(xs) && return plt
+    n = length(xs)
+    ccdf = (n .- (0:n-1)) ./ n           # 1, (n-1)/n, …, 1/n
+    plot!(plt, xs, ccdf;
+          yscale = :log10,
+          xlabel = "weighted degree", ylabel = "CCDF",
+          label = label, color = color, kwds...)
+end
+
+plot_ccdf_continuous(x::AbstractVector{<:Real}; kwds...) =
+    plot_ccdf_continuous!(plot(), x; kwds...)
+
+"""Histogram-based PDF on continuous values, semilog-y, fixed bin width."""
+function plot_pdf_hist!(plt::Plots.Plot, x::AbstractVector{<:Real};
+                        label = "", color = :auto, binwidth::Real = 0.5, kwds...)
+    isempty(x) && return plt
+    edges = 0:binwidth:(maximum(x) + binwidth)
+    histogram!(plt, x;
+               bins = edges, normalize = :pdf,
+               yscale = :log10,
+               xlabel = "weighted degree", ylabel = "density",
+               label = label, color = color, alpha = 0.4, kwds...)
+end
+
+plot_pdf_hist(x::AbstractVector{<:Real}; kwds...) =
+    plot_pdf_hist!(plot(), x; kwds...)
+
+function plot_pdf_hist_single_survey(x_all, x_home, x_non; binwidth = 0.5)
+    p = plot(; xlim = [0, 50])
+    plot_pdf_hist!(p, x_all;  label = "all",      color = :black, binwidth = binwidth)
+    plot_pdf_hist!(p, x_home; label = "home",     color = :red,   binwidth = binwidth)
+    plot_pdf_hist!(p, x_non;  label = "non-home", color = :blue,  binwidth = binwidth)
+    return p
+end
+
+function plot_ccdf_continuous_single_survey(x_all, x_home, x_non)
+    p = plot(; xaxis = :log10, xlim = [1, 10_000])
+    plot_ccdf_continuous!(p, x_all;  label = "all",      color = :black)
+    plot_ccdf_continuous!(p, x_home; label = "home",     color = :red)
+    plot_ccdf_continuous!(p, x_non;  label = "non-home", color = :blue)
+    return p
+end
+
+# Three-weighting overlay (one panel per setting). Compares unweighted,
+# weighted (NA → <5min), and weighted (DM-imputed NA) for the same
+# `(part_id_d, date)` cells.
+function plot_pdf_hist_by_weighting(x_unw, x_w, x_w_imp; binwidth = 0.5)
+    p = plot(; xlim = [0, 50])
+    plot_pdf_hist!(p, x_unw;   label = "unweighted",       color = :black,  binwidth = binwidth)
+    plot_pdf_hist!(p, x_w;     label = "weighted (NA→<5)", color = :orange, binwidth = binwidth)
+    plot_pdf_hist!(p, x_w_imp; label = "weighted (DM)",    color = :purple, binwidth = binwidth)
+    return p
+end
+
+function plot_ccdf_continuous_by_weighting(x_unw, x_w, x_w_imp)
+    p = plot(; xaxis = :log10, xlim = [1, 10_000])
+    plot_ccdf_continuous!(p, x_unw;   label = "unweighted",       color = :black)
+    plot_ccdf_continuous!(p, x_w;     label = "weighted (NA→<5)", color = :orange)
+    plot_ccdf_continuous!(p, x_w_imp; label = "weighted (DM)",    color = :purple)
+    return p
+end
+
+"""
+    plot_weighting_compare(x_unw, x_w, x_w_imp; setting_label, binwidth=0.5)
+
+PDF + CCDF panels overlaying the three weighting variants. Returns a single
+`Plots.Plot` titled with `setting_label`.
+"""
+function plot_weighting_compare(x_unw, x_w, x_w_imp;
+                                setting_label::String, binwidth::Real = 0.5)
+    p_pdf  = plot_pdf_hist_by_weighting(x_unw, x_w, x_w_imp; binwidth = binwidth)
+    p_ccdf = plot_ccdf_continuous_by_weighting(x_unw, x_w, x_w_imp)
+    plot(p_pdf, p_ccdf; layout = (1, 2), size = (900, 400),
+         plot_title = "Weighting comparison — $setting_label")
+end
+
+"""
+    plot_ccdf_beta_compare(x_unw, x_w, x_w_2β, x_imp, x_imp_2β; setting_label)
+
+CCDF-only overlay comparing the three weighting variants at β and at 2β.
+Solid lines are β; dashed lines are 2β. Unweighted appears once (β-free).
+"""
+function plot_ccdf_beta_compare(x_unw, x_w, x_w_2β, x_imp, x_imp_2β;
+                                setting_label::String)
+    p = plot(; xaxis = :log10, xlim = [1, 10_000],
+              size = (700, 450),
+              title = "Weighting + β sensitivity — $setting_label")
+    plot_ccdf_continuous!(p, x_unw;     label = "unweighted",
+                          color = :black)
+    plot_ccdf_continuous!(p, x_w;       label = "weighted (NA→<5), β",
+                          color = :orange, linestyle = :solid)
+    plot_ccdf_continuous!(p, x_w_2β;    label = "weighted (NA→<5), 1.5β",
+                          color = :orange, linestyle = :dash)
+    plot_ccdf_continuous!(p, x_imp;     label = "weighted (DM), β",
+                          color = :purple, linestyle = :solid)
+    plot_ccdf_continuous!(p, x_imp_2β;  label = "weighted (DM), 1.5β",
+                          color = :purple, linestyle = :dash)
+    return p
+end
