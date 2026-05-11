@@ -6,7 +6,8 @@
 category_names_viz = Dict(
     :duration_multi    => ["<5min", "5–15min", "15min–1hr", "1–4hr", "4+hr"],
     :duration_multi_na => ["<5min", "5–15min", "15min–1hr", "1–4hr", "4+hr", "NA"],
-    :phys_contact      => ["physical", "non-physical"])
+    :phys_contact      => ["physical", "non-physical"],
+    :duration_danon    => ["<10min", "11–30min", "31–60min", ">60min"])
 
 # Candidate raw-number ticks for log-scaled degree axes.
 _xticks_raw = [1, 2, 5, 10, 20, 50, 100, 500, 1000, 5000]
