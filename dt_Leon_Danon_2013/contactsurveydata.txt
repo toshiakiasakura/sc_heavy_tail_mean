@@ -1,0 +1,90 @@
+		     Social Contact Study - Data
+
+The zip file contactsurveydata.zip contains three CSV (comma-separated
+value) files:
+
+Contact_data.csv - details about responders' contacts
+Person_data.csv - details about responders
+WKW_data.csv - details of the connections between contacts
+
+1) Contact data
+
+This contains the following 38 fields:
+
+C_CID	      	  	          : primary key
+C_Distances_1			  : At home or <2 miles from home
+C_Distances_2			  : 3-10 miles from home
+C_Distances_3			  : 11-50 miles from home
+C_Distances_4			  : >=51 miles from hom
+C_Duration			  : Which duration-category was selected?
+C_How_Often			  : how frequent is this contact?
+				  :  1: <=10min, 2:11-30min,
+				  :  3:31-60min, 4:>60min
+C_MainWhere			  : Location where most time spent
+C_MaxDistance			  : The highest distance class selected
+C_NEW_Estimated_Contact_Time_1	  : Estimated weighted contact time - 
+C_NEW_Estimated_Contact_Time_2	  :  (20 values from a stochastic process;
+C_NEW_Estimated_Contact_Time_3	  :  see paper for details)
+C_NEW_Estimated_Contact_Time_4
+C_NEW_Estimated_Contact_Time_5
+C_NEW_Estimated_Contact_Time_6
+C_NEW_Estimated_Contact_Time_7
+C_NEW_Estimated_Contact_Time_8
+C_NEW_Estimated_Contact_Time_9
+C_NEW_Estimated_Contact_Time_10
+C_NEW_Estimated_Contact_Time_11
+C_NEW_Estimated_Contact_Time_12
+C_NEW_Estimated_Contact_Time_13
+C_NEW_Estimated_Contact_Time_14
+C_NEW_Estimated_Contact_Time_15
+C_NEW_Estimated_Contact_Time_16
+C_NEW_Estimated_Contact_Time_17
+C_NEW_Estimated_Contact_Time_18
+C_NEW_Estimated_Contact_Time_19
+C_NEW_Estimated_Contact_Time_20
+C_Number			  : Number of people in this group    
+C_PID				  : Person this is a contact of
+C_Touch				  : Was there physical contact?
+C_Wheres_1			  : Home
+C_Wheres_2			  : Work/school
+C_Wheres_3			  : Travel
+C_Wheres_4			  : Leisure (web only)
+C_Wheres_5			  : Shopping (web only)
+C_Wheres_6			  : Other
+
+2) Person Data
+
+This has the following 21 fields:
+
+P_Contact_Hours			  : Total contact hours
+P_ID				  : Primary key
+P_Post				  : Responder filled in a postal form
+P_UK				  : Responder is from the UK
+P_WKW_Suspicious		  : who-knows-who data probably erroneous
+P_Web				  : Responder filled in the online form
+P_age				  : Age of responder
+P_country_str			  : Country responder lives in
+P_date_stamp_str		  : Date survey filled in (dubious quality)
+P_day				  : Day of week answering about (0=Sunday)
+P_epoch_number			  : Timestamp (seconds since 1 January 1970)
+P_foreign			  : Responder not from UK
+P_gender			  : gender (0=female,1=male,-1=didn't say)
+P_household_size		  : household size including responder
+P_latitude			  : Latitude of P_postcode_str
+P_longitude			  : Longitude of P_postcode_str
+P_new_occupation_code	          : Code for occupation type
+P_new_occupation_str		  : String describing occupation type
+P_occupation_str		  : Occupation as given by responder
+P_postcode_str			  : First part of responder's postcode
+P_total_contacts		  : number of contacts
+
+3) Data about links between contacts "Who Knows Whom"
+
+This contains the following 4 fields; each line describes a
+relationship between CID1 and CID2
+
+WKW_CID1      	  	          : Contact ID (link to C_CID)
+WKW_CID2			  : Contact ID (link to C_CID)
+WKW_Num				  : Number of possible contacts
+				  :  (product of C_Numbers)
+WKW_PID				  : Person ID (link to P_PID)
