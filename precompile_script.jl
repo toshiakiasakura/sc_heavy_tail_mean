@@ -7,6 +7,7 @@ using Distributions
 using Glob
 using GLM
 using Images
+using JDF
 using JLD2
 using LaTeXStrings
 using LinearAlgebra
@@ -52,3 +53,12 @@ end
 
 model = demo(1.0)
 chain = sample(model, NUTS(0.65), 50; progress=false)
+
+# Exercise JDF round-trip so the compiled sysimage has DataFrame<->JDF deserialisation paths warm.
+let
+    tmp = mktempdir()
+    df_jdf = DataFrame(a = 1:3, b = ["x", "y", "z"], d = Date(2021, 7, 1):Day(1):Date(2021, 7, 3))
+    JDF.save(joinpath(tmp, "t.jdf"), df_jdf)
+    df_back = DataFrame(JDF.load(joinpath(tmp, "t.jdf")))
+    @assert nrow(df_back) == 3
+end

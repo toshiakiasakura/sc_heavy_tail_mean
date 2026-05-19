@@ -15,6 +15,7 @@ packages = [
     :GLM,
     :Images,
     :Interpolations,
+    :JDF,
     :JLD2,
     :KernelDensity,
     :LaTeXStrings,
