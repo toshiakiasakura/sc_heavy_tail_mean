@@ -2,7 +2,8 @@
 
 function read_comix_uk_adult_time_series()
     df = read_comix_uk_contact()  |> standardise_comix_uk_to_socialmixer_data;
-    df_part = CSV.read("../dt_comix_no_public/part_uk.csv", DataFrame);
+    df_part = DataFrame(JDF.load("../dt_comix_no_public/part_uk.jdf";
+        cols = [:part_wave_uid, :part_age_group, :part_gender_nb, :date]));
 
     df_part = @select(df_part,
         :part_id = :part_wave_uid,

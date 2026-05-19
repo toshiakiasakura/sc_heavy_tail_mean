@@ -4,6 +4,20 @@
 
 DIR_SURVEY = "../dt_surveys/"
 
+# JDF v0.5.4 bug workaround: `JDF.load(path; cols=...)` reverses the indexin
+# direction at loadjdf.jl:27, so column data and labels are shuffled whenever
+# the requested order differs from the on-disk metadata order. Loading one
+# column at a time bypasses the bug entirely (single-column requests have
+# nothing to permute).
+function safe_jdf_load(path::AbstractString; cols::AbstractVector)
+    df = DataFrame()
+    for c in Symbol.(cols)
+        d = DataFrame(JDF.load(path; cols=[c]))
+        df[!, c] = d[!, c]
+    end
+    return df
+end
+
 """
 You can merge `comix_uk_sday.csv` to `contact_common.csv` with a merge key of `part_id`.
 Use `read_raw_sc_data_with_sday` to do this automatically.
@@ -478,6 +492,96 @@ end
 ##### CoMix UK data #####
 #########################
 
+# Bin a contact-duration value (minutes) into the legacy K=5 `duration_multi`
+# code. Boundaries follow the midpoints documented in degree_dist.jl
+# (`_DURATION_T_MID`: 2.5, 10, 37.5, 150, ∞).
+# `cnt_minutes_max` is sometimes loaded as a string column (e.g. "1440", "NA")
+# when the underlying JDF/CSV has mixed values; parse numeric strings, treat
+# "NA"/"" as missing.
+function _minutes_to_duration_multi(m)
+	ismissing(m) && return missing
+	if m isa AbstractString
+		(m == "NA" || m == "") && return missing
+		m = parse(Int, m)
+	end
+	m < 5   && return 1
+	m < 15  && return 2
+	m < 60  && return 3
+	m < 240 && return 4
+	return 5
+end
+
+# Categorical `cnt_total_time` strings used in the Jul-2021+ CoMix UK waves
+# (the numeric `cnt_minutes_max` column is entirely NA in that window).
+function _cnt_total_time_to_duration_multi(v)
+	ismissing(v)   && return missing
+	v == "<5m"     && return 1
+	v == "5m-14m"  && return 2
+	v == "15m-59m" && return 3
+	v == "60m-4h"  && return 4
+	v == "4h+"     && return 5
+	return missing
+end
+
+# Prefer the numeric column when populated; otherwise fall back to the
+# categorical one. Returns `missing` if both are. `mins` may be an
+# `"NA"` string when the column is stored as a String column in the JDF,
+# in which case `_minutes_to_duration_multi` yields `missing` and we
+# fall back to the categorical column.
+function _uk_duration_multi(mins, cat)
+	r = _minutes_to_duration_multi(mins)
+	!ismissing(r) ? r : _cnt_total_time_to_duration_multi(cat)
+end
+
+# Map `cnt_phys` (1 = physical, 0 = non-physical) in dt_comix_no_public to the
+# legacy `phys_contact` coding (1 = physical, 2 = non-physical).
+_cnt_phys_to_phys_contact(v) =
+	ismissing(v) ? missing : (v == 1 ? 1 : 2)
+
+"""
+Load raw CoMix-UK contacts and participants from `dt_comix_no_public/` and
+reshape them into the legacy contact/participant column schema that the rest
+of the project consumes.
+
+Contact df columns: `:part_id` (= `part_wave_uid`), `:cont_id`, `:date`,
+`:cnt_home`, `:cnt_work`, `:cnt_school`, `:cnt_transport`, `:cnt_otherplace`,
+`:cnt_household`, `:phys_contact` (∈ {1, 2}), `:duration_multi` (∈ {1..5}).
+
+Participant df columns: `:part_id`, `:hh_id`, `:part_age` (age-group string),
+`:part_gender`, `:date`, `:wave`.
+"""
+function read_comix_uk_raw_contacts_and_part()
+	df = safe_jdf_load("../dt_comix_no_public/contacts_uk.jdf";
+		cols = [:part_wave_uid, :contact, :date,
+			:cnt_home, :cnt_work, :cnt_school,
+			:cnt_public_transport, :cnt_other_place, :cnt_household,
+			:cnt_phys, :cnt_minutes_max, :cnt_total_time])
+	df_part = safe_jdf_load("../dt_comix_no_public/part_uk.jdf";
+		cols = [:part_wave_uid, :hhld_wave_uid,
+			:part_age_group, :part_gender_nb, :date, :wave])
+
+	df = @select(df,
+		:part_id = :part_wave_uid,
+		:cont_id = :contact,
+		:date,
+		:cnt_home, :cnt_work, :cnt_school,
+		:cnt_transport = :cnt_public_transport,
+		:cnt_otherplace = :cnt_other_place,
+		:cnt_household,
+		:phys_contact = _cnt_phys_to_phys_contact.(:cnt_phys),
+		:duration_multi = _uk_duration_multi.(:cnt_minutes_max, :cnt_total_time),
+	)
+
+	df_part = @select(df_part,
+		:part_id = :part_wave_uid,
+		:hh_id = :hhld_wave_uid,
+		:part_age = :part_age_group,
+		:part_gender = :part_gender_nb,
+		:date, :wave,
+	)
+	return (df, df_part)
+end
+
 function read_comix_uk_dds()
 	df_comix, df_part = read_comix_uk_contact_adult_2021Jul_2022Mar();
 	return get_df_dd_single(df_comix, df_part, "CoMix_uk_internal")
@@ -489,7 +593,8 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 	end
 	df_comix = read_comix_uk_contact() |> filter_date
 	df_comix = standardise_comix_uk_to_socialmixer_data(df_comix)
-	df_part = CSV.read("../dt_comix_no_public/part_uk.csv", DataFrame) |>
+	df_part = safe_jdf_load("../dt_comix_no_public/part_uk.jdf";
+		cols = [:part_wave_uid, :part_age_group, :part_gender_nb, :date]) |>
 			  filter_date
 	# Standardise columns.
 	df_part = @select(df_part,
@@ -505,7 +610,8 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 end
 
 function read_comix_uk_contact()
-	df_comix = CSV.read("../dt_comix_no_public/contacts_uk.csv", DataFrame)
+	df_comix = safe_jdf_load("../dt_comix_no_public/contacts_uk.jdf";
+		cols = [:part_wave_uid, :cnt_household, :cnt_home, :cnt_work, :date])
 	df_comix[!, :year_month] = convert_date_to_year_month.(df_comix.date)
 	df_comix[!, :year_q] = convert_date_to_quarter.(df_comix.date)
 	return df_comix
@@ -662,8 +768,8 @@ diary day). `df_part` is the matching participant table with `:date`.
 Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
 """
 function read_comix_uk_contact_raw()
-    df, df_part = read_raw_sc_data_with_sday("comix_uk")
-    df = innerjoin(df, df_part, on = :part_id)
+    df, df_part = read_comix_uk_raw_contacts_and_part()
+    df = innerjoin(df, df_part, on = [:part_id, :date])
     standardise_cnt_home_values!(df)
     rename_part_id_to_uid!(df, df_part)
     return (df, df_part)
@@ -680,7 +786,7 @@ diary day). `df_part` is the matching participant table with `:date`.
 Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
 """
 function read_comix_uk_contact_adult_2021Jul_2021Dec()
-    df, df_part = read_raw_sc_data_with_sday("comix_uk")
+    df, df_part = read_comix_uk_raw_contacts_and_part()
 
     # part_age is an age-group string (e.g. "18-29"); use the categorical filter.
     df_part = filter_adult_cate(df_part, col = :part_age)

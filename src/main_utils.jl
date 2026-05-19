@@ -8,6 +8,7 @@ using Distributions
 using Glob
 using GLM
 using Images
+using JDF
 using JLD2
 using LaTeXStrings
 using LinearAlgebra
