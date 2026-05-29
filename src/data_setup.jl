@@ -4,16 +4,14 @@
 
 DIR_SURVEY = "../dt_surveys/"
 
-# JDF v0.5.4 bug workaround: `JDF.load(path; cols=...)` reverses the indexin
-# direction at loadjdf.jl:27, so column data and labels are shuffled whenever
-# the requested order differs from the on-disk metadata order. Loading one
-# column at a time bypasses the bug entirely (single-column requests have
-# nothing to permute).
-function safe_jdf_load(path::AbstractString; cols::AbstractVector)
+# Load selected columns of an Arrow file into a DataFrame. Columns are
+# materialised (copied) into standard Julia vectors so downstream code can
+# mutate them without worrying about Arrow's read-only memory-mapped views.
+function read_arrow_df(path::AbstractString; cols::AbstractVector)
+    t = Arrow.Table(path)
     df = DataFrame()
     for c in Symbol.(cols)
-        d = DataFrame(JDF.load(path; cols=[c]))
-        df[!, c] = d[!, c]
+        df[!, c] = copy(t[c])
     end
     return df
 end
@@ -496,7 +494,7 @@ end
 # code. Boundaries follow the midpoints documented in degree_dist.jl
 # (`_DURATION_T_MID`: 2.5, 10, 37.5, 150, ∞).
 # `cnt_minutes_max` is sometimes loaded as a string column (e.g. "1440", "NA")
-# when the underlying JDF/CSV has mixed values; parse numeric strings, treat
+# when the underlying CSV has mixed values; parse numeric strings, treat
 # "NA"/"" as missing.
 function _minutes_to_duration_multi(m)
 	ismissing(m) && return missing
@@ -525,8 +523,8 @@ end
 
 # Prefer the numeric column when populated; otherwise fall back to the
 # categorical one. Returns `missing` if both are. `mins` may be an
-# `"NA"` string when the column is stored as a String column in the JDF,
-# in which case `_minutes_to_duration_multi` yields `missing` and we
+# `"NA"` string when the column is stored as a String column in the Arrow
+# file, in which case `_minutes_to_duration_multi` yields `missing` and we
 # fall back to the categorical column.
 function _uk_duration_multi(mins, cat)
 	r = _minutes_to_duration_multi(mins)
@@ -538,6 +536,18 @@ end
 _cnt_phys_to_phys_contact(v) =
 	ismissing(v) ? missing : (v == 1 ? 1 : 2)
 
+# Participant-level group-contact flags in `part_uk.arrow`. One column per
+# {child, adult, older_adult} × {work, school, other} cell — raw values are a
+# mix of integers, "no", "Yes", free-text place names, etc., which downstream
+# code classifies via `classify_mc`.
+const _MC_COLS_UK = [
+	:multiple_contacts_child_work,        :multiple_contacts_child_school,        :multiple_contacts_child_other,
+	:multiple_contacts_adult_work,        :multiple_contacts_adult_school,        :multiple_contacts_adult_other,
+	:multiple_contacts_older_adult_work,  :multiple_contacts_older_adult_school,  :multiple_contacts_older_adult_other,
+]
+
+_mc_to_str(v) = ismissing(v) ? missing : string(v)
+
 """
 Load raw CoMix-UK contacts and participants from `dt_comix_no_public/` and
 reshape them into the legacy contact/participant column schema that the rest
@@ -548,17 +558,19 @@ Contact df columns: `:part_id` (= `part_wave_uid`), `:cont_id`, `:date`,
 `:cnt_household`, `:phys_contact` (∈ {1, 2}), `:duration_multi` (∈ {1..5}).
 
 Participant df columns: `:part_id`, `:hh_id`, `:part_age` (age-group string),
-`:part_gender`, `:date`, `:wave`.
+`:part_gender`, `:date`, `:wave`, plus the 9 `multiple_contacts_*` columns
+listed in `_MC_COLS_UK` (normalised to `Union{Missing, String}`).
 """
 function read_comix_uk_raw_contacts_and_part()
-	df = safe_jdf_load("../dt_comix_no_public/contacts_uk.jdf";
+	df = read_arrow_df("../dt_comix_no_public/contacts_uk.arrow";
 		cols = [:part_wave_uid, :contact, :date,
 			:cnt_home, :cnt_work, :cnt_school,
 			:cnt_public_transport, :cnt_other_place, :cnt_household,
-			:cnt_phys, :cnt_minutes_max, :cnt_total_time])
-	df_part = safe_jdf_load("../dt_comix_no_public/part_uk.jdf";
-		cols = [:part_wave_uid, :hhld_wave_uid,
-			:part_age_group, :part_gender_nb, :date, :wave])
+			:cnt_phys, :cnt_minutes_max, :cnt_total_time, :cnt_mass])
+	df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
+		cols = vcat([:part_wave_uid, :hhld_wave_uid,
+				:part_age_group, :part_gender_nb, :date, :wave],
+			_MC_COLS_UK))
 
 	df = @select(df,
 		:part_id = :part_wave_uid,
@@ -570,16 +582,20 @@ function read_comix_uk_raw_contacts_and_part()
 		:cnt_household,
 		:phys_contact = _cnt_phys_to_phys_contact.(:cnt_phys),
 		:duration_multi = _uk_duration_multi.(:cnt_minutes_max, :cnt_total_time),
+		:cnt_mass,
 	)
 
-	df_part = @select(df_part,
+	df_part_out = @select(df_part,
 		:part_id = :part_wave_uid,
 		:hh_id = :hhld_wave_uid,
 		:part_age = :part_age_group,
 		:part_gender = :part_gender_nb,
 		:date, :wave,
 	)
-	return (df, df_part)
+	for c in _MC_COLS_UK
+		df_part_out[!, c] = _mc_to_str.(df_part[!, c])
+	end
+	return (df, df_part_out)
 end
 
 function read_comix_uk_dds()
@@ -593,7 +609,7 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 	end
 	df_comix = read_comix_uk_contact() |> filter_date
 	df_comix = standardise_comix_uk_to_socialmixer_data(df_comix)
-	df_part = safe_jdf_load("../dt_comix_no_public/part_uk.jdf";
+	df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
 		cols = [:part_wave_uid, :part_age_group, :part_gender_nb, :date]) |>
 			  filter_date
 	# Standardise columns.
@@ -610,7 +626,7 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 end
 
 function read_comix_uk_contact()
-	df_comix = safe_jdf_load("../dt_comix_no_public/contacts_uk.jdf";
+	df_comix = read_arrow_df("../dt_comix_no_public/contacts_uk.arrow";
 		cols = [:part_wave_uid, :cnt_household, :cnt_home, :cnt_work, :date])
 	df_comix[!, :year_month] = convert_date_to_year_month.(df_comix.date)
 	df_comix[!, :year_q] = convert_date_to_quarter.(df_comix.date)
