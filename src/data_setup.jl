@@ -49,7 +49,10 @@ function read_adult_chunks(df, df_part)
         :part_id, :part_age, :part_gender, :date)
 	df_part = filter_adult_cate(df_part, col = :part_age)
 	df_part_ch = add_date_chunks(df_part);
-	df = leftjoin(df, df_part_ch, on = :part_id)
+	# Contacts `df` already carries its own `:date`; drop the participant-side
+	# `:date` so the join brings over only the chunk/demographic columns
+	# (`chunk_number`, `mid_date`, …) without a duplicate-name collision.
+	df = leftjoin(df, select(df_part_ch, Not(:date)), on = :part_id)
 	return df, df_part_ch
 end
 
