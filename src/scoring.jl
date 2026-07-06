@@ -54,12 +54,14 @@ function score_wis(df_quant::DataFrame)
     # append a log-scale copy (scale column: "natural" + "log"); score both (inst/1e)
     fq <- transform_forecasts(fq, fun = log_shift, offset = 1)
     sc <- score(fq)
-    by_model   <- as.data.frame(summarise_scores(sc, by = c("model","scale")))
-    by_model_h <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
+    by_model    <- as.data.frame(summarise_scores(sc, by = c("model","scale")))
+    by_model_h  <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
+    by_model_dt <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","scale")))
     """
-    by_model   = rcopy(R"by_model")
-    by_model_h = rcopy(R"by_model_h")
-    return (; by_model, by_model_h)
+    by_model    = rcopy(R"by_model")
+    by_model_h  = rcopy(R"by_model_h")
+    by_model_dt = rcopy(R"by_model_dt")
+    return (; by_model, by_model_h, by_model_dt)
 end
 
 """Native sample CRPS (Gneiting–Raftery energy form, O(M log M)) — cross-check."""

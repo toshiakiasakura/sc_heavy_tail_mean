@@ -161,12 +161,18 @@ is false or NUTS fails, the Pathfinder approximate-posterior draws are returned 
 """
 function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
                    cfg::FrameworkConfig; n_sample::Int = 250, use_nuts::Bool = true,
-                   ndraws_pf::Int = 200, adtype = nothing)
-    Random.seed!(cfg.seed)
+                   ndraws_pf::Int = 200, adtype = nothing, rng = nothing)
+    # `rng === nothing` keeps the original single-thread behaviour (seed the global RNG);
+    # a supplied RNG (an isolated per-fit stream) makes the fit **thread-safe** for the
+    # parallel pre-fit — no shared global-RNG mutation (see `prefit_chains!`).
+    if rng === nothing
+        Random.seed!(cfg.seed)
+        rng = Random.default_rng()
+    end
     w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     model = model_joint(dm, nb, ds, wd, w, cfg)
 
-    pf = pathfinder(model; ndraws = ndraws_pf)
+    pf = pathfinder(model; ndraws = ndraws_pf, rng = rng)
     if !use_nuts
         return (; chn = pf.draws_transformed, model, w, pf)
     end
@@ -178,7 +184,7 @@ function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
     sampler = adtype === nothing ? NUTS() : NUTS(; adtype = adtype)
     local chn
     try
-        chn = sample(model, sampler, n_sample; initial_params = init, progress = false)
+        chn = sample(rng, model, sampler, n_sample; initial_params = init, progress = false)
     catch err
         @warn "NUTS failed; falling back to Pathfinder draws" err
         chn = pf.draws_transformed
@@ -224,14 +230,117 @@ deterministic) so `generated_quantities(model, chn)` works after a reload.
 """
 function fit_or_load_chain(path::AbstractString, dm::ContactDegreeModel,
                            nb::NGMBuilder, ds, wd::WindowData, cfg::FrameworkConfig, w;
-                           use_nuts::Bool = false)
+                           use_nuts::Bool = false, rng = nothing)
     model = model_joint(dm, nb, ds, wd, w, cfg)
     if isfile(path)
         return (; chn = load(path, "result"), model)
     end
-    res = fit_joint(dm, nb, ds, wd, cfg; use_nuts = use_nuts)
+    res = fit_joint(dm, nb, ds, wd, cfg; use_nuts = use_nuts, rng = rng)
     jldsave(path; result = res.chn)
     return (; chn = res.chn, model)
+end
+
+# ---- parallel pre-fitting of the (origin × combo × horizon) chains --------------------
+# Fits are mutually independent (each is one Pathfinder run on its own data), so we fan
+# them out over Julia threads with a concurrency cap chosen to balance CPU and memory.
+# Threading (not Distributed) keeps memory low — one process, shared compiled code — which
+# matters here: each worker process would otherwise re-load/compile the whole Turing stack.
+
+"Available RAM (GiB): `/proc/meminfo` `MemAvailable` (counts reclaimable cache), else `Sys.free_memory`."
+function _mem_available_gib()
+    try
+        for line in eachline("/proc/meminfo")
+            startswith(line, "MemAvailable:") && return parse(Int, split(line)[2]) / 2^20
+        end
+    catch
+    end
+    return Sys.free_memory() / 2^30
+end
+
+"""
+    fit_concurrency(; mem_per_fit_gib=1.0, reserve_gib=4.0)
+
+How many joint fits to run at once, balancing CPU and memory: the minimum of the Julia
+thread count, (physical cores − 1), and how many `mem_per_fit_gib`-sized fits fit in
+available RAM after a `reserve_gib` headroom. Always ≥ 1.
+"""
+function fit_concurrency(; mem_per_fit_gib::Real = 1.0, reserve_gib::Real = 4.0)
+    mem_cap = floor(Int, max(0.0, _mem_available_gib() - reserve_gib) / mem_per_fit_gib)
+    cpu_cap = min(Threads.nthreads(), max(1, Sys.CPU_THREADS - 1))
+    return max(1, min(cpu_cap, mem_cap))
+end
+
+"""
+    prefit_chains!(combos, wins, wds, cfg, apd_by_h_all; grid, setting=:all,
+                   use_nuts=false, save_dir, max_concurrent=fit_concurrency())
+
+Fit every **missing** `(origin × combo × horizon)` joint chain in parallel (bounded to
+`max_concurrent` concurrent fits) and save each to `save_dir/8j_chn_<…>.jld2`; cached
+chains are skipped. Thread-safe by construction: each fit gets its own RNG and model, each
+writes a distinct file, and BLAS is pinned to one thread during the parallel region to
+avoid CPU oversubscription. One spec is fit sequentially first to warm the model/AD
+compilation before fan-out. Afterwards `iterated_forecast` just reloads the cached chains.
+
+`combos` is a vector of `(dm, nb)`; `wins`/`wds` are the per-origin windows and
+`WindowData`; `apd_by_h_all[oi][hi]` is the pre-built `AgePairData` for origin `oi`,
+horizon `hi`. Returns `(; requested, fitted, failed, concurrency)`.
+"""
+function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
+                        grid = cis_age_grid(), setting::Symbol = :all,
+                        use_nuts::Bool = false,
+                        save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                        max_concurrent::Int = fit_concurrency())
+    mkpath(save_dir)
+    specs = NamedTuple[]
+    for (oi, win_o) in enumerate(wins), (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
+        path = joinpath(save_dir,
+            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(win_o.origin)_h$(h).jld2")
+        isfile(path) || push!(specs, (; dm, nb, oi, hi, h, win_o, path))
+    end
+    total = length(combos) * length(wins) * length(cfg.horizons)
+    isempty(specs) && return (; requested = 0, fitted = 0, failed = 0, concurrency = 0)
+
+    K = clamp(max_concurrent, 1, Threads.nthreads())
+    @info "prefit_chains!: fitting $(length(specs))/$total chains; concurrency=$K " *
+          "(threads=$(Threads.nthreads()), cores=$(Sys.CPU_THREADS), " *
+          "mem_avail=$(round(_mem_available_gib(); digits=1)) GiB)"
+
+    fitted = Threads.Atomic{Int}(0)
+    failed = Threads.Atomic{Int}(0)
+    do_fit(s) = begin
+        try
+            ds_h = build_degree_stats(s.dm, apd_by_h_all[s.oi][s.hi], cfg)
+            res  = fit_joint(s.dm, s.nb, ds_h, wds[s.oi], cfg; use_nuts = use_nuts,
+                             rng = Random.Xoshiro(cfg.seed))
+            jldsave(s.path; result = res.chn)
+            Threads.atomic_add!(fitted, 1)
+        catch err
+            Threads.atomic_add!(failed, 1)
+            @warn "prefit fit failed" origin=s.win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
+        end
+    end
+
+    old_blas = LinearAlgebra.BLAS.get_num_threads()
+    LinearAlgebra.BLAS.set_num_threads(1)                 # avoid threads × BLAS oversubscription
+    try
+        do_fit(specs[1])                                  # warm compilation before fan-out
+        if length(specs) > 1
+            sem = Base.Semaphore(K)
+            @sync for s in @view specs[2:end]
+                Threads.@spawn begin
+                    Base.acquire(sem)
+                    try
+                        do_fit(s)
+                    finally
+                        Base.release(sem)
+                    end
+                end
+            end
+        end
+    finally
+        LinearAlgebra.BLAS.set_num_threads(old_blas)
+    end
+    return (; requested = length(specs), fitted = fitted[], failed = failed[], concurrency = K)
 end
 
 """

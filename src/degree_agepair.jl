@@ -33,15 +33,62 @@ contacts_uk.arrow (values \"mass\"/\"individual\"). Missing → not group."
 _is_group_contact(v) = !ismissing(v) && (String(v) == "mass")
 
 """
+    load_raw_contact_inputs(; arrow_path=_ARROW_PATH)
+
+Read the CoMix-UK participant roster and contact table **once** (the two full reads
+`prepare_degree_data` would otherwise repeat per window). Returns `(; df_part, craw)`
+to pass straight into `prepare_degree_data(...; df_part_raw=…, craw_raw=…)`. Also
+exposes the contact date span via `extrema(skipmissing(craw.date))`.
+"""
+function load_raw_contact_inputs(; arrow_path::AbstractString = _ARROW_PATH)
+    _, df_part = read_comix_uk_contact_raw()
+    craw = read_arrow_df(arrow_path;
+        cols = [:part_wave_uid, :date, :cnt_home, :cnt_minutes_max, :cnt_total_time,
+                :cnt_mass, :cnt_age_est_min, :cnt_age_est_max])
+    return (; df_part, craw)
+end
+
+"""
+    available_forecast_origins(cfg; grid=cis_age_grid(), craw=nothing,
+                               infection_start=Date(2020,8,2), step_weeks=1)
+
+Rolling Sunday-start forecast origins the current data support. Lower bound: the
+12-week fit/lag window (`origin−11wk … origin`) must lie within the infection series
+(`infection_start` = first full inc2prev week). Upper bound: the contact-updated
+iterate needs contact data out to `origin + (max horizon − 1)` weeks, so the last
+origin is `last_contact_week − (max(horizons)−1)`. `craw` is the raw contact table
+(from `load_raw_contact_inputs`); if `nothing` it is read.
+"""
+function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
+                                    craw = nothing,
+                                    infection_start::Date = Date(2020, 8, 2),
+                                    step_weeks::Int = 1)
+    craw === nothing && (craw = load_raw_contact_inputs().craw)
+    cweeks = week_start.(collect(skipmissing(craw.date)))
+    last_contact_week = maximum(cweeks)
+    lookback = cfg.n_fit - 1 + cfg.smax                         # all_weeks[1] = origin − lookback
+    tmin = week_start(infection_start) + Day(7 * lookback)
+    tmax = last_contact_week - Day(7 * (maximum(cfg.horizons) - 1))
+    return collect(tmin:Day(7 * step_weeks):tmax)
+end
+
+"""
     prepare_degree_data(win, cfg; grid, setting=:all, arrow_path=_ARROW_PATH)
 
 Build `AgePairData` for the 12-week span `win.all_weeks`. `setting ∈ (:all,:home,
 :nonhome)`. Ambiguous/missing ages are assigned by a single seeded
 population-weighted draw (`MersenneTwister(cfg.seed)`), exactly as in 7j.
+
+Pass `df_part_raw`/`craw_raw` (from `load_raw_contact_inputs()`) to reuse a single
+read of the CoMix participant roster and contact table across many windows — this
+avoids re-reading/re-joining the full Arrow on every call (matters for a rolling
+multi-origin run). Both are filtered to the window's dates internally, so the cached
+frames are never mutated.
 """
 function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
                              grid = cis_age_grid(), setting::Symbol = :all,
-                             arrow_path::AbstractString = _ARROW_PATH)
+                             arrow_path::AbstractString = _ARROW_PATH,
+                             df_part_raw = nothing, craw_raw = nothing)
     weeks = win.all_weeks
     wkset = Dict(w => k for (k, w) in enumerate(weeks))
     A = grid.N; T = length(weeks)
@@ -58,8 +105,8 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
         return sample(rng, cand, Weights(grid.POP[cand]))
     end
 
-    # participant-day roster with a drawn participant bin
-    _, df_part = read_comix_uk_contact_raw()
+    # participant-day roster with a drawn participant bin (reuse cached read if given)
+    df_part = df_part_raw === nothing ? read_comix_uk_contact_raw()[2] : df_part_raw
     df_part = @subset(df_part, (:date .>= dmin) .& (:date .<= dmax))
     piv = parse_age_interval.(df_part.part_age)
     df_part[!, :part_bin] = [assign_bin(a, b) for (a, b) in piv]
@@ -74,10 +121,12 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
         n_roster[wkset[r.wk], r.part_bin] += 1
     end
 
-    # contact table with contactee bin, duration and setting
-    craw = read_arrow_df(arrow_path;
-        cols = [:part_wave_uid, :date, :cnt_home, :cnt_minutes_max, :cnt_total_time,
-                :cnt_mass, :cnt_age_est_min, :cnt_age_est_max])
+    # contact table with contactee bin, duration and setting (reuse cached read if given)
+    craw = craw_raw === nothing ?
+        read_arrow_df(arrow_path;
+            cols = [:part_wave_uid, :date, :cnt_home, :cnt_minutes_max, :cnt_total_time,
+                    :cnt_mass, :cnt_age_est_min, :cnt_age_est_max]) :
+        craw_raw
     craw = @subset(craw, (:date .>= dmin) .& (:date .<= dmax))
     craw = @select(craw,
         :part_id_d      = :part_wave_uid,
