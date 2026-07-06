@@ -8,12 +8,18 @@
 # C*_ab = reciprocity-balanced per-capita contacts (docx: N_a μ_ab = N_b μ_ba).
 
 # ---- the ONLY line that differs between builders ----
-# Inputs are the raw moments of the (zero-included) degree distribution:
-#   K1 = ⟨k⟩ (mean), K2 = ⟨k²⟩ (second moment). This unifies NegBin and hurdle-Weibull.
-"""`base_contact(builder, k1, k2)` — per-capita effective contact C0 from the first
-two raw moments `k1=⟨k⟩`, `k2=⟨k²⟩` of the degree distribution."""
-base_contact(::MeanNGM, k1, k2)                = k1
-base_contact(::NeighbourhoodDegreeNGM, k1, k2) = k2 / k1        # ⟨k²⟩/⟨k⟩ = m(1+CV²)
+# Inputs: the raw moments of the (zero-included) degree distribution — K1 = ⟨k⟩
+# (mean), K2 = ⟨k²⟩ (second moment) — plus a per-cell zero factor `g` that makes the
+# neighbourhood degree condition on non-zero contacts (spec inst/1c, inst/1d). This
+# unifies NegBin and hurdle-Weibull; the mean builder ignores `g`.
+#   g = 1/(1−P₀) for NegBin (left-truncated fitted NegBin, P₀=(φ/(φ+μ))^φ, floored);
+#   g = (1−p⁰)  for Weibull (empirical hurdle non-zero probability).
+"""`base_contact(builder, k1, k2, g)` — per-capita effective contact C0 from the raw
+moments `k1=⟨k⟩`, `k2=⟨k²⟩` and the per-cell zero factor `g`. `MeanNGM` returns the
+mean; `NeighbourhoodDegreeNGM` returns the size-biased degree ⟨k²⟩/⟨k⟩ times `g`
+(the configuration-network C0 among non-zero degrees, docx `Ccf=(z²/z)⊙Pnz`)."""
+base_contact(::MeanNGM, k1, k2, g)                = k1
+base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = (k2 / k1) * g   # size-biased × zero factor
 
 """
     reciprocity_balance(C0, pop)
@@ -34,15 +40,15 @@ full_susceptibility(susc::AbstractVector, F::Real, A_col::AbstractVector) =
     susc .* (1 .+ (F - 1) .* A_col)
 
 """
-    contact_star(builder, K1, K2, pop)
+    contact_star(builder, K1, K2, G, pop)
 
 Reciprocity-balanced per-capita contact matrix `C*` for the given builder, from the
-`A×A` raw-moment matrices `K1=⟨k⟩`, `K2=⟨k²⟩`. NGM-independent of transmission, so
-compute once per fit and reuse across weeks.
+`A×A` raw-moment matrices `K1=⟨k⟩`, `K2=⟨k²⟩` and per-cell zero factors `G`.
+NGM-independent of transmission, so compute once per fit and reuse across weeks.
 """
 function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
-                      pop::AbstractVector)
-    C0 = base_contact.(Ref(builder), K1, K2)
+                      G::AbstractMatrix, pop::AbstractVector)
+    C0 = base_contact.(Ref(builder), K1, K2, G)
     return reciprocity_balance(C0, pop)
 end
 
@@ -60,7 +66,7 @@ end
 
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
-                   susc::AbstractVector, inf::AbstractVector, F::Real,
-                   A_col::AbstractVector, pop::AbstractVector)
-    return build_ngm(contact_star(builder, K1, K2, pop), susc, inf, F, A_col)
+                   G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
+                   F::Real, A_col::AbstractVector, pop::AbstractVector)
+    return build_ngm(contact_star(builder, K1, K2, G, pop), susc, inf, F, A_col)
 end

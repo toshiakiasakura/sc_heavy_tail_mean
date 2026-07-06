@@ -33,10 +33,13 @@ end
 """
     score_wis(df_quant)
 
-Run R `scoringutils` on a quantile-format table. Returns `(; by_model, by_model_h)`
-DataFrames with WIS and its components, bias, and interval coverage. Requires the
-`scoringutils` package (see scripts install step). Targets the v2 API
-(`as_forecast_quantile` / `score` / `summarise_scores`).
+Run R `scoringutils` on a quantile-format table. Scores are computed on **both the
+natural and the log scale** (`transform_forecasts(fun=log_shift, offset=1)`; inst/1e) —
+each returned frame carries a `scale ∈ {"natural","log"}` column, and WIS is
+aggregated **by horizon** across all forecast dates/origins (`by_model_h`), so the
+headline metric is the log-scale, by-horizon WIS (`scale=="log"`). Returns
+`(; by_model, by_model_h)` with WIS + components, bias, and interval coverage.
+Requires `scoringutils` v2 (`as_forecast_quantile`/`transform_forecasts`/`score`).
 """
 function score_wis(df_quant::DataFrame)
     @rput df_quant
@@ -48,9 +51,11 @@ function score_wis(df_quant::DataFrame)
         dt,
         forecast_unit = c("model","forecast_date","target_date","horizon","age_group"),
         observed = "observed", predicted = "predicted", quantile_level = "quantile_level")
+    # append a log-scale copy (scale column: "natural" + "log"); score both (inst/1e)
+    fq <- transform_forecasts(fq, fun = log_shift, offset = 1)
     sc <- score(fq)
-    by_model   <- as.data.frame(summarise_scores(sc, by = c("model")))
-    by_model_h <- as.data.frame(summarise_scores(sc, by = c("model","horizon")))
+    by_model   <- as.data.frame(summarise_scores(sc, by = c("model","scale")))
+    by_model_h <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
     """
     by_model   = rcopy(R"by_model")
     by_model_h = rcopy(R"by_model_h")

@@ -28,6 +28,10 @@ function interval_from_minmax(mn, mx)
     (a === nothing || b === nothing) ? (0, 120) : (a, b)
 end
 
+"Group (\"mass\") vs individually-reported contact, from `:cnt_mass` in
+contacts_uk.arrow (values \"mass\"/\"individual\"). Missing → not group."
+_is_group_contact(v) = !ismissing(v) && (String(v) == "mass")
+
 """
     prepare_degree_data(win, cfg; grid, setting=:all, arrow_path=_ARROW_PATH)
 
@@ -73,12 +77,13 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
     # contact table with contactee bin, duration and setting
     craw = read_arrow_df(arrow_path;
         cols = [:part_wave_uid, :date, :cnt_home, :cnt_minutes_max, :cnt_total_time,
-                :cnt_age_est_min, :cnt_age_est_max])
+                :cnt_mass, :cnt_age_est_min, :cnt_age_est_max])
     craw = @subset(craw, (:date .>= dmin) .& (:date .<= dmax))
     craw = @select(craw,
         :part_id_d      = :part_wave_uid,
         :date,
         :cnt_home,
+        :cnt_mass,
         :duration_multi = _uk_duration_multi.(:cnt_minutes_max, :cnt_total_time),
         :cnt_age_est_min, :cnt_age_est_max)
     standardise_cnt_home_values!(craw)
@@ -92,7 +97,12 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
     elseif setting === :nonhome
         dfA = @subset(dfA, :cnt_home .== "false")
     end
-    dfA[!, :w] = duration_weight.(dfA.duration_multi, cfg.d_max)
+    # Group ("mass") contacts have no recorded duration; assign the explicit,
+    # later-estimable group weight `w_dur_group` (inst/1e D4) rather than letting them
+    # fall through the NA→<5min path. Individually-reported contacts use the duration bin.
+    dfA[!, :w] = ifelse.(_is_group_contact.(dfA.cnt_mass),
+                         cfg.w_dur_group,
+                         duration_weight.(dfA.duration_multi, cfg.d_max))
 
     # per participant-day × week × cell: contact count and summed weight
     g = combine(groupby(dfA, [:part_id_d, :date, :wk, :part_bin, :cnt_bin]),

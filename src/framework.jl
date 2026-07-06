@@ -71,6 +71,7 @@ fit_offset(w::WeeklyWindow)   = length(w.lag_weeks)  # index (0-based) of fit_we
 ##########################################################################
 Base.@kwdef struct FrameworkConfig
     d_max::Float64        = 240.0     # duration-weight cap (>4h ⇒ weight 1)
+    w_dur_group::Float64  = 2.5 / 240 # group-contact duration weight (inst/1e; fixed now, estimated later)
     smax::Int             = 4         # renewal weekly lags
     n_fit::Int            = 8         # fitting weeks
     horizons::UnitRange{Int} = 1:4    # forecast horizons (weeks)
@@ -81,6 +82,9 @@ Base.@kwdef struct FrameworkConfig
     child_bins::Int       = 2         # bins 1..child_bins ("2-10","11-15") are "child"
     quantiles::Vector{Float64} = collect(0.05:0.05:0.95)
     n_forecast_draws::Int = 200       # posterior draws retained for scoring
+    # --- spatial-GP smoothing of the age-pair mean (inst/1e) ---
+    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), length-scale in age-years
+    gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale
 end
 
 ##########################################################################
@@ -110,6 +114,20 @@ function cis_age_grid(; path::AbstractString = _POP_PATH)
     N   = length(LO)
     LAB = [LO[j] == LO[end] ? "$(LO[j])+" : "$(LO[j])-$(HI[j])" for j in 1:N]
     return (; LO, HI, POP, LAB, N, PROP = POP ./ sum(POP))
+end
+
+"""
+    cis_age_midpoints(; grid=cis_age_grid())
+
+Numeric age coordinate for each CIS bin, used as the input to the spatial GP kernel
+(inst/1e). Each bin takes its interval midpoint `(lo+hi)/2`; the open-ended **70+**
+bin is fixed to **74.5** (the observed mean age of 70+ CoMix participants, ~74.1–74.7).
+For the default England grid this returns `[6.0, 13.0, 20.0, 29.5, 42.0, 59.5, 74.5]`.
+"""
+function cis_age_midpoints(; grid = cis_age_grid())
+    mid = [(grid.LO[j] + grid.HI[j]) / 2 for j in 1:grid.N]
+    mid[end] = 74.5                     # 70+ open-ended → assumed mean age (inst/1e)
+    return mid
 end
 
 ##########################################################################
