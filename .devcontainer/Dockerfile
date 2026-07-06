@@ -1,4 +1,4 @@
-FROM quay.io/jupyter/datascience-notebook:x86_64-julia-1.11.1
+FROM quay.io/jupyter/datascience-notebook:julia-1.11.1
 # julia-1.7.3 is required for Turing.jl
 
 WORKDIR /workdir
