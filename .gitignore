@@ -1,4 +1,3 @@
-inst/
 *.claude
 sysimage.so
 sysimage.dylib
