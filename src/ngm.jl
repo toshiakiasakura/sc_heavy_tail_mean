@@ -4,8 +4,11 @@
 #   N_ab(t) = full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
 #   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
 #
-# C0_ab = per-capita effective contacts from bin a to bin b (mean or excess degree);
-# C*_ab = reciprocity-balanced per-capita contacts (docx: N_a μ_ab = N_b μ_ba).
+# C*_ab = per-capita effective contacts from bin a to bin b (mean or excess degree).
+# There is NO post-hoc reciprocity symmetrisation: reciprocity is carried entirely by
+# the contact-mean estimation (log μ_{i→j} = r_{min,max} + log N_j ⟹ N_i μ_{i→j} =
+# N_j μ_{j→i}; see joint_model.jl). The mean builder therefore inherits exact
+# reciprocity from μ; the neighbourhood (size-biased) builder does not — this is by design.
 
 # ---- the ONLY line that differs between builders ----
 # Inputs: the raw moments of the (zero-included) degree distribution — K1 = ⟨k⟩
@@ -19,20 +22,10 @@ moments `k1=⟨k⟩`, `k2=⟨k²⟩` and the per-cell zero factor `g`. `MeanNGM`
 mean; `NeighbourhoodDegreeNGM` returns the size-biased degree ⟨k²⟩/⟨k⟩ times `g`
 (the configuration-network C0 among non-zero degrees, docx `Ccf=(z²/z)⊙Pnz`)."""
 base_contact(::MeanNGM, k1, k2, g)                = k1
-base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = (k2 / k1) * g   # size-biased × zero factor
-
-"""
-    reciprocity_balance(C0, pop)
-
-Total-contact reciprocity (analysis plan): return `C*` with
-`C*_ab = (pop_a·C0_ab + pop_b·C0_ba) / (2·pop_a)`, so `pop_a·C*_ab = pop_b·C*_ba`.
-(The reference instead imposes per-capita symmetry; the docx specifies total balance.)
-"""
-function reciprocity_balance(C0::AbstractMatrix, pop::AbstractVector)
-    T = pop .* C0                       # T_ab = pop_a · C0_ab  (row scaling)
-    Tsym = (T .+ T') ./ 2
-    return Tsym ./ pop                  # divide row a by pop_a
-end
+# `k1>0` guard: per-week Weibull cells with an empirical p⁰=1 (no observed contacts that
+# week) give ⟨k⟩=⟨k²⟩=0, so the raw `k2/k1` is 0/0=NaN. Such a cell contributes no
+# transmission, so return 0. (NegBin keeps k1=μ>0, so it always takes the first branch.)
+base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = k1 > 0 ? (k2 / k1) * g : zero(k1)   # size-biased × zero factor
 
 """`full_susceptibility(susc, F, A_col)` — leaky antibody susceptibility vector
 `susc .* (1 .+ (F-1).*A_col)` for one week's antibody prevalence `A_col`."""
@@ -40,16 +33,17 @@ full_susceptibility(susc::AbstractVector, F::Real, A_col::AbstractVector) =
     susc .* (1 .+ (F - 1) .* A_col)
 
 """
-    contact_star(builder, K1, K2, G, pop)
+    contact_star(builder, K1, K2, G)
 
-Reciprocity-balanced per-capita contact matrix `C*` for the given builder, from the
-`A×A` raw-moment matrices `K1=⟨k⟩`, `K2=⟨k²⟩` and per-cell zero factors `G`.
+Per-capita effective contact matrix `C*` for the given builder, from the `A×A`
+raw-moment matrices `K1=⟨k⟩`, `K2=⟨k²⟩` and per-cell zero factors `G`. This is simply
+the builder's per-cell contact `C0` — there is no post-hoc reciprocity symmetrisation
+(reciprocity is carried by the contact-mean estimation; see the module header).
 NGM-independent of transmission, so compute once per fit and reuse across weeks.
 """
 function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
-                      G::AbstractMatrix, pop::AbstractVector)
-    C0 = base_contact.(Ref(builder), K1, K2, G)
-    return reciprocity_balance(C0, pop)
+                      G::AbstractMatrix)
+    return base_contact.(Ref(builder), K1, K2, G)
 end
 
 """
@@ -67,6 +61,6 @@ end
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
                    G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector, pop::AbstractVector)
-    return build_ngm(contact_star(builder, K1, K2, G, pop), susc, inf, F, A_col)
+                   F::Real, A_col::AbstractVector)
+    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col)
 end

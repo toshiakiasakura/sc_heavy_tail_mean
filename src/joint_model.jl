@@ -26,14 +26,21 @@ end
 """
     build_degree_stats(dm, apd, cfg)
 
-Pool the per-week cells (lean `constant_contacts=true`) and precompute the fixed
-per-cell inputs the model needs: degree distributions, empirical zero prob `p0`,
-and the prior-centre `log_emp` (log count-mean for NegBin; log positive-weight mean
-for the hurdle).
+Precompute the fixed per-cell inputs the model needs: degree distributions, empirical
+zero prob `p0`, and the prior-centre `log_emp` (log count-mean for NegBin; log
+positive-weight mean for the hurdle).
+
+Two contact regimes (`cfg.constant_contacts`):
+- **pooled** (`true`): collapse the per-week cells to one pooled cell per `(i,j)`; the
+  returned `dd_count`/`pos_weight`/`p0`/`n` are `A×A`.
+- **per-week** (`false`): keep the raw `[t,i,j]` weekly arrays so the model can fit an
+  independent age-pair GP per week (`model_joint`'s per-week branch).
+
+`log_emp` (hence the GP prior-centre `c0`) is always the **pooled** grand mean, so the
+prior is identical across regimes.
 """
 function build_degree_stats(dm::ContactDegreeModel, apd::AgePairData, cfg::FrameworkConfig)
-    cfg.constant_contacts || error("per-week contacts not wired in the lean preliminary")
-    p = pool_over_time(apd)
+    p = pool_over_time(apd)                                                 # pooled: data + c0 centre
     A = apd.A
     log_emp = Matrix{Float64}(undef, A, A)
     for i in 1:A, j in 1:A
@@ -45,9 +52,15 @@ function build_degree_stats(dm::ContactDegreeModel, apd::AgePairData, cfg::Frame
         log_emp[i, j] = log(base)
     end
     pair_list, pair_index = _unordered_pairs(A)
-    return (; dd_count = p.dd_count, pos_weight = p.pos_weight, p0 = p.p0,
-              n = p.n, log_emp = log_emp, A = A,
-              mid = cis_age_midpoints(), pair_list = pair_list, pair_index = pair_index)
+    common = (; log_emp = log_emp, A = A, weeks = apd.weeks,
+                mid = cis_age_midpoints(), pair_list = pair_list, pair_index = pair_index)
+    if cfg.constant_contacts
+        return (; dd_count = p.dd_count, pos_weight = p.pos_weight, p0 = p.p0,
+                  n = p.n, common...)
+    else
+        return (; dd_count = apd.dd_count, pos_weight = apd.pos_weight, p0 = apd.p0,
+                  n = apd.n, common...)                                     # raw [t,i,j] weekly arrays
+    end
 end
 
 # --- per-cell raw moments (⟨k⟩, ⟨k²⟩) + zero factor g, from the fitted params ---
@@ -77,50 +90,96 @@ end
     # via the contactee-population offset  log μ_{i→j} = r_{min,max} + log(pop_j)
     # ⟹ pop_i·μ_{i→j} = pop_j·μ_{j→i}. The rate field is a separable-RBF GP over the
     # age-pair grid with a shared length-scale ρ, non-centred as f = η·L·z (L = chol K).
+    # `ρ`, `η` and the 28×28 Cholesky `Lp` are SHARED across weeks (per-week variation
+    # enters only through the per-week level cₜ and field zₜ — no temporal smoothing).
     logpop = log.(wd.pop)
     log_rho ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
     ρ = exp(clamp(log_rho, log(3.0), log(45.0)))          # length-scale (age-years)
     η = exp(clamp(log_eta, -3.0, 2.0))                    # GP marginal scale
-    c0 = mean(ds.log_emp .- logpop')                      # smooth constant mean-fn anchor
-    c ~ Normal(c0, 3.0)
-    z ~ filldist(Normal(0, 1), length(ds.pair_list))      # 28 iid (non-centred GP)
+    c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
+    P = length(ds.pair_list)
     # 28×28 separable RBF (upper-triangular submatrix of the I₄₉ kernel over pairs)
     Kp = [exp(-((mid[p[1]] - mid[q[1]])^2 + (mid[p[2]] - mid[q[2]])^2) / (2 * ρ^2))
           for p in ds.pair_list, q in ds.pair_list]
     Lp = cholesky(Symmetric(Kp) + 1e-6 * I).L
-    r = c .+ η .* (Lp * z)                                 # symmetric 28-vector log-rate
-    # clamp guards exp under/overflow (μ ∈ [3e-4, 400]); the mode stays well interior.
-    μ = [exp(clamp(r[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
-    if is_weighted(dm)
-        log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)     # Weibull shape by child/adult block
-    else
-        log_k ~ filldist(Normal(0.0, 1.0), 2, 2)         # NegBin dispersion by block
-    end
+    # per-cell log-rate → directional mean μ_{i→j} (clamp guards exp under/overflow,
+    # μ ∈ [3e-4, 400]; the mode stays interior so reciprocity is not distorted).
+    _mu_matrix(rvec) =
+        [exp(clamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
-    ETp = eltype(μ)
-    K1 = Matrix{ETp}(undef, A, A)
-    K2 = Matrix{ETp}(undef, A, A)
-    G  = Matrix{ETp}(undef, A, A)                          # per-cell zero factor (see helpers)
-    ll = zero(ETp)
-    for i in 1:A, j in 1:A
-        bi = block_of(i, cfg); bj = block_of(j, cfg)
-        if is_weighted(dm)
-            κ = exp(clamp(log_kappa[bi, bj], -3.0, 3.0))   # shape ∈ [0.05, 20]
-            λ = μ[i, j] / gamma(1 + 1 / κ)
-            pos = ds.pos_weight[i, j]
-            isempty(pos) || (ll += sum(logpdf.(Weibull(κ, λ), pos)))
-            k1, k2, g = _weibull_moments(μ[i, j], κ, ds.p0[i, j])
-        else
-            kk = exp(clamp(log_k[bi, bj], -4.0, 5.0))       # dispersion ∈ [0.018, 148]
-            ll += calculate_loglikelihood(ds.dd_count[i, j], NegBin(μ[i, j], kk))
-            k1, k2, g = _negbin_moments(μ[i, j], kk)
+    # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
+    # μ matrix. `didx` indexes the (possibly weekly) degree arrays; `dispv` is the length-4
+    # block-linear dispersion for this context, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`
+    # (kept 1-D per week: DynamicPPL's `generated_quantities` can't reconstruct a 3-D
+    # `filldist`, so dispersion is a 2-D `4×Tn` array sliced per week, never `2×2×Tn`).
+    function _cell_moments!(K1, K2, G, μ, didx, dispv)
+        ll = zero(eltype(μ))
+        for i in 1:A, j in 1:A
+            bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+            if is_weighted(dm)
+                κ = exp(clamp(dispv[bl], -3.0, 3.0))       # shape ∈ [0.05, 20]
+                λ = μ[i, j] / gamma(1 + 1 / κ)
+                pos = didx === nothing ? ds.pos_weight[i, j] : ds.pos_weight[didx, i, j]
+                isempty(pos) || (ll += sum(logpdf.(Weibull(κ, λ), pos)))
+                p0 = didx === nothing ? ds.p0[i, j] : ds.p0[didx, i, j]
+                k1, k2, g = _weibull_moments(μ[i, j], κ, p0)
+            else
+                kk = exp(clamp(dispv[bl], -4.0, 5.0))       # dispersion ∈ [0.018, 148]
+                dd = didx === nothing ? ds.dd_count[i, j] : ds.dd_count[didx, i, j]
+                ll += calculate_loglikelihood(dd, NegBin(μ[i, j], kk))
+                k1, k2, g = _negbin_moments(μ[i, j], kk)
+            end
+            K1[i, j] = k1; K2[i, j] = k2; G[i, j] = g
         end
-        K1[i, j] = k1; K2[i, j] = k2; G[i, j] = g
+        return ll
     end
-    Turing.@addlogprob! ll
+
+    # ---- contact-degree likelihood → per-week C* (Cstar_weeks[t]) ----
+    if cfg.constant_contacts
+        # pooled: one latent field, one C* reused for every renewal week.
+        c ~ Normal(c0, 3.0)
+        z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
+        if is_weighted(dm)
+            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
+            disp = log_kappa
+        else
+            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
+            disp = log_k
+        end
+        μ = _mu_matrix(c .+ η .* (Lp * z))
+        ETp = eltype(μ)
+        K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
+        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, vec(disp))   # 2×2 → block-linear 4
+        Cstar1 = contact_star(nb, K1, K2, G)
+        Cstar_weeks = [Cstar1 for _ in 1:Tn]
+    else
+        # per-week: independent age-pair GP each week (shared ρ, η, Lp), per-week level cₜ
+        # and field zₜ, per-week × block dispersion. One C* per window week.
+        c ~ filldist(Normal(c0, 3.0), Tn)                 # per-week level
+        z ~ filldist(Normal(0, 1), P, Tn)                 # per-week field (shared kernel)
+        # dispersion 4×Tn (block-linear rows × week): 2-D so generated_quantities can
+        # reconstruct it (a 3-D 2×2×Tn filldist can't be — see _cell_moments!).
+        if is_weighted(dm)
+            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape by block-linear × week
+            disp = log_kappa
+        else
+            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
+            disp = log_k
+        end
+        ETp = promote_type(eltype(c), eltype(z), typeof(η))
+        Cstar_weeks = Vector{Matrix{ETp}}(undef, Tn)
+        K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
+        ll = zero(ETp)
+        for t in 1:Tn
+            μ = _mu_matrix(c[t] .+ η .* (Lp * @view z[:, t]))
+            ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
+            Cstar_weeks[t] = contact_star(nb, K1, K2, G)
+        end
+        Turing.@addlogprob! ll
+    end
 
     # ---- transmission latents (reference priors, non-centred; stan:167-174) ----
     mu_s ~ Beta(24, 24)
@@ -136,12 +195,10 @@ end
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
-    # ---- NGM (reciprocity-balanced C* once; antibody varies by week) ----
-    Cstar = contact_star(nb, K1, K2, G, wd.pop)
-
-    # ---- infection likelihood over the fitting weeks (t > smax) ----
+    # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
+    # (antibody and — now — contacts vary by week; C*_t is Cstar_weeks[t].)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar, susc, inf, F, wd.antibody[:, t])
+        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t])
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -149,7 +206,7 @@ end
         end
     end
 
-    return (; susc, inf, F, sigma_inf, Cstar)
+    return (; susc, inf, F, sigma_inf, Cstar = Cstar_weeks)
 end
 
 """
@@ -211,7 +268,7 @@ function posterior_forecast(model, chn, wd::WindowData, cfg::FrameworkConfig, w;
     out = Array{Float64}(undef, A, H, keep)
     for (d, k) in enumerate(idx)
         q = gq[k]
-        N_origin = build_ngm(q.Cstar, q.susc, q.inf, q.F, wd.antibody[:, Tn])
+        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn])  # origin-week C*
         mean_path = forecast_forward(N_origin, wd.I_mean[:, seed_cols], w, H)
         for a in 1:A, h in 1:H
             σ = max(q.sigma_inf * mean_path[a, h], 1e-6)
@@ -294,7 +351,7 @@ function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
     specs = NamedTuple[]
     for (oi, win_o) in enumerate(wins), (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
         path = joinpath(save_dir,
-            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(win_o.origin)_h$(h).jld2")
+            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win_o.origin)_h$(h).jld2")
         isfile(path) || push!(specs, (; dm, nb, oi, hi, h, win_o, path))
     end
     total = length(combos) * length(wins) * length(cfg.horizons)
@@ -378,7 +435,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
             prepare_degree_data(win_h, cfg; grid = grid, setting = setting) : apd_by_h[hi]
         ds_h = build_degree_stats(dm, apd_h, cfg)
         path = joinpath(save_dir,
-            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(win0.origin)_h$(h).jld2")
+            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win0.origin)_h$(h).jld2")
         fl = fit_or_load_chain(path, dm, nb, ds_h, wd0, cfg, w; use_nuts = use_nuts)
 
         gq = vec(generated_quantities(fl.model, fl.chn))
@@ -389,7 +446,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
         step_mean = zeros(A)
         for (d, k) in enumerate(idx)
             q = gq[k]
-            N = build_ngm(q.Cstar, q.susc, q.inf, q.F, wd0.antibody[:, end])   # antibody frozen at t₀
+            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end])   # origin-week C* (t₀+h−1); antibody frozen at t₀
             acc = zeros(A)
             for s in 1:cfg.smax
                 acc .+= w[s] .* hist[:, end - s + 1]

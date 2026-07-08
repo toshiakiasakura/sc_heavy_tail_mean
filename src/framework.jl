@@ -87,6 +87,11 @@ Base.@kwdef struct FrameworkConfig
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale
 end
 
+"""`contacts_label(cfg)` — tags the contact regime for chain-cache filenames so the
+per-week (`"weekly"`) and pooled (`"pooled"`) fits never reload each other's stale
+chains (their parameter spaces differ)."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled" : "weekly"
+
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).
 # Matches src/7j_weekly_age_pair.ipynb §2 exactly.

@@ -17,9 +17,10 @@ Cached-chain filepath for model label `lbl` (`"<degree>|<ngm>"`), forecast `orig
 and horizon `h`. `lbl` joins the two tokens with `|`; the filename joins them with `_`.
 """
 function chain_path(lbl::AbstractString, origin::Date, h::Integer;
+                    contacts::AbstractString = "weekly",
                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
-    joinpath(save_dir, "8j_chn_$(deg)_$(ngm)_$(origin)_h$(h).jld2")
+    joinpath(save_dir, "8j_chn_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
 end
 
 """
@@ -47,8 +48,9 @@ Returns `nothing` when the file is missing or unreadable (skipped origin×combo)
 so callers can leave a gap.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
+                                 contacts::AbstractString = "weekly",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; save_dir = save_dir)
+    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
         load(path, "result")
