@@ -57,11 +57,13 @@ function score_wis(df_quant::DataFrame)
     by_model    <- as.data.frame(summarise_scores(sc, by = c("model","scale")))
     by_model_h  <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
     by_model_dt <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","scale")))
+    by_model_dt_h <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","horizon","scale")))
     """
-    by_model    = rcopy(R"by_model")
-    by_model_h  = rcopy(R"by_model_h")
-    by_model_dt = rcopy(R"by_model_dt")
-    return (; by_model, by_model_h, by_model_dt)
+    by_model      = rcopy(R"by_model")
+    by_model_h    = rcopy(R"by_model_h")
+    by_model_dt   = rcopy(R"by_model_dt")
+    by_model_dt_h = rcopy(R"by_model_dt_h")
+    return (; by_model, by_model_h, by_model_dt, by_model_dt_h)
 end
 
 """Native sample CRPS (Gneiting–Raftery energy form, O(M log M)) — cross-check."""
