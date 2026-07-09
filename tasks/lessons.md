@@ -2,6 +2,29 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## Anisotropic diagonal-coordinate GP 2026-07-09 (`src/joint_model.jl` — age-pair contact-mean kernel)
+
+- **The age-pair GP kernel is now anisotropic in DIAGONAL coordinates.** The old isotropic RBF had
+  one shared length-scale ρ acting equally on both age coordinates. It's now rotated 45° into
+  `u=(mid_a+mid_b)/√2` (along the main diagonal = **total age**) and `v=(mid_a−mid_b)/√2` (across it
+  = **age gap** / assortativity), each with its **own** length-scale: `ρ_diag` on `u`, `ρ_gap` on
+  `v`. Kernel: `Kp[m,n]=exp(-((su[m]-su[n])²/(2ρ_diag²) + (df[m]-df[n])²/(2ρ_gap²)))`. The **√2
+  normalisation is load-bearing**: the rotation is orthonormal so `(Δu)²+(Δv)²=(Δx)²+(Δy)²`, hence
+  `ρ_diag=ρ_gap` reduces **exactly** to the old isotropic kernel (verified: `max|Kiso−Kani|~0`) — do
+  not drop the `/√2` (it keeps the `[3,45]`-yr soft-clamp bounds and `gp_len_prior` meaningful in
+  the same age-year units).
+- **Chain param rename `log_rho` → `log_rho_diag` + `log_rho_gap`** (both `~ Normal(cfg.gp_len_prior…)`
+  — a **shared** prior, no new config field; both soft-clamped to `[log 3, log 45]`). This changes the
+  parameter space ⇒ every cached `8j_chn_*.jld2` is stale and was deleted; refit.
+- **Viz mirrors MUST rotate coordinates identically** (the reconstruct-matches-`generated_quantities`
+  invariant): `10j_viz_utils.jl` (`reconstruct_mu_draws`) rebuilds `su`/`df` and the two-length-scale
+  kernel from `chn[:log_rho_diag]`/`[:log_rho_gap]`; `8j_viz_utils.jl` (`load_transmission_draws`) now
+  returns **both** `rho_diag` and `rho_gap` (was a single `rho`) — its only in-code consumer,
+  `9j_forecast_diagnostics.ipynb`'s length-scale panel, plots two series per config (ρ_diag solid,
+  ρ_gap dashed). Anything reading the old `.rho` field will break.
+- **Spec updated**: `inst/3_preliminary_model_struct.md` §5 (kernel eq + rotation), §6 sampling
+  statement, and the §-`8j` config/output bullets now describe the two diagonal length-scales.
+
 ## Model improvements 2026-07-09 (`src/joint_model.jl` — relative pop · collapsed Weibull · clamp-free/ReverseDiff)
 
 - **Relative-population offset fixes the μ-saturation degeneracy (the fix to the 10j lesson

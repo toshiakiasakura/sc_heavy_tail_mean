@@ -43,7 +43,9 @@ end
 Load the cached chain for `(lbl, origin, h)` and return per-draw transmission draws
 reconstructed from raw sampled columns:
 `susc[d,a] = exp(mu_s + sig_s·z_s[a])`, `inf[d,b] = exp(mu_i + sig_i·z_i[b])`
-(`ndraws × A` each), and `rho[d] = exp(softclamp(log_rho,…))` (`ndraws`; mirrors model).
+(`ndraws × A` each), and the two GP length-scales `rho_diag`/`rho_gap[d] =
+exp(softclamp(log_rho_diag|log_rho_gap,…))` (`ndraws` each; diagonal/total-age and
+age-gap directions; mirrors model).
 Returns `nothing` when the file is missing or unreadable (skipped origin×combo),
 so callers can leave a gap.
 """
@@ -64,8 +66,9 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     z_i  = _group_matrix(chn, :z_i)
     susc = exp.(mu_s .+ sig_s .* z_s)                     # ndraws × A
     inf  = exp.(mu_i .+ sig_i .* z_i)
-    rho  = exp.(_softclamp.(vec(Array(chn[:log_rho])), log(3.0), log(45.0)))   # soft-bounded, mirrors model
-    return (; susc, inf, rho)
+    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
+    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
+    return (; susc, inf, rho_diag, rho_gap)
 end
 
 """

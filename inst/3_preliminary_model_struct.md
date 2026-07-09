@@ -251,23 +251,35 @@ $$
 so the total number of $i\!\to\! j$ contacts equals that of $j\!\to\! i$ contacts.
 
 **Spatial Gaussian-process prior on the log-rate field.** The 28 log-rates are given a
-non-centred GP prior over the age-pair coordinates. With a separable RBF kernel over the age
-midpoints,
+non-centred GP prior over the age-pair coordinates. The kernel is an **anisotropic** separable RBF
+in **diagonal coordinates**: the age pair $(\text{mid}_{p_1},\text{mid}_{p_2})$ is rotated $45°$
+into a total-age (along-diagonal) coordinate and an age-gap (across-diagonal) coordinate,
 
 $$
-K_{pq} = \exp\!\left(-\frac{(\text{mid}_{p_1}-\text{mid}_{q_1})^2 + (\text{mid}_{p_2}-\text{mid}_{q_2})^2}{2\rho^2}\right),
-\qquad L = \mathrm{chol}(K + 10^{-6} I),
+u_p = \frac{\text{mid}_{p_1}+\text{mid}_{p_2}}{\sqrt 2}, \qquad
+v_p = \frac{\text{mid}_{p_1}-\text{mid}_{p_2}}{\sqrt 2},
 $$
 
-the field is $r = c + \eta\,(L z)$, where $c$ is a scalar level, $z \sim \mathcal N(0,1)^{P}$ are
-i.i.d. non-centred coordinates, $\rho$ is a shared length-scale (age-years) and $\eta$ the GP
-marginal scale. The level is anchored at the grand mean
-$c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$. Numerically, $\rho$ is clamped to
-$[3,45]$, $\eta$ to $[e^{-3}, e^{2}]$, and the per-cell exponent $r + \log N_j$ to $[-8,6]$ (so
-$\mu \in [3\times10^{-4}, 400]$); the modes stay interior so reciprocity is not distorted.
+each with its **own** length-scale — $\rho_{\text{diag}}$ on total age, $\rho_{\text{gap}}$ on the
+age gap (assortativity):
 
-The kernel Cholesky $L$, length-scale $\rho$ and scale $\eta$ are **shared across weeks**; only the
-level $c$ and coordinates $z$ may vary by week (§6).
+$$
+K_{pq} = \exp\!\left(-\frac{(u_p-u_q)^2}{2\rho_{\text{diag}}^2} - \frac{(v_p-v_q)^2}{2\rho_{\text{gap}}^2}\right),
+\qquad L = \mathrm{chol}(K + 10^{-6} I).
+$$
+
+The rotation is orthonormal, so $(u_p-u_q)^2+(v_p-v_q)^2 = (\text{mid}_{p_1}-\text{mid}_{q_1})^2 +
+(\text{mid}_{p_2}-\text{mid}_{q_2})^2$ and $\rho_{\text{diag}}=\rho_{\text{gap}}$ recovers the old
+isotropic RBF exactly. The field is $r = c + \eta\,(L z)$, where $c$ is a scalar level,
+$z \sim \mathcal N(0,1)^{P}$ are i.i.d. non-centred coordinates, and $\eta$ the GP marginal scale.
+The level is anchored at the grand mean
+$c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$. Numerically, each of
+$\rho_{\text{diag}}, \rho_{\text{gap}}$ is clamped to $[3,45]$, $\eta$ to $[e^{-3}, e^{2}]$, and the
+per-cell exponent $r + \log N_j$ to $[-8,6]$ (so $\mu \in [3\times10^{-4}, 400]$); the modes stay
+interior so reciprocity is not distorted.
+
+The kernel Cholesky $L$, the two length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}$ and scale
+$\eta$ are **shared across weeks**; only the level $c$ and coordinates $z$ may vary by week (§6).
 
 ### 5.1 NGM builder (Axis 2)
 
@@ -298,7 +310,8 @@ parameters, so it is computed once per week and reused across the renewal recurs
 likelihood and the infection likelihood.
 
 **The model estimates contacts per week.** An independent age-pair GP is fit for each of the $T$
-window weeks — sharing the kernel $L$, length-scale $\rho$ and scale $\eta$, but with a per-week
+window weeks — sharing the kernel $L$, length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}$ and
+scale $\eta$, but with a per-week
 level $c_t$, per-week field $z_t$, and per-week $\times$ block dispersion — yielding one $C^\ast_t$
 per week. The transmission NGM $N(t)$ therefore varies in time through **both** antibody prevalence
 and contacts.
@@ -309,7 +322,7 @@ and contacts.
 
 $$
 \begin{aligned}
-\log\rho &\sim \mathcal N(\log 15,\ 0.5^2), &
+\log\rho_{\text{diag}},\ \log\rho_{\text{gap}} &\sim \mathcal N(\log 15,\ 0.5^2), &
 \log\eta &\sim \mathcal N(0,\ 0.5^2), \\
 c_t &\sim \mathcal N(c_0,\ 3^2), &
 z_{t} &\sim \mathcal N(0,1)^{P}, \\
@@ -450,7 +463,8 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 - **Configuration** (`FrameworkConfig`): $d_{\max}=240$, $w_{\text{group}}=2.5/240$,
   $s_{\max}=4$, `n_fit` $=8$, `horizons` $=1{:}4$, seed $=1236$, generation interval mean/SD
   $=5/5$ days, `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, `n_forecast_draws` $=200$,
-  GP priors $\log\rho\sim\mathcal N(\log15,0.5^2)$, $\log\eta\sim\mathcal N(0,0.5^2)$, and
+  GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log15,0.5^2)$ (shared
+  prior for both diagonal length-scales), $\log\eta\sim\mathcal N(0,0.5^2)$, and
   **per-week contact estimation** (an independent age-pair GP per window week).
 - **Rolling origins.** The forecast origin is rolled weekly over the whole *available period* the
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
@@ -464,7 +478,7 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 - **Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`) and diagnostic figures: WIS by
   horizon, four-ways WIS bars, WIS over the forecast period, forecast-vs-observed fans by origin,
   and fitted transmission structure (susceptibility/infectivity ratios to a reference group and the
-  GP length-scale $\rho$ over time).
+  two anisotropic GP length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}$ over time).
 
 ---
 

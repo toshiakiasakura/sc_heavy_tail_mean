@@ -98,25 +98,35 @@ end
     # 28 unordered age pairs (a≤b) carry one symmetric log-rate r; reciprocity is exact
     # via the contactee-population offset  log μ_{i→j} = r_{min,max} + log(pop_j)
     # ⟹ pop_i·μ_{i→j} = pop_j·μ_{j→i}. The rate field is a separable-RBF GP over the
-    # age-pair grid with a shared length-scale ρ, non-centred as f = η·L·z (L = chol K).
-    # `ρ`, `η` and the 28×28 Cholesky `Lp` are SHARED across weeks (per-week variation
-    # enters only through the per-week level cₜ and field zₜ — no temporal smoothing).
+    # age-pair grid, non-centred as f = η·L·z (L = chol K).
+    # The kernel is ANISOTROPIC in DIAGONAL coordinates: the age pair (x,y)=(mid_a,mid_b)
+    # is rotated 45° into u=(x+y)/√2 (along the main diagonal = total age) and v=(x−y)/√2
+    # (across the diagonal = age gap), each with its OWN length-scale — ρ_diag on the
+    # total-age direction, ρ_gap on the age-gap direction (assortativity). Because the
+    # rotation is orthonormal, (Δu)²+(Δv)² = (Δx)²+(Δy)², so ρ_diag=ρ_gap recovers the old
+    # isotropic RBF exactly. `ρ_diag`, `ρ_gap`, `η` and the 28×28 Cholesky `Lp` are SHARED
+    # across weeks (per-week variation enters only through cₜ, zₜ — no temporal smoothing).
     # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
     # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
     # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
     # latent level c/c0 to O(1) (absolute log(pop)≈15.6 otherwise forces c≈−15.6 and, at the
     # old clamp, the degenerate μ≡403 saturation; see tasks/lessons.md).
     logpop = log.(wd.pop ./ wd.pop[1])
-    log_rho ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])
+    log_rho_diag ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # total-age direction
+    log_rho_gap  ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # age-gap direction
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
-    ρ = exp(_softclamp(log_rho, log(3.0), log(45.0)))     # length-scale (age-years), soft-bounded
+    ρ_diag = exp(_softclamp(log_rho_diag, log(3.0), log(45.0)))   # length-scale (age-yrs), soft-bounded
+    ρ_gap  = exp(_softclamp(log_rho_gap,  log(3.0), log(45.0)))   # length-scale (age-yrs), soft-bounded
     η = exp(_softclamp(log_eta, -3.0, 2.0))               # GP marginal scale, soft-bounded
     c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
     P = length(ds.pair_list)
-    # 28×28 separable RBF (upper-triangular submatrix of the I₄₉ kernel over pairs)
-    Kp = [exp(-((mid[p[1]] - mid[q[1]])^2 + (mid[p[2]] - mid[q[2]])^2) / (2 * ρ^2))
-          for p in ds.pair_list, q in ds.pair_list]
+    # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised
+    su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in ds.pair_list]   # along-diagonal (total age)
+    df = [(mid[p[1]] - mid[p[2]]) / sqrt(2) for p in ds.pair_list]   # across-diagonal (age gap)
+    # 28×28 anisotropic separable RBF in diagonal coordinates
+    Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag^2) + (df[m] - df[n])^2 / (2 * ρ_gap^2)))
+          for m in 1:P, n in 1:P]
     Lp = cholesky(Symmetric(Kp) + 1e-6 * I).L
 
     # per-cell log-rate → directional mean μ_{i→j}. Soft-clamped (not `clamp`, so ReverseDiff-safe)

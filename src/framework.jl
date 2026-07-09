@@ -83,7 +83,7 @@ Base.@kwdef struct FrameworkConfig
     quantiles::Vector{Float64} = collect(0.05:0.05:0.95)
     n_forecast_draws::Int = 200       # posterior draws retained for scoring
     # --- spatial-GP smoothing of the age-pair mean (inst/1e) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), length-scale in age-years
+    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale
 end
 
