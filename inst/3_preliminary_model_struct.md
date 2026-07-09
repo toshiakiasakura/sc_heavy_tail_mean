@@ -346,10 +346,37 @@ i.e. the observation SD combines a multiplicative process-noise term $\sigma_{\t
 in quadrature with the inc2prev estimate SD $s^{I}_{a,t}$. The model returns the generated
 quantities $(\text{susc}, \text{inf}, F, \sigma_{\text{inf}}, \{C^\ast_t\})$ for forecasting.
 
+**Joint log-likelihood.** Stacking the two `Turing.@addlogprob!` contributions, the joint model
+accumulates
+
+$$
+\log L \;=\;
+\underbrace{\sum_{t=1}^{T}\ \sum_{i,j=1}^{A} \ell^{(t)}_{ij}}_{\text{contact degree (§4)}}
+\;+\;
+\underbrace{\sum_{t=s_{\max}+1}^{T}\ \sum_{a=1}^{A}
+\log \mathcal N\!\big(I_{a,t}\,;\ \hat I_a(t),\ \sigma_{a,t}^2\big)}_{\text{infection renewal}},
+$$
+
+where $\ell^{(t)}_{ij}$ is the §4.1 NegBin (over the count histogram) or §4.2 Weibull-hurdle (over
+the positive duration-weighted degrees) cell log-likelihood, evaluated at the week-$t$ contact mean
+$\mu_{ij,t}$ and its block-pair dispersion $\phi_{\beta(i)\beta(j)}$ / shape
+$\kappa_{\beta(i)\beta(j)}$; the contact term runs over **all** $T$ window weeks while the infection
+term uses only the $t>s_{\max}$ fit weeks. Adding the priors of the two sampling blocks gives the
+log-posterior that Pathfinder/NUTS target (§7).
+
 Every log-scale latent that feeds an exponential ($\log\rho, \log\eta, \log\kappa, \log\phi$, and
 the per-cell rate) is clamped inside the model body so that aggressive optimiser/Pathfinder steps
 cannot underflow (e.g. Weibull scale $\to 0$); the clamps are wide enough that the posterior mode is
 interior and gradients are unaffected.
+
+**Per-horizon window offset (forecasting use).** Although the contact and infection blocks share the
+index $t = 1,\dots,T$, they need not span the same calendar weeks. In forecasting (§8) the joint
+model is re-fit once **per horizon** $h$: the contact-degree block's window is slid forward to end at
+$t_0 + (h-1)$, while the infection/renewal block stays anchored at the origin $t_0$ (`wd` is fixed;
+only the degree data `ds` changes with $h$, and each $(dm, nb, t_0, h)$ chain is cached separately as
+`..._h<h>.jld2`). Thus for $h>1$ the contact term is fit over weeks offset $h-1$ **ahead** of the
+infection term — the age-pair degree distribution is observed up to one week before the target
+$t_0+h$, whereas infections and antibody are frozen at $t_0$. For $h=1$ the two windows coincide.
 
 ---
 
