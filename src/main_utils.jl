@@ -34,6 +34,7 @@ using Base.Threads
 using Pathfinder
 using DynamicPPL
 using Turing
+using ReverseDiff          # loads the Turing/DynamicPPL ReverseDiff AD extension (AutoReverseDiff)
 using MCMCChains
 
 include("distributions/main.jl")

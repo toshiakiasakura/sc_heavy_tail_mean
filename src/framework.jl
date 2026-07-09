@@ -144,7 +144,8 @@ Indexed `[t, i, j]` over `T = length(all_weeks)` weeks, `A` participant bins
 `i` (contactor / susceptible), `A` contactee bins `j` (infectious).
 
 - `dd_count[t,i,j]` :: DegreeDist — integer contact counts incl. zeros (NegBin path).
-- `pos_weight[t,i,j]` :: Vector{Float64} — positive duration-weighted degrees (hurdle path).
+- `pos_weight[t,i,j]` :: WeightedDegreeHist — collapsed (value→count) histogram of positive
+  duration-weighted degrees (hurdle path); `whist_mean`/`isempty` accessors.
 - `p0[t,i,j]` — empirical zero probability in the cell (weighted path).
 - `n[t,i,j]` — sampled participant-days with part_bin i in week t (cell denominator).
 - `emp_mean`, `emp_cv2` — empirical per-capita mean and CV^2 (fallback / init).
@@ -154,7 +155,7 @@ struct AgePairData
     weeks::Vector{Date}
     A::Int
     dd_count::Array{DegreeDist,3}
-    pos_weight::Array{Vector{Float64},3}
+    pos_weight::Array{WeightedDegreeHist,3}
     p0::Array{Float64,3}
     n::Array{Int,3}
     emp_mean::Array{Float64,3}

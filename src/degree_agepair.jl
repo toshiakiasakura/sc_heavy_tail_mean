@@ -162,7 +162,7 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
     end
 
     dd_count   = Array{DegreeDist,3}(undef, T, A, A)
-    pos_weight = Array{Vector{Float64},3}(undef, T, A, A)
+    pos_weight = Array{WeightedDegreeHist,3}(undef, T, A, A)
     p0   = zeros(T, A, A)
     nn   = zeros(Int, T, A, A)
     emean = zeros(T, A, A)
@@ -174,7 +174,7 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
         sub = get(gidx, (t, i, j), nothing)
         if sub === nothing || nrost == 0
             dd_count[t, i, j]   = DegreeDist([0], [max(nrost, 0)], true)
-            pos_weight[t, i, j] = Float64[]
+            pos_weight[t, i, j] = WeightedDegreeHist(Float64[], Int64[])
             p0[t, i, j] = 1.0
             continue
         end
@@ -188,7 +188,7 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
         end
         ord = sortperm(xs)
         dd_count[t, i, j]   = DegreeDist(Int.(xs[ord]), Int.(ys[ord]), true)
-        pos_weight[t, i, j] = Float64.(sub.wsum)
+        pos_weight[t, i, j] = WeightedDegreeHist(Float64.(sub.wsum))
         p0[t, i, j] = n_zero / nrost
         allcnt = vcat(counts_pos, zeros(Int, n_zero))
         m = mean(allcnt); v = var(allcnt; corrected = false)
@@ -209,13 +209,13 @@ as `A×A` arrays.
 function pool_over_time(apd::AgePairData)
     A = apd.A
     dd  = Array{DegreeDist,2}(undef, A, A)
-    pw  = Array{Vector{Float64},2}(undef, A, A)
+    pw  = Array{WeightedDegreeHist,2}(undef, A, A)
     p0  = zeros(A, A); nn = zeros(Int, A, A)
     em  = zeros(A, A); ec = zeros(A, A)
     for i in 1:A, j in 1:A
         merged = merge_dd(vcat([dd_to_df(apd.dd_count[t, i, j]) for t in eachindex(apd.weeks)]...))
         dd[i, j] = merged
-        pw[i, j] = vcat([apd.pos_weight[t, i, j] for t in eachindex(apd.weeks)]...)
+        pw[i, j] = merge_whist([apd.pos_weight[t, i, j] for t in eachindex(apd.weeks)])
         ntot = sum(apd.n[t, i, j] for t in eachindex(apd.weeks))
         nn[i, j] = ntot
         nzero = sum(dd[i, j].y[dd[i, j].x .== 0])

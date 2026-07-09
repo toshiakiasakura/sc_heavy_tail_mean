@@ -43,7 +43,7 @@ end
 Load the cached chain for `(lbl, origin, h)` and return per-draw transmission draws
 reconstructed from raw sampled columns:
 `susc[d,a] = exp(mu_s + sig_s·z_s[a])`, `inf[d,b] = exp(mu_i + sig_i·z_i[b])`
-(`ndraws × A` each), and `rho[d] = exp(clamp(log_rho, log3, log45))` (`ndraws`).
+(`ndraws × A` each), and `rho[d] = exp(softclamp(log_rho,…))` (`ndraws`; mirrors model).
 Returns `nothing` when the file is missing or unreadable (skipped origin×combo),
 so callers can leave a gap.
 """
@@ -64,7 +64,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     z_i  = _group_matrix(chn, :z_i)
     susc = exp.(mu_s .+ sig_s .* z_s)                     # ndraws × A
     inf  = exp.(mu_i .+ sig_i .* z_i)
-    rho  = exp.(clamp.(vec(Array(chn[:log_rho])), log(3.0), log(45.0)))
+    rho  = exp.(_softclamp.(vec(Array(chn[:log_rho])), log(3.0), log(45.0)))   # soft-bounded, mirrors model
     return (; susc, inf, rho)
 end
 

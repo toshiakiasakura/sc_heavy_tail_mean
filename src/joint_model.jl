@@ -8,6 +8,15 @@
 
 block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 
+# Numerically-stable softplus and an interior-preserving smooth "soft clamp".
+# `_softclamp(x, lo, hi)` equals `x` in the interior (lo ≪ x ≪ hi) and saturates smoothly to
+# ≈lo / ≈hi outside — a differentiable, ReverseDiff-safe replacement for `clamp` that keeps the
+# exp-transformed rates/shapes/means finite during aggressive Pathfinder/LBFGS steps without
+# distorting the well-scaled interior where good fits live. `_softplus` branches on the sign to
+# avoid `exp` overflow (branch is on a value, so it is ReverseDiff-safe on an uncompiled tape).
+_softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
+_softclamp(x, lo, hi) = x - _softplus(x - hi) + _softplus(lo - x)
+
 """
     _unordered_pairs(A)
 
@@ -45,7 +54,7 @@ function build_degree_stats(dm::ContactDegreeModel, apd::AgePairData, cfg::Frame
     log_emp = Matrix{Float64}(undef, A, A)
     for i in 1:A, j in 1:A
         base = if is_weighted(dm)
-            isempty(p.pos_weight[i, j]) ? 1e-3 : mean(p.pos_weight[i, j])   # μW init
+            isempty(p.pos_weight[i, j]) ? 1e-3 : whist_mean(p.pos_weight[i, j])   # μW init
         else
             max(p.emean[i, j], 1e-3)                                        # count-mean init
         end
@@ -68,7 +77,7 @@ end
 #   NegBin  g = 1/(1−P₀), P₀ = (φ/(φ+μ))^φ  — left-truncated fitted NegBin.
 #   Weibull g = (1−p⁰)                       — empirical hurdle non-zero probability.
 # The MeanNGM builder ignores g. ⚠ Floor (1−P₀) so near-empty cells (μ→0 ⇒ P₀→1)
-# don't blow up; the model's μ clamp keeps the mode interior (see tasks/lessons.md).
+# don't blow up; the relative-population offset keeps μ interior (see tasks/lessons.md).
 const _P0_FLOOR = 1e-3
 function _negbin_moments(m, k)
     P0 = (k / (k + m))^k
@@ -92,11 +101,16 @@ end
     # age-pair grid with a shared length-scale ρ, non-centred as f = η·L·z (L = chol K).
     # `ρ`, `η` and the 28×28 Cholesky `Lp` are SHARED across weeks (per-week variation
     # enters only through the per-week level cₜ and field zₜ — no temporal smoothing).
-    logpop = log.(wd.pop)
+    # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
+    # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
+    # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
+    # latent level c/c0 to O(1) (absolute log(pop)≈15.6 otherwise forces c≈−15.6 and, at the
+    # old clamp, the degenerate μ≡403 saturation; see tasks/lessons.md).
+    logpop = log.(wd.pop ./ wd.pop[1])
     log_rho ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
-    ρ = exp(clamp(log_rho, log(3.0), log(45.0)))          # length-scale (age-years)
-    η = exp(clamp(log_eta, -3.0, 2.0))                    # GP marginal scale
+    ρ = exp(_softclamp(log_rho, log(3.0), log(45.0)))     # length-scale (age-years), soft-bounded
+    η = exp(_softclamp(log_eta, -3.0, 2.0))               # GP marginal scale, soft-bounded
     c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
     P = length(ds.pair_list)
@@ -105,10 +119,13 @@ end
           for p in ds.pair_list, q in ds.pair_list]
     Lp = cholesky(Symmetric(Kp) + 1e-6 * I).L
 
-    # per-cell log-rate → directional mean μ_{i→j} (clamp guards exp under/overflow,
-    # μ ∈ [3e-4, 400]; the mode stays interior so reciprocity is not distorted).
+    # per-cell log-rate → directional mean μ_{i→j}. Soft-clamped (not `clamp`, so ReverseDiff-safe)
+    # to μ ∈ ≈[3e-4, 400]: the relative-population offset keeps the healthy log-rate O(1) (deep in
+    # the interior, where _softclamp is the identity), so μ is undistorted; the soft bound only
+    # stops a stray LBFGS step from over/under-flowing μ (which would make the Weibull scale
+    # λ=μ/gamma non-finite and abort the fit).
     _mu_matrix(rvec) =
-        [exp(clamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
+        [exp(_softclamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
     # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
     # μ matrix. `didx` indexes the (possibly weekly) degree arrays; `dispv` is the length-4
@@ -120,14 +137,14 @@ end
         for i in 1:A, j in 1:A
             bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
             if is_weighted(dm)
-                κ = exp(clamp(dispv[bl], -3.0, 3.0))       # shape ∈ [0.05, 20]
-                λ = μ[i, j] / gamma(1 + 1 / κ)
+                κ = exp(_softclamp(dispv[bl], -3.0, 3.0))   # shape ∈ ≈[0.05, 20], soft-bounded
+                λ = μ[i, j] / gamma(1 + 1 / κ)              # scale stays finite & >0 (μ, κ bounded)
                 pos = didx === nothing ? ds.pos_weight[i, j] : ds.pos_weight[didx, i, j]
-                isempty(pos) || (ll += sum(logpdf.(Weibull(κ, λ), pos)))
+                isempty(pos) || (ll += calculate_loglikelihood(pos, Weibull(κ, λ)))  # collapsed histogram
                 p0 = didx === nothing ? ds.p0[i, j] : ds.p0[didx, i, j]
                 k1, k2, g = _weibull_moments(μ[i, j], κ, p0)
             else
-                kk = exp(clamp(dispv[bl], -4.0, 5.0))       # dispersion ∈ [0.018, 148]
+                kk = exp(_softclamp(dispv[bl], -4.0, 5.0))  # dispersion ∈ ≈[0.018, 148], soft-bounded
                 dd = didx === nothing ? ds.dd_count[i, j] : ds.dd_count[didx, i, j]
                 ll += calculate_loglikelihood(dd, NegBin(μ[i, j], kk))
                 k1, k2, g = _negbin_moments(μ[i, j], kk)
@@ -218,10 +235,12 @@ is false or NUTS fails, the Pathfinder approximate-posterior draws are returned 
 """
 function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
                    cfg::FrameworkConfig; n_sample::Int = 250, use_nuts::Bool = true,
-                   ndraws_pf::Int = 200, adtype = nothing, rng = nothing)
+                   ndraws_pf::Int = 200, adtype = AutoReverseDiff(), rng = nothing)
     # `rng === nothing` keeps the original single-thread behaviour (seed the global RNG);
     # a supplied RNG (an isolated per-fit stream) makes the fit **thread-safe** for the
     # parallel pre-fit — no shared global-RNG mutation (see `prefit_chains!`).
+    # `adtype` (default ReverseDiff — the clamp-free model is ReverseDiff-compatible) is
+    # threaded into BOTH Pathfinder and NUTS; `nothing` restores each backend's own default.
     if rng === nothing
         Random.seed!(cfg.seed)
         rng = Random.default_rng()
@@ -229,7 +248,8 @@ function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
     w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     model = model_joint(dm, nb, ds, wd, w, cfg)
 
-    pf = pathfinder(model; ndraws = ndraws_pf, rng = rng)
+    pf = adtype === nothing ? pathfinder(model; ndraws = ndraws_pf, rng = rng) :
+                              pathfinder(model; ndraws = ndraws_pf, rng = rng, adtype = adtype)
     if !use_nuts
         return (; chn = pf.draws_transformed, model, w, pf)
     end
@@ -287,12 +307,12 @@ deterministic) so `generated_quantities(model, chn)` works after a reload.
 """
 function fit_or_load_chain(path::AbstractString, dm::ContactDegreeModel,
                            nb::NGMBuilder, ds, wd::WindowData, cfg::FrameworkConfig, w;
-                           use_nuts::Bool = false, rng = nothing)
+                           use_nuts::Bool = false, adtype = AutoReverseDiff(), rng = nothing)
     model = model_joint(dm, nb, ds, wd, w, cfg)
     if isfile(path)
         return (; chn = load(path, "result"), model)
     end
-    res = fit_joint(dm, nb, ds, wd, cfg; use_nuts = use_nuts, rng = rng)
+    res = fit_joint(dm, nb, ds, wd, cfg; use_nuts = use_nuts, adtype = adtype, rng = rng)
     jldsave(path; result = res.chn)
     return (; chn = res.chn, model)
 end
@@ -344,7 +364,7 @@ horizon `hi`. Returns `(; requested, fitted, failed, concurrency)`.
 """
 function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
                         grid = cis_age_grid(), setting::Symbol = :all,
-                        use_nuts::Bool = false,
+                        use_nuts::Bool = false, adtype = AutoReverseDiff(),
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                         max_concurrent::Int = fit_concurrency())
     mkpath(save_dir)
@@ -368,7 +388,7 @@ function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
         try
             ds_h = build_degree_stats(s.dm, apd_by_h_all[s.oi][s.hi], cfg)
             res  = fit_joint(s.dm, s.nb, ds_h, wds[s.oi], cfg; use_nuts = use_nuts,
-                             rng = Random.Xoshiro(cfg.seed))
+                             adtype = adtype, rng = Random.Xoshiro(cfg.seed))
             jldsave(s.path; result = res.chn)
             Threads.atomic_add!(fitted, 1)
         catch err
@@ -419,7 +439,7 @@ shifted windows — pass it to reuse the age-pair binning across the four combos
 function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowData,
                            cfg::FrameworkConfig, win0::WeeklyWindow;
                            grid = cis_age_grid(), setting::Symbol = :all,
-                           use_nuts::Bool = false,
+                           use_nuts::Bool = false, adtype = AutoReverseDiff(),
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                            ndraws::Int = cfg.n_forecast_draws, apd_by_h = nothing)
     A = wd0.A; H = length(cfg.horizons)
@@ -436,7 +456,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
         ds_h = build_degree_stats(dm, apd_h, cfg)
         path = joinpath(save_dir,
             "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win0.origin)_h$(h).jld2")
-        fl = fit_or_load_chain(path, dm, nb, ds_h, wd0, cfg, w; use_nuts = use_nuts)
+        fl = fit_or_load_chain(path, dm, nb, ds_h, wd0, cfg, w; use_nuts = use_nuts, adtype = adtype)
 
         gq = vec(generated_quantities(fl.model, fl.chn))
         keep = min(ndraws, length(gq))

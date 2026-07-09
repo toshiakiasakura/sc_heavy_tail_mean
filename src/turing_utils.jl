@@ -30,6 +30,13 @@ function calculate_loglikelihood(dd::DegreeDist, d::DiscreteUnivariateDistributi
 	return sum(logpdf.(d, dd.x) .* dd.y)
 end
 
+# Collapsed continuous log-likelihood for the hurdle-Weibull path: one logpdf per distinct
+# positive weighted-degree value, weighted by its count (the WeightedDegreeHist analogue of
+# the DegreeDist method above). First-arg type differs, so there is no dispatch ambiguity.
+function calculate_loglikelihood(w::WeightedDegreeHist, d::UnivariateDistribution)
+	return sum(logpdf.(d, w.x) .* w.y)
+end
+
 get_dist_name_from_model(model::Function)::String = String(Symbol(model))[7:end]
 
 function get_parms_single_individual(

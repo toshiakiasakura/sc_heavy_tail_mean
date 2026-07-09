@@ -15,11 +15,11 @@
 Load the cached chain for `(lbl, origin, h)` and rebuild the smoothed directional contact-mean
 matrix μ_{i→j} for one week, once per posterior draw:
 
-    ρ  = exp(clamp(log_rho, log3, log45)),  η = exp(clamp(log_eta, -3, 2))
+    ρ  = exp(softclamp(log_rho, log3, log45)),  η = exp(softclamp(log_eta, -3, 2))  (mirrors model)
     Kp[p,q] = exp(-((mid_p1-mid_q1)² + (mid_p2-mid_q2)²)/(2ρ²))  over the 28 unordered pairs
     Lp = chol(Kp + 1e-6 I).L
     rvec = c[week] .+ η .* (Lp * z[:,week])
-    μ[i,j] = exp(clamp(rvec[pair_index[i,j]] + log(pop_j), -8, 6))
+    μ[i,j] = exp(softclamp(rvec[pair_index[i,j]] + log(pop_j / pop_ref), -8, 6))   (pop_ref = pop[1], "2-10")
 
 `week_index` defaults to the last window week (the origin week the forecast NGM is frozen at).
 Handles both the per-week regime (`c[t]`, `z[p,t]`; the cached `contacts="weekly"` chains) and
@@ -43,10 +43,10 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     pair_list, pair_index = _unordered_pairs(A)
     P = length(pair_list)
     mid = cis_age_midpoints(; grid = grid)
-    logpop = log.(grid.POP)
+    logpop = log.(grid.POP ./ grid.POP[1])          # relative to reference bin (index 1, "2-10")
 
-    ρ = exp.(clamp.(vec(Array(chn[:log_rho])), log(3.0), log(45.0)))
-    η = exp.(clamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
+    ρ = exp.(_softclamp.(vec(Array(chn[:log_rho])), log(3.0), log(45.0)))   # soft-bounded, mirrors model
+    η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
     D = length(ρ)
 
     pnames = string.(names(chn, :parameters))
@@ -78,7 +78,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         Lp = cholesky(Symmetric(Kp) + 1e-6 * I).L
         rvec = c_t[d] .+ η[d] .* (Lp * @view z_t[d, :])
         for i in 1:A, j in 1:A
-            μ[d, i, j] = exp(clamp(rvec[pair_index[i, j]] + logpop[j], -8.0, 6.0))
+            μ[d, i, j] = exp(_softclamp(rvec[pair_index[i, j]] + logpop[j], -8.0, 6.0))
         end
     end
     return μ

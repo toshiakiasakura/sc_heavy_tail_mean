@@ -27,6 +27,38 @@ function dd_to_df(dd::DegreeDist, strat::String)::DataFrame
 end
 dd_to_line_vec(dd::DegreeDist)::Vector = vcat([fill(x, y) for (x, y) in zip(dd.x, dd.y)]...)
 
+# Collapsed (value → count) histogram of the *positive duration-weighted* degrees, the
+# continuous analogue of DegreeDist for the hurdle-Weibull likelihood. The weighted degrees
+# are sums over the finite duration-weight lattice, so many values repeat and collapse
+# losslessly — evaluating logpdf once per distinct value (× its count) instead of per
+# observation (mirrors the NegBin `DegreeDist` + `calculate_loglikelihood` histogram path).
+Base.@kwdef struct WeightedDegreeHist
+	x::Vector{Float64} # distinct positive weighted-degree values
+	y::Vector{Int64}   # corresponding counts
+end
+Base.isempty(w::WeightedDegreeHist) = isempty(w.x)
+whist_nobs(w::WeightedDegreeHist) = sum(w.y)
+whist_mean(w::WeightedDegreeHist) = isempty(w) ? NaN : sum(w.x .* w.y) / sum(w.y)
+
+"Collapse a raw vector of positive weighted degrees into a sorted `WeightedDegreeHist`."
+function WeightedDegreeHist(vals::AbstractVector{<:Real})
+	isempty(vals) && return WeightedDegreeHist(Float64[], Int64[])
+	cm = countmap(Float64.(vals))
+	xs = collect(keys(cm)); ys = collect(values(cm)); ord = sortperm(xs)
+	return WeightedDegreeHist(Float64.(xs[ord]), Int64.(ys[ord]))
+end
+
+"Merge weighted-degree histograms by summing counts over equal values (pooling over weeks)."
+function merge_whist(ws)
+	acc = Dict{Float64,Int64}()
+	for w in ws, k in eachindex(w.x)
+		acc[w.x[k]] = get(acc, w.x[k], 0) + w.y[k]
+	end
+	isempty(acc) && return WeightedDegreeHist(Float64[], Int64[])
+	xs = collect(keys(acc)); ord = sortperm(xs)
+	return WeightedDegreeHist(Float64.(xs[ord]), Int64.([acc[x] for x in xs[ord]]))
+end
+
 function DegreeDist(df::DataFrame)::DegreeDist
 	if "x" in names(df) && "y" in names(df)
 		if length(df[:, :x]) == length(unique(df[:, :x]))
