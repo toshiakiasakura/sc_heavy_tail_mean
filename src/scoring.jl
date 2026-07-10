@@ -38,7 +38,9 @@ natural and the log scale** (`transform_forecasts(fun=log_shift, offset=1)`; ins
 each returned frame carries a `scale ∈ {"natural","log"}` column, and WIS is
 aggregated **by horizon** across all forecast dates/origins (`by_model_h`), so the
 headline metric is the log-scale, by-horizon WIS (`scale=="log"`). Returns
-`(; by_model, by_model_h)` with WIS + components, bias, and interval coverage.
+`(; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)` with WIS +
+components, bias, and interval coverage; `by_model_h_age` adds the age-stratified
+(model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics.
 Requires `scoringutils` v2 (`as_forecast_quantile`/`transform_forecasts`/`score`).
 """
 function score_wis(df_quant::DataFrame)
@@ -58,12 +60,15 @@ function score_wis(df_quant::DataFrame)
     by_model_h  <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
     by_model_dt <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","scale")))
     by_model_dt_h <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","horizon","scale")))
+    # age-stratified WIS by horizon (Fig 3C analog): one WIS per model × horizon × age bin
+    by_model_h_age <- as.data.frame(summarise_scores(sc, by = c("model","horizon","age_group","scale")))
     """
-    by_model      = rcopy(R"by_model")
-    by_model_h    = rcopy(R"by_model_h")
-    by_model_dt   = rcopy(R"by_model_dt")
-    by_model_dt_h = rcopy(R"by_model_dt_h")
-    return (; by_model, by_model_h, by_model_dt, by_model_dt_h)
+    by_model       = rcopy(R"by_model")
+    by_model_h     = rcopy(R"by_model_h")
+    by_model_dt    = rcopy(R"by_model_dt")
+    by_model_dt_h  = rcopy(R"by_model_dt_h")
+    by_model_h_age = rcopy(R"by_model_h_age")
+    return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)
 end
 
 """Native sample CRPS (Gneiting–Raftery energy form, O(M log M)) — cross-check."""
