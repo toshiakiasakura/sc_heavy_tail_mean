@@ -89,3 +89,63 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     end
     return μ
 end
+
+"""
+    reconstruct_dispersion_draws(lbl, origin, h; weighted, week_index=nothing,
+                                 save_dir) -> ndraws × 4  |  nothing
+
+Load the cached chain for `(lbl, origin, h)` and rebuild the per-cell degree-model dispersion
+(one value per block-linear index `bl = 2(block_of(i)−1) + block_of(j) ∈ {1,2,3,4}`) for one
+week, once per posterior draw — the companion to `reconstruct_mu_draws` (same chain, same draw
+order, so column `d` pairs with μ's draw `d`).
+
+`weighted` selects the parameter and its soft-clamp bounds, mirroring `_cell_moments!`
+(joint_model.jl:150,157):
+- Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
+- NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
+
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="weekly"`
+chains — `week_index` defaults to the last window week, the origin week the NGM is frozen at) and
+the pooled regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the
+chain file is missing.
+"""
+function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
+                                      weighted::Bool,
+                                      week_index::Union{Int,Nothing} = nothing,
+                                      contacts::AbstractString = "weekly",
+                                      save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(path) || return nothing
+    chn = try
+        load(path, "result")
+    catch err
+        @warn "could not load chain" path err
+        return nothing
+    end
+
+    base    = weighted ? "log_kappa" : "log_k"
+    lo, hi  = weighted ? (-3.0, 3.0) : (-4.0, 5.0)        # soft-clamp bounds mirror _cell_moments!
+    pnames  = string.(names(chn, :parameters))
+    perweek = Regex("^" * base * raw"\[(\d+)\s*,\s*(\d+)\]$")
+    D = length(vec(Array(chn[Symbol("log_eta")])))         # draw count (shared with μ reconstruction)
+    disp = Matrix{Float64}(undef, D, 4)
+
+    # collect (row, col, exact-name) for every disp param. Read via the EXACT stored name — MCMCChains
+    # prints matrix indices as "log_k[1, 2]" (space after the comma), so a rebuilt "log_k[1,2]" misses.
+    entries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
+               for n in pnames for m in (match(perweek, n),) if m !== nothing]
+    isempty(entries) && (@warn "no $base parameters in chain" path; return nothing)
+    read_col!(bl, name) = (disp[:, bl] = exp.(_softclamp.(vec(Array(chn[Symbol(name)])), lo, hi)))
+
+    if maximum(e[1] for e in entries) == 4                 # per-week: row = block-linear bl, col = week
+        wk = week_index === nothing ? maximum(e[2] for e in entries) : week_index
+        for (bl, t, name) in entries
+            t == wk && read_col!(bl, name)
+        end
+    else                                                   # pooled: 2×2 block matrix log_*[bi,bj]
+        for (bi, bj, name) in entries
+            read_col!(2 * (bi - 1) + bj, name)
+        end
+    end
+    return disp
+end
