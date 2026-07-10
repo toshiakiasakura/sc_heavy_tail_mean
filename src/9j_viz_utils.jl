@@ -347,24 +347,81 @@ function reproduction_over_time(combos, labels4, wins, cfg;
 end
 
 """
+    reproduction_over_time_or_load(combos, labels4, wins, cfg; grid, raw, h, save_dir,
+                                   cache_path, rebuild, verbose) -> store
+
+Cached wrapper around `reproduction_over_time`. The R(t) loop reloads window/degree data and
+the cached chain per origin × combo (slow), but is deterministic given the cached chains — so
+its `store` is cached to `dt_intermediate/9j_rt_<contacts>_h<h>.jld2` with the same
+validate-or-rebuild pattern as `assemble_or_load_forecasts`. The cache self-invalidates when
+`origins`/`labels` change; `rebuild=true` forces a fresh compute.
+"""
+function reproduction_over_time_or_load(combos, labels4, wins, cfg;
+        grid = cis_age_grid(), raw, h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
+        cache_path::AbstractString = joinpath(save_dir, "9j_rt_$(contacts_label(cfg))_h$(h).jld2"),
+        rebuild::Bool = false, verbose::Bool = true)
+    origins = [w.origin for w in wins]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        if c["origins"] == origins && c["labels"] == labels4
+            println("R(t): loaded cache ", cache_path)
+            return c["store"]
+        end
+        @warn "R(t) cache stale (origins/labels changed) — rebuilding" cache_path
+    end
+    store = reproduction_over_time(combos, labels4, wins, cfg;
+                                   grid = grid, raw = raw, h = h, save_dir = save_dir, verbose = verbose)
+    jldsave(cache_path; store, origins, labels = labels4, h)
+    return store
+end
+
+const _NATIONAL_EST_PATH = joinpath(@__DIR__, "..", "inc2prev", "outputs", "estimates_national.csv")
+
+"""
+    national_R(; path, region, d0, d1) -> (; date, med, lo, hi)
+
+Daily inc2prev national R estimate (`name=="R"`, `variable==region`, default England) as
+median + 90% band (q5/q95), sorted by date and optionally clipped to `[d0, d1]`. Overlaid on
+`plot_reproduction` as an external reference for the NGM-derived R.
+"""
+function national_R(; path::AbstractString = _NATIONAL_EST_PATH, region::AbstractString = "England",
+                    d0 = nothing, d1 = nothing)
+    df = CSV.read(path, DataFrame)
+    r  = @subset(df, :name .== "R", :variable .== region)
+    r  = @transform(r, :date = _todate_safe.(:date))
+    d0 !== nothing && (r = @subset(r, :date .>= d0))
+    d1 !== nothing && (r = @subset(r, :date .<= d1))
+    r = sort(r, :date)
+    return (; date = r.date, med = r.median, lo = r.q5, hi = r.q95)
+end
+
+"""
     plot_reproduction(store, labels4, model_cols, origins; h) -> Plot
 
-One panel of the reproduction number over time (one line + 90% ribbon per model, R=1
-threshold). `store` is `reproduction_over_time`'s output; `origins` its window origins.
+Reproduction number over time. Each model's R is drawn as a **step function** (`:steppost` —
+held constant forward from each origin week, matching the NGM frozen at that origin) with a
+90% ribbon, over the inc2prev **national R** (England) reference curve. R=1 threshold dashed.
+`store` is `reproduction_over_time`'s output; `origins` its window origins.
 """
 function plot_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
     x = week_mid.(origins)
     fig = plot(; xlabel = "forecast origin",
                ylabel = "reproduction number R  (dominant NGM eigenvalue)",
-               title = "9j — reproduction number over time by model (h=$h, 90% CI)",
+               title = "9j — reproduction number over time by model (h=$h, step; 90% CI)",
                size = (950, 520), legend = :topleft, xrotation = 45, ylims = (0, 3))
-    # Plot the real Date-bearing series FIRST so the x-axis is established as a date axis;
-    # only THEN add the R=1 reference. A leading synthetic 2-point line on an empty
-    # ylims-fixed plot mangles the date ticks (numeric axis locks in before the real dates).
+    # Plot real Date-bearing series FIRST so the x-axis is established as a date axis; only
+    # THEN add the R=1 hline. A leading synthetic 2-point line on an empty ylims-fixed plot
+    # mangles the date ticks (numeric axis locks in before the real dates).
+    natR = national_R(; d0 = first(x), d1 = last(x))
+    if !isempty(natR.date)
+        plot!(fig, natR.date, natR.med; color = :black, lw = 2, label = "inc2prev national R (England)",
+              ribbon = (natR.med .- natR.lo, natR.hi .- natR.med), fillalpha = 0.10)
+    end
     for (ci, lbl) in enumerate(labels4)
         s = store[lbl]
-        plot!(fig, x, s.med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
-              ribbon = (s.med .- s.lo, s.hi .- s.med), fillalpha = 0.12, label = lbl)
+        plot!(fig, x, s.med; color = model_cols[ci], lw = 1.8, linetype = :steppost,
+              marker = :circle, ms = 2, ribbon = (s.med .- s.lo, s.hi .- s.med),
+              fillalpha = 0.12, label = lbl)
     end
     hline!(fig, [1.0]; color = :gray, ls = :dash, label = "R = 1")  # threshold, after dates set
     return fig
