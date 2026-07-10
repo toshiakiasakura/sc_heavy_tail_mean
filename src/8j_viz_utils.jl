@@ -96,3 +96,44 @@ Evenly-spaced subset (≤ `n`) of `origins` for panel tiling.
 """
 pick_origins(origins::AbstractVector{Date}; n::Int = 9) =
     origins[unique(round.(Int, range(1, length(origins); length = min(n, length(origins)))))]
+
+"""
+    reproduction_draws(dm, nb, apd, wd, cfg, w; h=1, save_dir) -> Vector{Float64} | nothing
+
+Per-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue
+of the **origin-week** next-generation matrix, exactly the NGM the forecast is frozen at
+(`posterior_forecast`/`iterated_forecast` use `q.Cstar[end]` with antibody held at the
+origin). `apd` is the raw age-pair `AgePairData` for the origin window (as returned by
+`prepare_degree_data`); it is turned into the model's degree stats with
+`build_degree_stats(dm, apd, cfg)` — mirroring `iterated_forecast`. Reloads the cached `h`
+chain via `fit_or_load_chain` (rebuilds the model so `generated_quantities` works), then
+for each posterior draw builds
+`N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:,end])` and takes
+`max real(eigvals(N))` (the NGM is nonnegative, so its Perron root is real & positive).
+
+`h=1` is the direct 1-week-ahead fit (contacts observed up to the origin). Returns
+`nothing` when the chain file is missing, so callers can leave a gap.
+"""
+function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, apd, wd, cfg, win;
+                            h::Integer = 1,
+                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    path = chain_path(lbl, win.origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    isfile(path) || return nothing
+    ds = build_degree_stats(dm, apd, cfg)                                 # raw AgePairData → model stats
+    wpmf = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)  # model's 7th arg is the GI PMF
+    res = try
+        fit_or_load_chain(path, dm, nb, ds, wd, cfg, wpmf; use_nuts = false)  # reload chain, rebuild model
+    catch err
+        @warn "could not load chain for reproduction number" path err
+        return nothing
+    end
+    gq = vec(generated_quantities(res.model, res.chn))                     # per-draw (; susc, inf, F, Cstar)
+    R = Float64[]
+    for q in gq
+        q === nothing && continue
+        N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, end])  # mirror posterior_forecast
+        push!(R, maximum(real(eigvals(N))))
+    end
+    return R
+end
