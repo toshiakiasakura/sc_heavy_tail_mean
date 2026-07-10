@@ -2,7 +2,8 @@
 
 function read_comix_uk_adult_time_series()
     df = read_comix_uk_contact()  |> standardise_comix_uk_to_socialmixer_data;
-    df_part = CSV.read("../dt_comix_no_public/part_uk.csv", DataFrame);
+    df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
+        cols = [:part_wave_uid, :part_age_group, :part_gender_nb, :date]);
 
     df_part = @select(df_part,
         :part_id = :part_wave_uid,
@@ -17,24 +18,50 @@ function read_comix_uk_adult_time_series()
     return (df, df_part_ch)
 end
 
-function create_chunk_df(df_part::DataFrame)
-    # Create 2-week chunks based on date column only
+function create_chunk_df(df_part::DataFrame; chunk_days::Int = 14, anchor_date::Union{Nothing,Date} = nothing)
     earliest_date = minimum(df_part[:, :date])
-    latest_date = maximum(df_part[:, :date])
+    latest_date   = maximum(df_part[:, :date])
 
-    # Generate 2-week chunks
+    # Anchor: aligns chunk boundaries to a fixed date so multiple datasets
+    # share the same week labels. The first emitted chunk is the anchor-aligned
+    # one that contains `earliest_date`; subsequent chunks tile forward.
+    start = anchor_date === nothing ? earliest_date : anchor_date
+    Δ = (earliest_date - start).value
+    if Δ >= 0
+        offset = Δ ÷ chunk_days
+        start  = start + Day(offset * chunk_days)
+    else
+        offset = ceil(Int, -Δ / chunk_days)
+        start  = start - Day(offset * chunk_days)
+    end
+
     chunks = []
-    current = earliest_date
+    current = start
     chunk_num = 1
     while current <= latest_date
-        chunk_end = min(current + Day(13), latest_date)
-        mid_date = current + Day(div(chunk_end - current, 2))
+        chunk_end = current + Day(chunk_days - 1)
+        mid_date  = current + Day(div(chunk_end - current, 2))
         push!(chunks, (chunk_number=chunk_num, chunk_start=current, chunk_end=chunk_end, mid_date=mid_date))
         current = chunk_end + Day(1)
         chunk_num += 1
     end
 
     return DataFrame(chunks)
+end
+
+"""
+Anchor date for inc2prev-style 7-day weeks (Sunday-start), as used by
+`/workdir/inc2prev/scripts/read.R` (`seq(as.Date("2021-03-21"), ..., by = 7)`).
+"""
+inc2prev_week_anchor() = Date(2021, 3, 21)
+
+"""
+Build inc2prev-aligned 7-day week labels covering `[start_date, end_date]`.
+"""
+function create_week_df(df_part::DataFrame; start_date::Date = Date(2021, 7, 1),
+                        end_date::Date = Date(2021, 12, 31))
+    df_filt = @subset(df_part, start_date .<= :date .<= end_date)
+    return create_chunk_df(df_filt; chunk_days = 7, anchor_date = inc2prev_week_anchor())
 end
 
 function assign_chunk(date, df_chunk)

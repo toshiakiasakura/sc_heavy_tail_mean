@@ -529,9 +529,10 @@ function plot_settings_sum_vs_nonhome(df_means_settings::DataFrame,
     pl = plot(;
         ylabel    = "Mean contacts",
         title     = "Sum of settings ($(label_sum)) vs. non-home",
-        xrotation = 45,
+        xrotation = 90,
         legend    = :topright,
-        ylim=[0, 9]
+        ylim      = [0, 9],
+        xticks    = (df_plot.key, Dates.format.(df_plot.key, "dd u yy")),
     )
 
     # summed estimated posterior median + CI

@@ -30,6 +30,13 @@ function calculate_loglikelihood(dd::DegreeDist, d::DiscreteUnivariateDistributi
 	return sum(logpdf.(d, dd.x) .* dd.y)
 end
 
+# Collapsed continuous log-likelihood for the hurdle-Weibull path: one logpdf per distinct
+# positive weighted-degree value, weighted by its count (the WeightedDegreeHist analogue of
+# the DegreeDist method above). First-arg type differs, so there is no dispatch ambiguity.
+function calculate_loglikelihood(w::WeightedDegreeHist, d::UnivariateDistribution)
+	return sum(logpdf.(d, w.x) .* w.y)
+end
+
 get_dist_name_from_model(model::Function)::String = String(Symbol(model))[7:end]
 
 function get_parms_single_individual(
@@ -174,4 +181,20 @@ function explore_chns(chn::Chains)
 	# Check the likelihood behaviour
 	plot(chn, [:lp, :loglikelihood, :logprior, :tree_depth, :acceptance_rate]) |> display
 	plot(chn) |> display
+end
+
+"""
+Compact summary of a Dirichlet-multinomial regression chain.
+Tags β / γ rows by their natural index and reports convergence.
+"""
+function summarize_dm_fit(chn::Chains)
+	df = extract_chain_info(chn)
+	converged = is_chains_converged(chn)
+	bad = @subset(df, :ess .< 200 .|| :rhat .> 1.1)
+	if nrow(bad) > 0
+		println("Parameters failing convergence (ess < 200 or rhat > 1.1):")
+		display(bad[:, [:parameters, :ess, :rhat]])
+	end
+	println("Converged: ", converged)
+	return df
 end

@@ -1,1 +1,9 @@
-inst/
+*.claude
+sysimage.so
+sysimage.dylib
+sysimage.dll
+.DS_store
+.memsearch
+
+dt_comix_no_public
+dt_surveys_

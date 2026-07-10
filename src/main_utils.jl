@@ -8,6 +8,7 @@ using Distributions
 using Glob
 using GLM
 using Images
+using Arrow
 using JLD2
 using LaTeXStrings
 using LinearAlgebra
@@ -15,7 +16,7 @@ using LogExpFunctions
 using Memoization
 using Parameters
 using Plots
-using Pipe
+import Pipe: @pipe
 using Pkg
 using Printf
 using QuadGK
@@ -33,6 +34,7 @@ using Base.Threads
 using Pathfinder
 using DynamicPPL
 using Turing
+using ReverseDiff          # loads the Turing/DynamicPPL ReverseDiff AD extension (AutoReverseDiff)
 using MCMCChains
 
 include("distributions/main.jl")

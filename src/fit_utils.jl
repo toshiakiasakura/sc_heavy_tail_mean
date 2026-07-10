@@ -95,6 +95,39 @@ function calc_waic(dists::Vector{T}, dd::DegreeDist
 	return -2 * (lppd - p_waic)
 end
 
+"""
+WAIC from a per-draw, per-observation log-likelihood matrix.
+
+`loglik` has shape `(S, N)` — `S` posterior draws by `N` observations.
+
+Returns a `NamedTuple`:
+- `waic`     — −2 · (Σ lppd_i − Σ p_waic_i)
+- `lppd`     — Σ_i log(mean_s exp(loglik[s, i]))
+- `p_waic`   — Σ_i var_s(loglik[s, i])
+- `elpd_i`   — vector of per-obs `lppd_i − p_waic_i` (length N)
+- `se`       — `sqrt(N · var_i(−2 · elpd_i))`, the standard error of WAIC
+"""
+function calc_waic_from_loglik(loglik::AbstractMatrix)
+	S, N = size(loglik)
+	lppd_i   = [logsumexp(view(loglik, :, i)) - log(S) for i in 1:N]
+	p_waic_i = [var(view(loglik, :, i))                for i in 1:N]
+	elpd_i   = lppd_i .- p_waic_i
+	waic     = -2 * sum(elpd_i)
+	se       = sqrt(N * var(-2 .* elpd_i))
+	return (waic = waic, lppd = sum(lppd_i), p_waic = sum(p_waic_i),
+	        elpd_i = elpd_i, se = se)
+end
+
+"""
+Standard error of the WAIC difference between two models on the same data,
+given their per-observation `elpd_i` vectors.
+"""
+function calc_waic_diff_se(elpd_a::AbstractVector, elpd_b::AbstractVector)
+	@assert length(elpd_a) == length(elpd_b)
+	d = -2 .* (elpd_a .- elpd_b)
+	return sqrt(length(d) * var(d))
+end
+
 # TODO: delete it.
 #function calc_waic_weights(df_waic::DataFrame, model_names::Vector)
 #	mat_w = df_waic[:, model_names] |> Matrix

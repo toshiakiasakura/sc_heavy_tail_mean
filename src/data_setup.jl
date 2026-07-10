@@ -4,6 +4,18 @@
 
 DIR_SURVEY = "../dt_surveys/"
 
+# Load selected columns of an Arrow file into a DataFrame. Columns are
+# materialised (copied) into standard Julia vectors so downstream code can
+# mutate them without worrying about Arrow's read-only memory-mapped views.
+function read_arrow_df(path::AbstractString; cols::AbstractVector)
+    t = Arrow.Table(path)
+    df = DataFrame()
+    for c in Symbol.(cols)
+        df[!, c] = copy(t[c])
+    end
+    return df
+end
+
 """
 You can merge `comix_uk_sday.csv` to `contact_common.csv` with a merge key of `part_id`.
 Use `read_raw_sc_data_with_sday` to do this automatically.
@@ -37,7 +49,10 @@ function read_adult_chunks(df, df_part)
         :part_id, :part_age, :part_gender, :date)
 	df_part = filter_adult_cate(df_part, col = :part_age)
 	df_part_ch = add_date_chunks(df_part);
-	df = leftjoin(df, df_part_ch, on = :part_id)
+	# Contacts `df` already carries its own `:date`; drop the participant-side
+	# `:date` so the join brings over only the chunk/demographic columns
+	# (`chunk_number`, `mid_date`, …) without a duplicate-name collision.
+	df = leftjoin(df, select(df_part_ch, Not(:date)), on = :part_id)
 	return df, df_part_ch
 end
 
@@ -478,6 +493,114 @@ end
 ##### CoMix UK data #####
 #########################
 
+# Bin a contact-duration value (minutes) into the legacy K=5 `duration_multi`
+# code. Boundaries follow the midpoints documented in degree_dist.jl
+# (`_DURATION_T_MID`: 2.5, 10, 37.5, 150, ∞).
+# `cnt_minutes_max` is sometimes loaded as a string column (e.g. "1440", "NA")
+# when the underlying CSV has mixed values; parse numeric strings, treat
+# "NA"/"" as missing.
+function _minutes_to_duration_multi(m)
+	ismissing(m) && return missing
+	if m isa AbstractString
+		(m == "NA" || m == "") && return missing
+		m = parse(Int, m)
+	end
+	m < 5   && return 1
+	m < 15  && return 2
+	m < 60  && return 3
+	m < 240 && return 4
+	return 5
+end
+
+# Categorical `cnt_total_time` strings used in the Jul-2021+ CoMix UK waves
+# (the numeric `cnt_minutes_max` column is entirely NA in that window).
+function _cnt_total_time_to_duration_multi(v)
+	ismissing(v)   && return missing
+	v == "<5m"     && return 1
+	v == "5m-14m"  && return 2
+	v == "15m-59m" && return 3
+	v == "60m-4h"  && return 4
+	v == "4h+"     && return 5
+	return missing
+end
+
+# Prefer the numeric column when populated; otherwise fall back to the
+# categorical one. Returns `missing` if both are. `mins` may be an
+# `"NA"` string when the column is stored as a String column in the Arrow
+# file, in which case `_minutes_to_duration_multi` yields `missing` and we
+# fall back to the categorical column.
+function _uk_duration_multi(mins, cat)
+	r = _minutes_to_duration_multi(mins)
+	!ismissing(r) ? r : _cnt_total_time_to_duration_multi(cat)
+end
+
+# Map `cnt_phys` (1 = physical, 0 = non-physical) in dt_comix_no_public to the
+# legacy `phys_contact` coding (1 = physical, 2 = non-physical).
+_cnt_phys_to_phys_contact(v) =
+	ismissing(v) ? missing : (v == 1 ? 1 : 2)
+
+# Participant-level group-contact flags in `part_uk.arrow`. One column per
+# {child, adult, older_adult} × {work, school, other} cell — raw values are a
+# mix of integers, "no", "Yes", free-text place names, etc., which downstream
+# code classifies via `classify_mc`.
+const _MC_COLS_UK = [
+	:multiple_contacts_child_work,        :multiple_contacts_child_school,        :multiple_contacts_child_other,
+	:multiple_contacts_adult_work,        :multiple_contacts_adult_school,        :multiple_contacts_adult_other,
+	:multiple_contacts_older_adult_work,  :multiple_contacts_older_adult_school,  :multiple_contacts_older_adult_other,
+]
+
+_mc_to_str(v) = ismissing(v) ? missing : string(v)
+
+"""
+Load raw CoMix-UK contacts and participants from `dt_comix_no_public/` and
+reshape them into the legacy contact/participant column schema that the rest
+of the project consumes.
+
+Contact df columns: `:part_id` (= `part_wave_uid`), `:cont_id`, `:date`,
+`:cnt_home`, `:cnt_work`, `:cnt_school`, `:cnt_transport`, `:cnt_otherplace`,
+`:cnt_household`, `:phys_contact` (∈ {1, 2}), `:duration_multi` (∈ {1..5}).
+
+Participant df columns: `:part_id`, `:hh_id`, `:part_age` (age-group string),
+`:part_gender`, `:date`, `:wave`, plus the 9 `multiple_contacts_*` columns
+listed in `_MC_COLS_UK` (normalised to `Union{Missing, String}`).
+"""
+function read_comix_uk_raw_contacts_and_part()
+	df = read_arrow_df("../dt_comix_no_public/contacts_uk.arrow";
+		cols = [:part_wave_uid, :contact, :date,
+			:cnt_home, :cnt_work, :cnt_school,
+			:cnt_public_transport, :cnt_other_place, :cnt_household,
+			:cnt_phys, :cnt_minutes_max, :cnt_total_time, :cnt_mass])
+	df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
+		cols = vcat([:part_wave_uid, :hhld_wave_uid,
+				:part_age_group, :part_gender_nb, :date, :wave],
+			_MC_COLS_UK))
+
+	df = @select(df,
+		:part_id = :part_wave_uid,
+		:cont_id = :contact,
+		:date,
+		:cnt_home, :cnt_work, :cnt_school,
+		:cnt_transport = :cnt_public_transport,
+		:cnt_otherplace = :cnt_other_place,
+		:cnt_household,
+		:phys_contact = _cnt_phys_to_phys_contact.(:cnt_phys),
+		:duration_multi = _uk_duration_multi.(:cnt_minutes_max, :cnt_total_time),
+		:cnt_mass,
+	)
+
+	df_part_out = @select(df_part,
+		:part_id = :part_wave_uid,
+		:hh_id = :hhld_wave_uid,
+		:part_age = :part_age_group,
+		:part_gender = :part_gender_nb,
+		:date, :wave,
+	)
+	for c in _MC_COLS_UK
+		df_part_out[!, c] = _mc_to_str.(df_part[!, c])
+	end
+	return (df, df_part_out)
+end
+
 function read_comix_uk_dds()
 	df_comix, df_part = read_comix_uk_contact_adult_2021Jul_2022Mar();
 	return get_df_dd_single(df_comix, df_part, "CoMix_uk_internal")
@@ -489,7 +612,8 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 	end
 	df_comix = read_comix_uk_contact() |> filter_date
 	df_comix = standardise_comix_uk_to_socialmixer_data(df_comix)
-	df_part = CSV.read("../dt_comix_no_public/part_uk.csv", DataFrame) |>
+	df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
+		cols = [:part_wave_uid, :part_age_group, :part_gender_nb, :date]) |>
 			  filter_date
 	# Standardise columns.
 	df_part = @select(df_part,
@@ -505,7 +629,8 @@ function read_comix_uk_contact_adult_2021Jul_2022Mar()
 end
 
 function read_comix_uk_contact()
-	df_comix = CSV.read("../dt_comix_no_public/contacts_uk.csv", DataFrame)
+	df_comix = read_arrow_df("../dt_comix_no_public/contacts_uk.arrow";
+		cols = [:part_wave_uid, :cnt_household, :cnt_home, :cnt_work, :date])
 	df_comix[!, :year_month] = convert_date_to_year_month.(df_comix.date)
 	df_comix[!, :year_q] = convert_date_to_quarter.(df_comix.date)
 	return df_comix
@@ -646,4 +771,169 @@ function transform_comix2(s::String)
     else
         return s
     end
+end
+
+###################################################
+##### Dirichlet-multinomial preparation        ####
+###################################################
+
+"""
+Load raw CoMix-UK contacts + participants with NO age-group or date filtering.
+
+The returned `df` contact table carries `:phys_contact`, `:duration_multi`,
+`:cnt_home` (standardised to "true"/"false"), and `:date` (the participant's
+diary day). `df_part` is the matching participant table with `:date`.
+
+Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
+"""
+function read_comix_uk_contact_raw()
+    df, df_part = read_comix_uk_raw_contacts_and_part()
+    df = innerjoin(df, df_part, on = [:part_id, :date])
+    standardise_cnt_home_values!(df)
+    rename_part_id_to_uid!(df, df_part)
+    return (df, df_part)
+end
+
+"""
+Load CoMix-UK contacts + participants for the latter half of 2021
+(2021-07-01 ≤ date < 2022-01-01), restricted to adult participants.
+
+The returned `df` contact table carries `:phys_contact`, `:duration_multi`,
+`:cnt_home` (standardised to "true"/"false"), and `:date` (the participant's
+diary day). `df_part` is the matching participant table with `:date`.
+
+Both tables use `:part_id_d` (after `rename_part_id_to_uid!`).
+"""
+function read_comix_uk_contact_adult_2021Jul_2021Dec()
+    df, df_part = read_comix_uk_raw_contacts_and_part()
+
+    # part_age is an age-group string (e.g. "18-29"); use the categorical filter.
+    df_part = filter_adult_cate(df_part, col = :part_age)
+
+    # Date filter: 2021-07-01 ≤ date < 2022-01-01 on the participant table
+    # (the contact table inherits the filter via inner join).
+    df_part = @subset(df_part, Date(2021, 7, 1) .<= :date .< Date(2022, 1, 1))
+    df = innerjoin(df, df_part, on = :part_id)
+
+    standardise_cnt_home_values!(df)
+    rename_part_id_to_uid!(df, df_part)
+    return (df, df_part)
+end
+
+"""
+Build inputs for `model_dm_logdeg` / `model_dm_logdeg_constprec` for one
+`(setting, outcome)` panel.
+
+- `setting`  ∈ {"home", "non-home"}.
+- `outcome`  ∈ {:duration_multi, :phys_contact}.
+- `K`        — number of categories (5 for duration, 2 for physical).
+- `impute_missing_duration` — when `outcome == :duration_multi`, replace missing
+  duration values with `1` (<5 min). Always drops rows missing the chosen
+  outcome regardless (after imputation, no rows remain missing for duration).
+- `drop_all_missing` — sensitivity flag: if `true`, drop ALL rows where
+  *either* `:duration_multi` or `:phys_contact` is missing/`"NA"` before
+  counting (used for the all-missing-dropped sensitivity analysis).
+- `dropna_keep_n` — if `true`, count NA outcomes into the per-cell degree
+  `n` (the regression predictor), but exclude them from the category counts
+  `Y`. Cells whose observed-outcome count is zero are dropped. Mutually
+  exclusive with `drop_all_missing`.
+
+Each output row is one (`part_id_d`, diary `date`) cell with at least one
+contact in the requested setting.
+
+Returns a `NamedTuple` with fields:
+- `X::Matrix{Float64}` — `[1 log(n)]`, size `N × 2`.
+- `Y::Matrix{Int}`     — counts per category, size `N × K`.
+- `n::Vector{Int}`     — total contacts per cell (full degree).
+- `n_obs::Vector{Int}` — per-cell DM trial size = `rowSums(Y)`. Equals `n`
+  unless `dropna_keep_n = true`, in which case it can be smaller.
+- `meta::DataFrame`    — `:part_id_d`, `:date`.
+"""
+function prepare_dm_inputs(df_contacts::DataFrame; setting::String,
+                           outcome::Symbol, K::Int,
+                           impute_missing_duration::Bool = true,
+                           drop_all_missing::Bool = false,
+                           dropna_keep_n::Bool = false)
+    setting in ("home", "non-home") || error("setting must be \"home\" or \"non-home\"")
+    outcome in (:duration_multi, :phys_contact) ||
+        error("outcome must be :duration_multi or :phys_contact")
+    !(drop_all_missing && dropna_keep_n) ||
+        error("drop_all_missing and dropna_keep_n are mutually exclusive")
+
+    df = copy(df_contacts)
+
+    # Filter by setting using the standardised cnt_home strings.
+    df = setting == "home" ? @subset(df, :cnt_home .== "true") :
+                             @subset(df, :cnt_home .== "false")
+
+    is_missing_val(v) = ismissing(v) || (v isa AbstractString && v == "NA")
+    to_int(v) = v isa AbstractString ? parse(Int, v) : Int(v)
+
+    if dropna_keep_n
+        # Keep all setting rows so per-cell degree includes NA-outcome contacts.
+        # Y excludes NA values (they contribute nothing to any category); the
+        # DM trial size becomes rowSums(Y) ≤ n.
+        grp = combine(groupby(df, [:part_id_d, :date])) do sub
+            counts  = zeros(Int, K)
+            n_total = nrow(sub)
+            for v in sub[:, outcome]
+                if !is_missing_val(v)
+                    kk = to_int(v)
+                    1 <= kk <= K && (counts[kk] += 1)
+                end
+            end
+            (; (Symbol("y$k") => counts[k] for k in 1:K)...,
+                n = n_total, n_obs = sum(counts))
+        end
+        grp = @subset(grp, :n_obs .> 0)
+        Y     = Matrix{Int}(grp[:, [Symbol("y$k") for k in 1:K]])
+        n     = Vector{Int}(grp[:, :n])
+        n_obs = Vector{Int}(grp[:, :n_obs])
+        X     = hcat(ones(length(n)), log.(n))
+        meta  = grp[:, [:part_id_d, :date]]
+        return (; X = X, Y = Y, n = n, n_obs = n_obs, meta = meta)
+    end
+
+    # Sensitivity policy: drop rows where EITHER outcome is missing.
+    if drop_all_missing
+        df = filter(:duration_multi => !is_missing_val, df)
+        df = filter(:phys_contact   => !is_missing_val, df)
+        df[!, outcome] = [to_int(v) for v in df[:, outcome]]
+    else
+        # Primary policy:
+        #   - duration_multi: impute missing as 1 (<5 min) when imputing,
+        #     otherwise drop missing rows.
+        #   - phys_contact:   drop missing rows.
+        if outcome == :duration_multi
+            if impute_missing_duration
+                df[!, :duration_multi] = [is_missing_val(v) ? 1 : to_int(v)
+                                          for v in df[:, :duration_multi]]
+            else
+                df = filter(:duration_multi => !is_missing_val, df)
+                df[!, :duration_multi] = [to_int(v) for v in df[:, :duration_multi]]
+            end
+        else
+            df = filter(:phys_contact => !is_missing_val, df)
+            df[!, :phys_contact] = [to_int(v) for v in df[:, :phys_contact]]
+        end
+    end
+
+    # Group per (part_id_d, date) and tally per category.
+    grp = combine(groupby(df, [:part_id_d, :date])) do sub
+        counts = zeros(Int, K)
+        for v in sub[:, outcome]
+            if 1 <= v <= K
+                counts[v] += 1
+            end
+        end
+        (; (Symbol("y$k") => counts[k] for k in 1:K)..., n = sum(counts))
+    end
+
+    grp = @subset(grp, :n .> 0)
+
+    Y = Matrix{Int}(grp[:, [Symbol("y$k") for k in 1:K]])
+    n = Vector{Int}(grp[:, :n])
+    X = hcat(ones(length(n)), log.(n))
+    meta = grp[:, [:part_id_d, :date]]
+    return (; X = X, Y = Y, n = n, n_obs = n, meta = meta)
 end
