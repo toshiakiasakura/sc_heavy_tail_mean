@@ -566,15 +566,16 @@ end
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 cached `h`-chains: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
-(≡ 1 by construction); `rho` holds the two anisotropic GP length-scales (ρ_diag total-age,
-ρ_gap age-gap). Each store is `Dict(label => (med, lo, hi))` of `nO × 2` matrices; missing
-chains leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
+(≡ 1 by construction); `rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2
+ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains). `susc`/`inf` stores
+are `Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`; missing chains leave
+`NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
 """
 function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
     nO = length(origins)
-    mkstore() = Dict(l => (med = fill(NaN, nO, 2), lo = fill(NaN, nO, 2), hi = fill(NaN, nO, 2))
-                     for l in labels4)
-    susc_store, inf_store, rho_store = mkstore(), mkstore(), mkstore()
+    mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
+                      for l in labels4)
+    susc_store, inf_store, rho_store = mkstore(2), mkstore(2), mkstore(3)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
         d === nothing && continue
@@ -587,7 +588,8 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
                 dst[lbl].hi[oi, g]  = quantile(r[:, g], 0.95)
             end
         end
-        for (g, rv) in enumerate((d.rho_diag, d.rho_gap))  # ρ_diag → col 1, ρ_gap → col 2
+        for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.rho_time))  # ρ_diag,ρ_gap,ρ_time → cols 1,2,3
+            all(isnan, rv) && continue                   # ρ_time absent (pooled) → leave NaN
             rho_store[lbl].med[oi, g] = median(rv)
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
             rho_store[lbl].hi[oi, g]  = quantile(rv, 0.95)
@@ -626,25 +628,28 @@ end
 """
     plot_lengthscales(rho, labels4, origins; h) -> Plot
 
-2×2 facet of the anisotropic separable-GP length-scales per config: ρ_diag (total-age, solid)
-and ρ_gap (age-gap, dashed), each with a 90% ribbon.
+2×2 facet of the separable spatio-temporal-GP length-scales per config: ρ_diag (total-age, solid)
+and ρ_gap (age-gap, dashed) in age-years, plus ρ_time (temporal, dotted) in weeks, each with a 90%
+ribbon. The three share one axis (units age-yrs / weeks; ρ_time ∈ [0.5,26]w, the spatial ρ ∈ [3,45]y);
+ρ_time is absent (NaN, not plotted) for pooled chains.
 """
 function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
-    rho_dirs = ["ρ_diag (total age)", "ρ_gap (age gap)"]
-    rho_ls   = [:solid, :dash]
+    rho_dirs = ["ρ_diag (total age, yr)", "ρ_gap (age gap, yr)", "ρ_time (weeks)"]
+    rho_ls   = [:solid, :dash, :dot]
     panels = Plots.Plot[]
     for lbl in labels4
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "GP length-scale ρ (age-yrs)", legend = (lbl == labels4[1] ? :topright : false),
+                 ylabel = "GP length-scale (age-yrs / weeks)", legend = (lbl == labels4[1] ? :topright : false),
                  legendfontsize = 6, xrotation = 45, ylims = (0, 50))
-        for g in 1:2
+        for g in 1:3
             m, lo, hi = rho[lbl].med[:, g], rho[lbl].lo[:, g], rho[lbl].hi[:, g]
+            all(isnan, m) && continue                    # skip ρ_time for pooled chains
             plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, ls = rho_ls[g], label = rho_dirs[g],
                   ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
         end
         push!(panels, p)
     end
     return plot(panels...; layout = (2, 2), size = (1150, 780),
-                plot_title = "8j — anisotropic GP length-scales ρ_diag / ρ_gap over time (h=$h)",
+                plot_title = "8j — separable GP length-scales ρ_diag / ρ_gap / ρ_time over time (h=$h)",
                 plot_titlefontsize = 11)
 end

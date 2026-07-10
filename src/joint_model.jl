@@ -105,7 +105,9 @@ end
     # total-age direction, ρ_gap on the age-gap direction (assortativity). Because the
     # rotation is orthonormal, (Δu)²+(Δv)² = (Δx)²+(Δy)², so ρ_diag=ρ_gap recovers the old
     # isotropic RBF exactly. `ρ_diag`, `ρ_gap`, `η` and the 28×28 Cholesky `Lp` are SHARED
-    # across weeks (per-week variation enters only through cₜ, zₜ — no temporal smoothing).
+    # across weeks. In the per-week regime the weekly fields are no longer iid: they are
+    # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Lp·z·Ltᵀ) with a
+    # shared temporal Cholesky Lt(ρ_time) and a decoupled temporal level cₜ = c + σ_c·(Lt·z_c).
     # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
     # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
     # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
@@ -127,7 +129,12 @@ end
     # 28×28 anisotropic separable RBF in diagonal coordinates
     Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag^2) + (df[m] - df[n])^2 / (2 * ρ_gap^2)))
           for m in 1:P, n in 1:P]
-    Lp = cholesky(Symmetric(Kp) + 1e-6 * I).L
+    # DENSE Cholesky factor (Matrix, not the LowerTriangular `.L`): the per-week structure field
+    # forms the matrix product Lp·z·Ltᵀ, and ReverseDiff cannot write a dense cotangent into a
+    # triangular-typed factor (`… * Ltᵀ` → "cannot set index in the lower triangular part of an
+    # UpperTriangular matrix"). Densifying both factors is the RD-safe form; gradients w.r.t.
+    # ρ_diag/ρ_gap still flow through `Matrix(cholesky(...).L)`. (Verified vs triangular variants.)
+    Lp = Matrix(cholesky(Symmetric(Kp) + 1e-6 * I).L)
 
     # per-cell log-rate → directional mean μ_{i→j}. Soft-clamped (not `clamp`, so ReverseDiff-safe)
     # to μ ∈ ≈[3e-4, 400]: the relative-population offset keeps the healthy log-rate O(1) (deep in
@@ -183,10 +190,30 @@ end
         Cstar1 = contact_star(nb, K1, K2, G)
         Cstar_weeks = [Cstar1 for _ in 1:Tn]
     else
-        # per-week: independent age-pair GP each week (shared ρ, η, Lp), per-week level cₜ
-        # and field zₜ, per-week × block dispersion. One C* per window week.
-        c ~ filldist(Normal(c0, 3.0), Tn)                 # per-week level
-        z ~ filldist(Normal(0, 1), P, Tn)                 # per-week field (shared kernel)
+        # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over
+        # weeks by a temporal RBF over week indices 1:Tn, sharing one length-scale ρ_time
+        # across all age-pairs; the spatial kernel (ρ_diag, ρ_gap, η, Lp) is shared as before.
+        #   • temporal kernel  Kt[s,t] = exp(-(s-t)²/(2ρ_time²)),  Lt = chol(Kt + jitter)
+        #   • structure field  R = η·(Lp·z·Ltᵀ)   (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ Kage)
+        #     each age-pair a temporally-correlated GP, each week the spatial RBF.
+        #   • decoupled level  cₜ = c + σ_c·(Lt·z_c)  — scalar intercept c + a 1-D temporal GP
+        #     with its OWN amplitude σ_c (so η governs age-structure only), sharing ρ_time.
+        # ρ_diag=ρ_gap recovers the isotropic spatial kernel; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
+        log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
+        ρ_time = exp(_softclamp(log_rho_time, log(0.5), log(26.0)))   # weeks, soft-bounded
+        # temporal Cholesky over the Tn window weeks. Jitter 1e-4 (not 1e-6): Kt is near
+        # rank-1 at the upper clamp (near-pooled) and the Pathfinder call is not try/caught,
+        # so a PosDefException would abort the whole fit (see tasks/lessons.md).
+        Kt = [exp(-((s - t)^2) / (2 * ρ_time^2)) for s in 1:Tn, t in 1:Tn]
+        Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see Lp note above): Ltᵀ must not be a triangular type
+
+        c ~ Normal(c0, 3.0)                               # scalar level intercept (stored)
+        log_sigma_c ~ Normal(cfg.gp_level_scale_prior[1], cfg.gp_level_scale_prior[2])
+        σ_c = exp(_softclamp(log_sigma_c, -3.0, 2.0))     # temporal-level amplitude, soft-bounded (mirrors η)
+        z_c ~ filldist(Normal(0, 1), Tn)                  # temporal-level raw (non-centred)
+        c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
+
+        z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
         # dispersion 4×Tn (block-linear rows × week): 2-D so generated_quantities can
         # reconstruct it (a 3-D 2×2×Tn filldist can't be — see _cell_moments!).
         if is_weighted(dm)
@@ -196,12 +223,16 @@ end
             log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
             disp = log_k
         end
-        ETp = promote_type(eltype(c), eltype(z), typeof(η))
+        # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
+        # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
+        # already carries η; don't re-apply it below.
+        Fld = η .* (Lp * z * Lt')                          # P×Tn
+        ETp = promote_type(typeof(c), eltype(Fld))
         Cstar_weeks = Vector{Matrix{ETp}}(undef, Tn)
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         ll = zero(ETp)
         for t in 1:Tn
-            μ = _mu_matrix(c[t] .+ η .* (Lp * @view z[:, t]))
+            μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
             ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
             Cstar_weeks[t] = contact_star(nb, K1, K2, G)
         end

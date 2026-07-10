@@ -17,7 +17,7 @@ Cached-chain filepath for model label `lbl` (`"<degree>|<ngm>"`), forecast `orig
 and horizon `h`. `lbl` joins the two tokens with `|`; the filename joins them with `_`.
 """
 function chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                    contacts::AbstractString = "weekly",
+                    contacts::AbstractString = "temporal",
                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
     joinpath(save_dir, "8j_chn_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
@@ -43,14 +43,15 @@ end
 Load the cached chain for `(lbl, origin, h)` and return per-draw transmission draws
 reconstructed from raw sampled columns:
 `susc[d,a] = exp(mu_s + sig_s·z_s[a])`, `inf[d,b] = exp(mu_i + sig_i·z_i[b])`
-(`ndraws × A` each), and the two GP length-scales `rho_diag`/`rho_gap[d] =
-exp(softclamp(log_rho_diag|log_rho_gap,…))` (`ndraws` each; diagonal/total-age and
-age-gap directions; mirrors model).
+(`ndraws × A` each), and the GP length-scales `rho_diag`/`rho_gap`/`rho_time[d] =
+exp(softclamp(log_rho_diag|log_rho_gap|log_rho_time,…))` (`ndraws` each; diagonal/total-age,
+age-gap and — in the separable spatio-temporal regime — temporal directions; mirrors model).
+`rho_time` is `NaN` for pooled chains (no `log_rho_time` parameter).
 Returns `nothing` when the file is missing or unreadable (skipped origin×combo),
 so callers can leave a gap.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "weekly",
+                                 contacts::AbstractString = "temporal",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -68,7 +69,9 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     inf  = exp.(mu_i .+ sig_i .* z_i)
     rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
-    return (; susc, inf, rho_diag, rho_gap)
+    rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled
+        exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0))) : fill(NaN, length(rho_diag))
+    return (; susc, inf, rho_diag, rho_gap, rho_time)
 end
 
 """

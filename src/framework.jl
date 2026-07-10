@@ -82,15 +82,18 @@ Base.@kwdef struct FrameworkConfig
     child_bins::Int       = 2         # bins 1..child_bins ("2-10","11-15") are "child"
     quantiles::Vector{Float64} = collect(0.05:0.05:0.95)
     n_forecast_draws::Int = 200       # posterior draws retained for scoring
-    # --- spatial-GP smoothing of the age-pair mean (inst/1e) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
-    gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale
+    # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
+    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
+    gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
+    gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
+    gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
 end
 
 """`contacts_label(cfg)` — tags the contact regime for chain-cache filenames so the
-per-week (`"weekly"`) and pooled (`"pooled"`) fits never reload each other's stale
-chains (their parameter spaces differ)."""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled" : "weekly"
+per-week separable spatio-temporal GP (`"temporal"`) and pooled (`"pooled"`) fits never
+reload each other's stale chains (their parameter spaces differ). The `"temporal"` tag
+also keeps the new chains disjoint from the pre-temporal per-week-iid `"weekly"` caches."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled" : "temporal"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).
