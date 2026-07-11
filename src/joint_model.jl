@@ -492,6 +492,140 @@ function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
 end
 
 """
+    prefit_chains_streaming!(combos, wins, cfg; data_provider, grid, setting=:all,
+                             use_nuts=false, adtype, save_dir, max_concurrent, prefetch_ahead=0)
+
+Global-pool variant of [`prefit_chains!`](@ref): fit every **missing**
+`(origin × combo × horizon)` joint chain under **one** `Semaphore(max_concurrent)` that stays
+saturated **across origin boundaries** (no per-origin barrier / drain tail / per-origin warmup),
+so a freed fit slot is immediately taken by the next origin's chains. Each origin's data
+`(wd, apd)` is produced **lazily** by `data_provider(oi, win)` — a single ascending producer that
+runs at most `prefetch_ahead` origins ahead of the fitting frontier and frees an origin's data as
+soon as its last chain completes (bounded memory). Cached chains are skipped, so runs stay
+resumable, and results are **byte-identical** to `prefit_chains!` (same seeds, filenames, order-
+independent per-chain inputs).
+
+`data_provider(oi, win)` must return `(wd_o::WindowData, apd_o::Vector{AgePairData})` (one
+`AgePairData` per horizon), reusing the shared read-only CoMix/inc2prev reads. `prefetch_ahead=0`
+auto-sizes to `max(2, cld(K, combos·horizons) + 1)` — enough origins to keep `K` slots busy.
+Returns `(; requested, fitted, failed, concurrency)`.
+"""
+function prefit_chains_streaming!(combos, wins, cfg::FrameworkConfig; data_provider,
+                                  grid = cis_age_grid(), setting::Symbol = :all,
+                                  use_nuts::Bool = false, adtype = AutoReverseDiff(),
+                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                                  max_concurrent::Int = fit_concurrency(),
+                                  prefetch_ahead::Int = 0)
+    mkpath(save_dir)
+    specs = NamedTuple[]                                  # global spec list; skip cached ⇒ resumable
+    for (oi, win_o) in enumerate(wins), (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
+        path = joinpath(save_dir,
+            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win_o.origin)_h$(h).jld2")
+        isfile(path) || push!(specs, (; dm, nb, oi, hi, h, win_o, path))
+    end
+    total = length(combos) * length(wins) * length(cfg.horizons)
+    isempty(specs) && return (; requested = 0, fitted = 0, failed = 0, concurrency = 0)
+
+    K     = clamp(max_concurrent, 1, Threads.nthreads())
+    nper  = length(combos) * length(cfg.horizons)
+    ahead = prefetch_ahead > 0 ? prefetch_ahead : max(2, cld(K, nper) + 1)   # origins to keep K busy
+    @info "prefit_chains_streaming!: fitting $(length(specs))/$total chains; concurrency=$K, " *
+          "prefetch_ahead=$ahead (threads=$(Threads.nthreads()), cores=$(Sys.CPU_THREADS), " *
+          "mem_avail=$(round(_mem_available_gib(); digits=1)) GiB)"
+
+    # --- lazy per-origin data: single ascending producer, permit-bounded look-ahead, free-on-done
+    origins   = unique(s.oi for s in specs)               # ascending (specs built in oi order)
+    nO        = length(origins)
+    remaining = Dict(oi => Threads.Atomic{Int}(count(s -> s.oi == oi, specs)) for oi in origins)
+    data      = Dict{Int,Any}()
+    datalock  = ReentrantLock()
+    dcond     = Threads.Condition(datalock)
+    permit    = Base.Semaphore(ahead)                     # bounds retained origin data
+    sem       = Base.Semaphore(K)                         # bounds concurrent fits (global)
+
+    get_data(oi)    = lock(datalock) do
+        while !haskey(data, oi); wait(dcond); end
+        data[oi]
+    end
+    free_origin(oi) = (lock(datalock) do; delete!(data, oi); end; Base.release(permit))
+
+    producer = Threads.@spawn begin
+        try
+            for oi in origins
+                Base.acquire(permit)                      # blocks until an earlier origin frees a slot
+                d = try
+                    (; ok = true, val = data_provider(oi, wins[oi]))
+                catch e
+                    (; ok = false, val = e)
+                end
+                lock(datalock) do; data[oi] = d; notify(dcond); end
+            end
+        catch err
+            lock(datalock) do                             # unblock every waiter so the fanout can drain
+                for oi in origins
+                    haskey(data, oi) || (data[oi] = (; ok = false, val = err))
+                end
+                notify(dcond)
+            end
+            rethrow()
+        end
+    end
+
+    fitted = Threads.Atomic{Int}(0)
+    failed = Threads.Atomic{Int}(0)
+    done_o = Threads.Atomic{Int}(0)
+    fit_one(s, val) = begin
+        wd_o, apd_o = val
+        ds_h = build_degree_stats(s.dm, apd_o[s.hi], cfg)
+        res  = fit_joint(s.dm, s.nb, ds_h, wd_o, cfg; use_nuts = use_nuts,
+                         adtype = adtype, rng = Random.Xoshiro(cfg.seed))   # isolated RNG ⇒ deterministic
+        jldsave(s.path; result = res.chn)
+    end
+    run_spec(s, gated) = begin
+        d = get_data(s.oi)                                # ← WAIT FOR DATA *BEFORE* the fit slot
+        try
+            if d.ok
+                gated && Base.acquire(sem)
+                try
+                    fit_one(s, d.val)
+                    Threads.atomic_add!(fitted, 1)
+                finally
+                    gated && Base.release(sem)
+                end
+            else
+                Threads.atomic_add!(failed, 1)
+                @warn "prefit data prep failed" origin=s.win_o.origin exception=d.val
+            end
+        catch err
+            Threads.atomic_add!(failed, 1)
+            @warn "prefit fit failed" origin=s.win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
+        finally
+            if Threads.atomic_sub!(remaining[s.oi], 1) == 1   # ALWAYS decrement (frees origin + permit)
+                free_origin(s.oi)
+                n = Threads.atomic_add!(done_o, 1) + 1
+                (n % 5 == 0 || n == nO) &&
+                    @info "streaming prefit: $n/$nO origins done ($(fitted[]) fitted, $(failed[]) failed)"
+            end
+        end
+    end
+
+    old_blas = LinearAlgebra.BLAS.get_num_threads()
+    LinearAlgebra.BLAS.set_num_threads(1)                 # avoid threads × BLAS oversubscription
+    try
+        run_spec(specs[1], false)                         # ONE global warmup (compile model/AD)
+        if length(specs) > 1
+            @sync for s in @view specs[2:end]
+                Threads.@spawn run_spec(s, true)
+            end
+        end
+    finally
+        LinearAlgebra.BLAS.set_num_threads(old_blas)
+    end
+    wait(producer)                                        # surface any unexpected producer error
+    return (; requested = length(specs), fitted = fitted[], failed = failed[], concurrency = K)
+end
+
+"""
     iterated_forecast(dm, nb, wd0, cfg, win0; grid, setting, use_nuts, save_dir,
                       ndraws, apd_by_h)
 

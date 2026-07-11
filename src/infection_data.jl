@@ -73,13 +73,37 @@ function weekly_antibody(df::DataFrame, tmap::Dict{Int,Date}, weeks::Vector{Date
     return AB
 end
 
-"""Assemble `WindowData` for the full 12-week (lags + fit) span of `win`."""
-function load_window_data(win::WeeklyWindow; path::AbstractString = _EST_PATH, grid = cis_age_grid())
+"""
+    load_raw_infection_inputs(; path=_EST_PATH)
+
+Read the inc2prev estimates CSV **once** and build the `t_index → Date` map (the read
+`load_window_data` would otherwise repeat on every origin). Returns `(; df, tmap)` to pass
+straight into `load_window_data(win, inf.df, inf.tmap; grid)`, mirroring
+`load_raw_contact_inputs()`. The frame is treated read-only — `weekly_infections`/
+`weekly_antibody` `@subset` it into copies — so it is safe to reuse across origins and to
+read concurrently from a background prefetch task.
+"""
+function load_raw_infection_inputs(; path::AbstractString = _EST_PATH)
     df, tmap = _load_estimates(path)
+    return (; df, tmap)
+end
+
+"""Assemble `WindowData` from a **pre-loaded** estimates frame `df` and `t_index → Date`
+map `tmap` (from `load_raw_infection_inputs()`), skipping the per-call CSV read. Byte-identical
+to the `path`-reading method; safe to call concurrently (read-only over `df`)."""
+function load_window_data(win::WeeklyWindow, df::DataFrame, tmap::Dict{Int,Date};
+                          grid = cis_age_grid())
     weeks = win.all_weeks
     I_mean, I_sd = weekly_infections(df, weeks, grid)
     AB = weekly_antibody(df, tmap, weeks, grid)
     return WindowData(weeks, grid.N, I_mean, I_sd, AB, grid.POP, grid.PROP, grid.LAB)
+end
+
+"""Assemble `WindowData` for the full 12-week (lags + fit) span of `win`, reading the
+estimates CSV from `path`. Backward-compatible wrapper around the pre-loaded-frame method."""
+function load_window_data(win::WeeklyWindow; path::AbstractString = _EST_PATH, grid = cis_age_grid())
+    df, tmap = _load_estimates(path)
+    return load_window_data(win, df, tmap; grid = grid)
 end
 
 """Realized weekly infection counts (A × n_horizons) for the forecast target weeks
