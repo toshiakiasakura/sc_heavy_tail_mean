@@ -87,20 +87,20 @@ Base.@kwdef struct FrameworkConfig
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
     gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
-    # --- absolute transmissibility γ_SAR (§3.2/§6; analysis-plan reparam) ---
-    gamma_sar_prior::Tuple{Float64,Float64} = (log(0.33), 0.56) # log-γ_SAR Normal(μ,σ): the single absolute transmissibility scalar (susc/inf are relative to reference bin 1 "2-10"=1). Calibrated 2026-07-11 from the fitted reference-cell level susc[1]·inf[1] (= the quantity γ_SAR absorbs under bin-1 normalisation) across 18 dt_intermediate_age_pair_temporal_GP chains (both degree models × 9 origins): median 0.33, log-SD 0.56 ⇒ 90% γ_SAR∈[0.13,0.83] covers the observed [0.10,0.56] (weighted ~0.43, unweighted ~0.20). NB the geometric-mean level exp(μ_s+μ_i)≈1.31 is NOT the target — with bin 1 normalised to 1, γ_SAR must reproduce N_11=S_1·I_1, not the cross-bin geometric mean.
+    # --- absolute transmissibility γ (§3.2/§6; analysis-plan reparam + C* normalisation) ---
+    gamma_prior::Tuple{Float64,Float64} = (log(0.8), 0.5) # log-γ Normal(μ,σ): the single absolute transmissibility scalar. C* is normalised inside model_joint to unit fit-window mean intensity (C*→C*/S̄), so γ = susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*) carries the absolute level and is decoupled from the contact scale (no longer a per-contact SAR; window-relative, not comparable across origins). Calibrated 2026-07-11 by reconstructing new-γ = susc₁·inf₁·S̄ per draw from the pre-gsar dt_intermediate_age_pair_temporal_GP chains, 6 origins × all 4 (degree×NGM) combos: new-γ medians 0.69 (hweibull·mean), 0.73 (hweibull·neigh), 0.83 (negbin·mean), 1.20 (negbin·neigh); per-combo log-SD 0.12–0.34. A SINGLE prior serves all four (geo-mean centre 0.84; S̄ itself spans ~100× — negbin·neigh S̄≈173 — but susc₁·inf₁ compensates the builder scale, so γ stays O(1)). 90% γ∈[0.35,1.8] sits interior to the softclamp [log0.02,log5].
 end
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains. The suffix is a running version
-tag (the filename does not otherwise encode dispersion/transmission structure): `-gsar` (2026-07-11,
-transmission reparam — `μ_s`/`μ_i` removed, absolute `log_gamma_sar` added and `z_s`/`z_i` shrunk to
-length `A-1` with susc/inf normalised to reference bin 1, §3.2/§6). Dispersion is block-linear
-(`log_k`/`log_kappa` only; the short-lived hierarchical per-age-pair RE — the `-hdisp-hn` tag with
-`z_k`/`z_kappa`+`tau` — was reverted 2026-07-11). So these `-gsar` caches are disjoint from the
-`-hdisp-hn-gsar` chains (which carry `z_k`/`z_kappa`+`tau`) AND from the pre-`gsar` `"temporal"`/
-`"pooled"` chains (which carry `mu_s`/`mu_i`), and reload neither."""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar" : "temporal-gsar"
+tag (the filename does not otherwise encode dispersion/transmission structure): `-gnorm` (2026-07-11,
+C*-normalisation + γ rename — C* divided by its unit fit-window mean intensity inside `model_joint`,
+transmission scalar renamed `log_gamma_sar`→`log_gamma`/`gamma_sar`→`γ` and its prior recalibrated,
+§3.2/§6). Predecessor `-gsar` (absolute `log_gamma_sar`, susc/inf bin-1 relative, `z_s`/`z_i` length
+`A-1`) used a NON-normalised C*; the `-gnorm` chains carry a differently-scaled γ (`log_gamma`), so
+they are disjoint from `-gsar`, from `-hdisp-hn-gsar` (which also carry `z_k`/`z_kappa`+`tau`), and
+from the pre-`gsar` `"temporal"`/`"pooled"` chains (`mu_s`/`mu_i`), and reload none of them."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gnorm" : "temporal-gnorm"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).

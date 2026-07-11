@@ -17,7 +17,7 @@ Cached-chain filepath for model label `lbl` (`"<degree>|<ngm>"`), forecast `orig
 and horizon `h`. `lbl` joins the two tokens with `|`; the filename joins them with `_`.
 """
 function chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                    contacts::AbstractString = "temporal-gsar",
+                    contacts::AbstractString = "temporal-gnorm",
                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
     joinpath(save_dir, "8j_chn_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
@@ -38,11 +38,13 @@ function _group_matrix(chn, sym::Symbol)
 end
 
 """
-    load_transmission_draws(lbl, origin, h; save_dir) -> (; susc, inf, gamma_sar, rho) | nothing
+    load_transmission_draws(lbl, origin, h; save_dir) -> (; susc, inf, γ, rho) | nothing
 
 Load the cached chain for `(lbl, origin, h)` and return per-draw transmission draws
-reconstructed from raw sampled columns (post-reparam: absolute `gamma_sar` + susc/inf RELATIVE to
-reference bin 1 = 1): `gamma_sar[d] = exp(softclamp(log_gamma_sar,…))`,
+reconstructed from raw sampled columns (post-reparam: absolute `γ` + susc/inf RELATIVE to
+reference bin 1 = 1). With C* normalised inside `model_joint` to unit fit-window mean intensity,
+`γ = susc₁·inf₁·S̄` is the absolute NGM level (≈ Rt/ρ(C̃*), O(1)) — **window-relative** (not
+comparable across origins), no longer a per-contact SAR: `γ[d] = exp(softclamp(log_gamma,…))`,
 `susc[d,:] = [1, exp(sig_s·z_s[1..A-1])]`, `inf[d,:] = [1, exp(sig_i·z_i[1..A-1])]`
 (`ndraws × A` each, column 1 pinned to 1), and the GP length-scales `rho_diag`/`rho_gap`/`rho_time[d] =
 exp(softclamp(log_rho_diag|log_rho_gap|log_rho_time,…))` (`ndraws` each; diagonal/total-age,
@@ -52,7 +54,7 @@ Returns `nothing` when the file is missing or unreadable (skipped origin×combo)
 so callers can leave a gap.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "temporal-gsar",
+                                 contacts::AbstractString = "temporal-gnorm",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -62,7 +64,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
         @warn "could not load chain" path err
         return nothing
     end
-    gamma_sar = exp.(_softclamp.(vec(Array(chn[:log_gamma_sar])), log(0.02), log(5.0)))  # absolute transmissibility, mirrors model
+    γ = exp.(_softclamp.(vec(Array(chn[:log_gamma])), log(0.02), log(5.0)))  # absolute transmissibility, mirrors model
     sig_s = vec(Array(chn[:sig_s])); z_s = _group_matrix(chn, :z_s)   # z_s: ndraws × (A-1)
     sig_i = vec(Array(chn[:sig_i])); z_i = _group_matrix(chn, :z_i)
     susc = hcat(ones(size(z_s, 1)), exp.(sig_s .* z_s))  # ndraws × A, col 1 = 1 (relative to ref bin 1)
@@ -71,7 +73,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
     rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled
         exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0))) : fill(NaN, length(rho_diag))
-    return (; susc, inf, gamma_sar, rho_diag, rho_gap, rho_time)
+    return (; susc, inf, γ, rho_diag, rho_gap, rho_time)
 end
 
 """
@@ -111,7 +113,7 @@ the chain, as returned by `prepare_degree_data`); it is turned into the model's 
 `build_degree_stats(dm, apd, cfg)` — mirroring `iterated_forecast`. Reloads the cached `h`
 chain via `fit_or_load_chain` (rebuilds the model so `generated_quantities` works), then
 for each posterior draw builds
-`N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:,end]; gamma_sar=q.gamma_sar)` and takes
+`N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:,end]; γ=q.γ)` and takes
 `max real(eigvals(N))` (the NGM is nonnegative, so its Perron root is real & positive).
 
 `h` selects the cached chain; its contacts are observed at origin+h (h=1 ⇒ origin+1). Returns
@@ -135,7 +137,7 @@ function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, apd, wd, cfg
     R = Float64[]
     for q in gq
         q === nothing && continue
-        N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, end]; gamma_sar = q.gamma_sar)  # mirror posterior_forecast
+        N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, end]; γ = q.γ)  # mirror posterior_forecast
         push!(R, maximum(real(eigvals(N))))
     end
     return R

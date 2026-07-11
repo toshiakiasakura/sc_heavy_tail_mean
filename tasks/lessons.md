@@ -2,6 +2,43 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## C\* normalisation to decouple γ from contact scale + γ_SAR→γ rename 2026-07-11 (`joint_model.jl`, `ngm.jl`, `framework.jl`, `8j_viz_utils.jl`)
+
+- **Problem:** `γ_SAR` and the C\* scale/eigenvalue were posterior-correlated — since `N = γ·(fs⊙C*)⊙inf'`
+  depends only on the **product** `γ·C*`, a uniform `C*→κC*, γ→γ/κ` leaves `N` (hence Rt, every forecast)
+  identical; only the CoMix degree likelihood weakly breaks the tie, so raising Rt could be met by raising
+  `γ` *or* pulling up the whole contact matrix.
+- **Fix:** inside `model_joint`, after `Cstar_weeks` is built and **before** the infection loop, normalise
+  by one window-constant `S̄` = fit-window-averaged, pop-weighted mean contact intensity
+  (`S̄ = mean(sum(wpop[a]*Cstar_weeks[t][a,b] …) for t in (smax+1):Tn)`, `wpop = wd.pop/sum(wd.pop)`;
+  floor `max(S̄,1e-8)`), then `Cstar_weeks = [C./S̄ for C in Cstar_weeks]`. `S̄` is homogeneous degree-1 in
+  C\*, so the renewal likelihood becomes **scale-invariant in C\*** → the contact LEVEL moves into `γ`
+  (data-identified by infections) and C\* feeds the NGM only its temporal change.
+- **Why it's results-neutral:** the transform is level-preserving in `N`, so Rt / forecasts / WIS are
+  materially unchanged — only the level *decomposition* is cleaned up. All consumers (`posterior_forecast`,
+  `iterated_forecast`, `reproduction_draws`) flow through `build_ngm → N` and stay consistent with **no
+  logic change** (rename only). Normalise at the `Cstar` stage, **NOT** in the μ level `c`/`c_vec` —
+  `reconstruct_mu_draws` / the 10j heatmap read raw μ against empirical contacts and must stay physical.
+- **Rename `γ_SAR → γ`:** Unicode `γ` for the transformed scalar / local / return field / `build_ngm`
+  kwarg (avoids colliding with `SpecialFunctions.gamma` in `_weibull_moments`), ASCII `log_gamma` for the
+  Turing param (chain column, mirrors `log_kappa`), ASCII `gamma_prior` for the config field. `γ` is no
+  longer a per-contact SAR — it is the absolute NGM level `γ = susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*)`, **window-relative**
+  (not comparable across origins).
+- **Prior — measure it, don't guess.** Reconstructing `new-γ = susc₁·inf₁·S̄` per draw from the pre-norm
+  `temporal` chains (6 origins × 4 combos) gave `S̄` medians 4.8 / 172.6 / 1.6 / 3.7 (negbin·mean /
+  negbin·neigh / hweibull·mean / hweibull·neigh) — **S̄ spans ~100×** because the neighbourhood size-biased
+  ⟨k²⟩/⟨k⟩ explodes — but **new-γ is O(1) for ALL four** (medians 0.69–1.20), because `susc₁·inf₁` (fit
+  jointly with C\*) shrinks to compensate the builder scale (0.159 negbin·mean → **0.0071** negbin·neigh).
+  So a **single** prior `gamma_prior=(log(0.8),0.5)` serves all combos; the existing softclamp
+  `[log0.02,log5]` already contains the range (max q95 = 2.08) — **no clamp widening needed** (the naïve
+  `0.33·S̄` would have implied per-combo priors spanning 0.5→57 — wrong, because it ignores the
+  builder-compensating `susc₁·inf₁`).
+- **Cache-bust (mandatory):** `contacts_label` bumped `temporal-gsar`→`temporal-gnorm` /
+  `pooled-gsar`→`pooled-gnorm`. The filename does not encode the transmission block, so a differently-scaled
+  `γ` (`log_gamma`) would silently reload stale `-gsar`/`temporal` chains without the bump. Keep the viz
+  mirrors (`load_transmission_draws` reads `chn[:log_gamma]`; default `contacts`; all `build_ngm(…; γ=…)`
+  call sites) in sync. Old chains kept, not deleted; a re-fit populates the `-gnorm` caches.
+
 ## Absolute γ_SAR + reference-normalised susc/inf 2026-07-11 (`joint_model.jl`, `ngm.jl` — transmission reparam)
 
 - **What changed:** the transmission block dropped the confounded level pair `μ_s ~ Beta(24,24)` /

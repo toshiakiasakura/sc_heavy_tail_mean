@@ -158,6 +158,22 @@ susceptibility by the group's antibody prevalence $A_a(t)$ (at $F=1$ antibodies 
 protection; smaller $F$ gives stronger protection). $C^\ast_{ab}$ is the per-capita effective
 contact matrix produced by the NGM builder (§5.1).
 
+> **Update 2026-07-11 (C\* normalisation + γ rename).** To decouple the transmissibility scalar from
+> the contact-matrix scale (they were posterior-correlated — raising $R_t$ could be met by raising the
+> scalar *or* the whole $C^\ast$), $C^\ast_t$ is now **normalised inside `model_joint`** by a single
+> window-constant $\bar S$ = the fit-window-averaged, population-weighted mean contact intensity
+> ($\bar S = \operatorname{mean}_{t\in\text{fit}}\sum_{a,b} w_a\,C^\ast_{ab}(t)$, $w=\text{pop}/\!\sum\text{pop}$):
+> $C^\ast_t \leftarrow C^\ast_t/\bar S$. Because $\bar S$ is homogeneous degree-1 in $C^\ast$, the
+> renewal likelihood becomes **scale-invariant in $C^\ast$** — the absolute contact level moves into the
+> transmissibility scalar and $C^\ast$ feeds the NGM only its *temporal change*. The scalar is
+> **renamed** $\gamma_{\mathrm{SAR}}\to\gamma$ (`log_gamma_sar`→`log_gamma`, `gamma_sar`→`γ`): it is no
+> longer a per-contact SAR but the absolute NGM level $\gamma = \text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S
+> \approx R_t/\rho(\tilde C^\ast)$, **window-relative** (not comparable across origins). Everything
+> downstream flows through `build_ngm → N`, which depends only on the product $\gamma\,C^\ast$, so $R_t$,
+> forecasts and WIS are unchanged — only the level *decomposition* is cleaned up. (This departs from the
+> docx's literal per-contact-SAR anchoring; "docx wins" is overridden here by the decoupling requirement,
+> as it was for reciprocity balancing.) See §6 for the recalibrated prior and `tasks/lessons.md`.
+
 ### 3.3 Renewal recursion and forecast
 
 New infections propagate by the weekly renewal equation
@@ -388,8 +404,8 @@ $\gamma_{\mathrm{SAR}}$ carries the level (it replaces the old confounded $\mu_s
 
 $$
 \begin{aligned}
-\log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.33,\, 0.56^2), &&
-\gamma_{\mathrm{SAR}} = \exp(\log\gamma_{\mathrm{SAR}}),\\
+\log\gamma &\sim \mathcal N(\log 0.8,\, 0.5^2), &&
+\gamma = \exp(\operatorname{softclamp}(\log\gamma,\log 0.02,\log 5)),\\
 \sigma_s &\sim \mathcal N^+(0.1, 0.02^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
 \text{susc} &= \big(1,\ \exp(\sigma_s z_s)\big),\\
 \sigma_i &\sim \mathcal N^+(0.1, 0.02^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
@@ -398,10 +414,16 @@ F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025
 \end{aligned}
 $$
 
-The $\gamma_{\mathrm{SAR}}$ prior is **calibrated** to the fitted reference-cell level
-$\text{susc}_1\!\cdot\!\text{inf}_1$ (the quantity $\gamma_{\mathrm{SAR}}$ absorbs under bin-1
-normalisation) read from the pre-reparam chains: median $0.33$, log-SD $0.56$. The model returns the
-generated quantities $(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, \{C^\ast_t\})$.
+After the $C^\ast$ normalisation (§3.2 update), $\gamma$ is the absolute NGM level
+$\gamma = \text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S \approx R_t/\rho(\tilde C^\ast)$, which is O(1).
+The prior is **recalibrated** (2026-07-11) by reconstructing new-$\gamma=\text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S$
+per draw from the pre-normalisation `temporal` chains, over 6 origins × all four (degree × NGM) combos:
+new-$\gamma$ medians $0.69$–$1.20$ (per-combo log-SD $0.12$–$0.34$), geometric-mean centre $0.84$ — so the
+**single** prior $\mathcal N(\log 0.8, 0.5^2)$ serves all four (though $\bar S$ itself spans $\sim\!100\times$
+across builders — neighbourhood-negbin $\bar S\approx173$ — $\text{susc}_1\!\cdot\!\text{inf}_1$ compensates,
+keeping $\gamma$ O(1)). The model returns the generated quantities
+$(\text{susc}, \text{inf}, F, \gamma, \sigma_{\text{inf}}, \{C^\ast_t\})$ with $\{C^\ast_t\}$ on the
+normalised scale.
 
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
 only as renewal history). For each age $a$,

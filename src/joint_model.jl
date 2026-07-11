@@ -248,16 +248,29 @@ end
         Turing.@addlogprob! ll
     end
 
-    # ---- transmission latents: absolute γ_SAR + relative susc/inf (analysis-plan reparam) ----
-    # ONE absolute-transmissibility scalar γ_SAR carries the NGM level; inherent susceptibility &
+    # ---- normalize C* by the fitting-window mean contact intensity (decouple γ) ----
+    # S̄ = fit-window-averaged, population-weighted mean effective contacts per person. Homogeneous
+    # degree-1 in C*, so the renewal likelihood becomes scale-invariant in C* — the absolute contact
+    # LEVEL moves into γ and the NGM sees only temporal change in contacts. The degree likelihood
+    # (raw μ) is unaffected; reconstruct_mu_draws / the 10j heatmap read raw μ, also unaffected.
+    wpop    = wd.pop ./ sum(wd.pop)
+    fitcols = (cfg.smax + 1):Tn                       # the n_fit infection-likelihood weeks
+    S̄ = mean(sum(wpop[a] * Cstar_weeks[t][a, b] for a in 1:A, b in 1:A) for t in fitcols)
+    S̄ = max(S̄, 1e-8)                                 # guard fully-empty windows
+    Cstar_weeks = [C ./ S̄ for C in Cstar_weeks]       # normalized C* reused by infection loop + return
+
+    # ---- transmission latents: absolute γ + relative susc/inf (analysis-plan reparam) ----
+    # ONE absolute-transmissibility scalar γ carries the NGM level; inherent susceptibility &
     # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated).
     # This removes the old μ_s/μ_i level pair (confounded with each other and with C*'s scale — only
-    # their sum was identified); the level now lives in the single, data-identified γ_SAR. The old
-    # per-bin `susc=exp(μ_s+σ_s z_s)` became `susc=vcat(1, exp(σ_s z_s[2:A]))` (bin-1 reference), so
-    # `z_s`/`z_i` shrink from length A to A-1 (no redundant reference offset). NGM index convention is
-    # unchanged (susc on the susceptible row a, inf on the infectious column b; Munday Eq 3).
-    log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.33), calibrated
-    gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # absolute transmissibility, soft-bounded
+    # their sum was identified). With C* now normalised to unit fit-window mean intensity (above),
+    # γ ≈ susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*) is data-identified and decoupled from the contact scale (no longer
+    # a per-contact SAR; it is window-relative, so not comparable across origins). The old per-bin
+    # `susc=exp(μ_s+σ_s z_s)` became `susc=vcat(1, exp(σ_s z_s[2:A]))` (bin-1 reference), so `z_s`/`z_i`
+    # shrink from length A to A-1. NGM index convention unchanged (susc on susceptible row a, inf on
+    # infectious column b; Munday Eq 3).
+    log_gamma ~ Normal(cfg.gamma_prior[1], cfg.gamma_prior[2])  # centre log(0.8), calibrated (tasks/lessons.md)
+    γ = exp(_softclamp(log_gamma, log(0.02), log(5.0)))         # absolute transmissibility, soft-bounded
 
     sig_s ~ truncated(Normal(0.1, 0.02); lower = 0)
     z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A)
@@ -273,7 +286,7 @@ end
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
     # (antibody and — now — contacts vary by week; C*_t is Cstar_weeks[t].)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
+        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; γ = γ)
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -281,7 +294,7 @@ end
         end
     end
 
-    return (; susc, inf, F, gamma_sar, sigma_inf, Cstar = Cstar_weeks)
+    return (; susc, inf, F, γ, sigma_inf, Cstar = Cstar_weeks)
 end
 
 """
@@ -346,7 +359,7 @@ function posterior_forecast(model, chn, wd::WindowData, cfg::FrameworkConfig, w;
     out = Array{Float64}(undef, A, H, keep)
     for (d, k) in enumerate(idx)
         q = gq[k]
-        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn]; gamma_sar = q.gamma_sar)  # origin-week C*
+        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn]; γ = q.γ)  # origin-week C*
         mean_path = forecast_forward(N_origin, wd.I_mean[:, seed_cols], w, H)
         for a in 1:A, h in 1:H
             σ = max(q.sigma_inf * mean_path[a, h], 1e-6)
@@ -524,7 +537,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
         step_mean = zeros(A)
         for (d, k) in enumerate(idx)
             q = gq[k]
-            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; gamma_sar = q.gamma_sar)   # origin-week C* (t₀+h); antibody frozen at t₀
+            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; γ = q.γ)   # origin-week C* (t₀+h); antibody frozen at t₀
             acc = zeros(A)
             for s in 1:cfg.smax
                 acc .+= w[s] .* hist[:, end - s + 1]
