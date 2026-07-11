@@ -183,13 +183,12 @@ the NGM.
 ### 4.1 Unweighted negative binomial (`NegBinAgePair`)
 
 The integer contact counts (including zeros) of cell $(i,j)$ are modelled as
-$\mathrm{NegBin}(\mu_{ij}, \phi_{ij})$, parameterised by **mean** $\mu_{ij}$ and a
-**dispersion** $\phi_{ij}$ built hierarchically from a child/adult block-pair mean plus a
-per-age-pair random effect (§4.3), with $\mathrm{Var} = \mu + \mu^2/\phi$. The log-likelihood sums
-over the empirical count distribution:
+$\mathrm{NegBin}(\mu_{ij}, \phi_{\beta(i)\beta(j)})$, parameterised by **mean** $\mu_{ij}$ and a
+**dispersion** $\phi$ that depends only on the child/adult block pair $(\beta(i),\beta(j))$, with
+$\mathrm{Var} = \mu + \mu^2/\phi$. The log-likelihood sums over the empirical count distribution:
 
 $$
-\ell_{ij} = \sum_{k} y_k\,\log \mathrm{NegBin}(k;\mu_{ij},\phi_{ij}),
+\ell_{ij} = \sum_{k} y_k\,\log \mathrm{NegBin}(k;\mu_{ij},\phi_{\beta(i)\beta(j)}),
 $$
 
 where $(k,y_k)$ are the distinct degrees and their observed frequencies. Zeros are modelled
@@ -207,9 +206,8 @@ on having at least one contact (left-truncating the fitted NegBin).
 ### 4.2 Duration-weighted hurdle-Weibull (`HurdleWeibullAgePair`)
 
 Here $\mu_{ij}$ denotes the mean of the **positive** duration-weighted degrees. The positive weights
-$\{W\}_{ij}$ are modelled as $\mathrm{Weibull}(\kappa_{ij}, \lambda_{ij})$ with a hierarchical shape
-$\kappa_{ij}$ (block-pair mean + per-age-pair random effect, §4.3) and scale chosen so the Weibull
-mean equals $\mu_{ij}$:
+$\{W\}_{ij}$ are modelled as $\mathrm{Weibull}(\kappa_{\beta(i)\beta(j)}, \lambda_{ij})$ with a
+block-indexed shape $\kappa$ and scale chosen so the Weibull mean equals $\mu_{ij}$:
 
 $$
 \lambda_{ij} = \frac{\mu_{ij}}{\Gamma(1 + 1/\kappa)},\qquad
@@ -226,40 +224,15 @@ $$
 g = 1 - p^0 .
 $$
 
-### 4.3 Dispersion/shape parameterisation — hierarchical (block mean + age-pair random effect)
+### 4.3 Dispersion/shape parameterisation
 
-The dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) is **hierarchical**: a block-level
-**mean** plus a per-age-pair **random effect**. For each of the four directional child/adult blocks,
-indexed by the block-linear code $\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\}$ (contactor block
-$\times$ contactee block), a mean log-dispersion $\beta_{\ell,t}$ is estimated **per week** (a
-$4 \times T$ array). Each ordered age pair $(i,j)$ — indexed by $p = (i-1)A + j \in \{1,\dots,A^2\}$
-— then deviates from its block mean by a non-centred random effect with a **per-week** scale
-$\tau_t$:
-
-$$
-\log\mathrm{disp}_{ij,t} \;=\; \beta_{\ell(i,j),\,t} \;+\; \tau_t\, z_{p(i,j),\,t},
-\qquad z_{p,t}\sim\mathcal N(0,1),\qquad \tau_t \sim \mathrm{HalfNormal}(\sigma)=\mathcal N_{+}(0,\sigma^2),
-$$
-
-where $z$ is an $A^2 \times T$ array (per-week age-pair random effects) and $\tau_t$ is a **per-week**
-scale (a length-$T$ vector), shared across blocks **within** a week — estimated for each time step, iid
-across weeks. The block mean keeps the reference prior ($\beta_{\ell,t}\sim\mathcal N(0,0.5^2)$ Weibull,
-$\mathcal N(0,1^2)$ NegBin); the RE scale has a **half-Normal** prior
-$\tau_t\sim\mathrm{HalfNormal}(\sigma)$, $\sigma=$ `cfg.disp_re_scale` $=0.109$. That $\sigma$ is set so
-the prior's expected random-effect variance $\mathbb E[(\tau z)^2]=\mathbb E[\tau^2]=\sigma^2$ equals
-that of the earlier log-Normal $\tau=\exp\mathcal N(\log 0.10,0.30^2)$ ($\mathbb E[\tau^2]=0.01197$); the
-half-Normal (mode at $0$) shrinks data-free empty-cell REs harder onto the block mean. So every $(i,j)$
-cell carries its **own** dispersion, partially pooled toward its block mean, rather than the single
-per-block value of the earlier model. The moments of §4.1/§4.2 use this per-cell
-$\phi_{ij}=\exp(\log\mathrm{disp}_{ij})$ / $\kappa_{ij}$.
-
-Inside the model the per-cell $\log\mathrm{disp}$ is soft-clamped to keep the mode interior and avoid
-Weibull/exponential underflow ($\log\kappa \in [-3,3]$, i.e. $\kappa \in [0.05,20]$;
-$\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$). $\beta$ ($4\times T$), $z$ ($A^2\times T$) and
-$\tau$ (length $T$) are all $\le 2$-D `filldist` arrays, so `generated_quantities` can reconstruct them.
-The block means, random effects **and** the RE scale $\tau_t$ are re-drawn **per week** (not temporally
-smoothed — cf. §5's temporally-coupled *mean* field). (The pooled/time-invariant regime instead uses a
-single scalar $\tau$.)
+The block-indexed dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) carries one value
+per child/adult block pair — four values indexed by the block-linear code
+$\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\}$ (contactor block $\times$ contactee block), stored
+as a $4 \times T$ array (one block-vector per week). Inside the model these log-parameters are
+clamped to keep the mode interior and avoid Weibull/exponential underflow
+($\log\kappa \in [-3,3]$, i.e. $\kappa \in [0.05,20]$; $\log\phi \in [-4,5]$, i.e.
+$\phi \in [0.018,148]$).
 
 ---
 
@@ -378,7 +351,7 @@ the temporal kernel $L_{\text{time}}$, the length-scales
 $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ — so the
 weekly log-rate fields are **temporally correlated** rather than independent draws. Each week yields
 its own $C^\ast_t$ (through the per-week level $c_t$, structure-field column $R_{\cdot,t}$, and
-per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$), and the transmission NGM $N(t)$ therefore varies in time through
+per-week block dispersion $\phi_{\beta(i)\beta(j),t}$/$\kappa_{\beta(i)\beta(j),t}$), and the transmission NGM $N(t)$ therefore varies in time through
 **both** antibody prevalence and (now temporally-smooth) contacts.
 
 **Sampling statements.**
@@ -394,10 +367,8 @@ c &\sim \mathcal N(c_0,\ 3^2), &
 \log\sigma_c &\sim \mathcal N(0,\ 0.5^2), &
 z_c &\sim \mathcal N(0,1)^{T}, \\
 z &\sim \mathcal N(0,1)^{P\times T}, &
-\beta_{t}\ (\log\kappa_t/\log\phi_t) &\sim \mathcal N(0,\sigma_d^2)^{4}, &
-\tau_t &\sim \mathrm{HalfNormal}(\sigma)^{T},\ \sigma=0.109, \\
-z^{\mathrm{disp}}_{t} &\sim \mathcal N(0,1)^{A^2}
-& & (\sigma_d = 0.5\ \text{Weibull},\ 1.0\ \text{NegBin}). & & &
+\log\kappa_{t}\ \text{or}\ \log\phi_{t} &\sim \mathcal N(0,\sigma_d^2)^{4}
+& & (\sigma_d = 0.5\ \text{Weibull},\ 1.0\ \text{NegBin};\ \text{4 block pairs}).
 \end{aligned}
 $$
 
@@ -406,10 +377,9 @@ $R = \eta\,(L_{\text{age}}\, z\, L_{\text{time}}^{\!\top})$ giving the week-$t$ 
 $r_{p,t} = c_t + R_{p,t}$ (§5), the contact-degree log-likelihood of §4 injected via
 `Turing.@addlogprob!`, and
 $C^\ast_t = $ `contact_star`$(nb, \langle k\rangle_t, \langle k^2\rangle_t, g_t)$. The dispersion is
-**hierarchical per week** (§4.3): a block mean $\beta_t$ ($4\times T$) plus a per-week-scaled
-age-pair random effect, $\log\mathrm{disp}_{ij,t} = \beta_{\ell(i,j),t} + \tau_t\, z^{\mathrm{disp}}_{p(i,j),t}$
-with $z^{\mathrm{disp}}$ an $A^2\times T$ array and $\tau_t$ a length-$T$ per-week half-Normal scale
-(estimated for each time step); it is **not** temporally smoothed (unlike the mean field).
+**block-linear per week** (§4.3): one $\log\kappa$/$\log\phi$ value per child/adult block pair (a
+$4\times T$ array), re-drawn each week with no age-pair random effect; it is **not** temporally
+smoothed (unlike the mean field).
 
 *Transmission block (absolute $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf, non-centred):*
 susceptibility and infectivity are **relative** to the reference bin $1$ ("2-10"), fixed to $1$; only the
@@ -553,12 +523,13 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log15,0.5^2)$ (shared
   prior for both diagonal length-scales), $\log\eta\sim\mathcal N(0,0.5^2)$,
   $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks) and
-  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`), the **hierarchical-dispersion**
-  per-week random-effect scale $\tau_t\sim\mathrm{HalfNormal}(\sigma)$, $\sigma=0.109$ (`disp_re_scale`,
-  §4.3), and **per-week temporally-smoothed contact estimation** (one separable spatio-temporal age-pair
-  GP across the window weeks). The chain-cache `contacts_label` is `"temporal-hdisp-hn"` (the `-hdisp`
-  suffix marks the hierarchical dispersion; the `-hn` suffix marks the half-Normal per-week RE-scale
-  prior — sampled name `tau` not `log_tau` — keeping the new chains disjoint from earlier caches).
+  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`), **block-linear per-week dispersion**
+  (one $\log\kappa$/$\log\phi$ per child/adult block pair, §4.3), and **per-week temporally-smoothed
+  contact estimation** (one separable spatio-temporal age-pair GP across the window weeks). The
+  chain-cache `contacts_label` is `"temporal-gsar"` — the `-gsar` tag marks block-linear dispersion
+  plus the absolute-transmissibility $\gamma_{\mathrm{SAR}}$ reparam. (The earlier `-hdisp`/`-hn`
+  dispersion random-effect tags were reverted 2026-07-11, so the current `-gsar` caches are disjoint
+  from those and from the pre-$\gamma_{\mathrm{SAR}}$ `"temporal"` chains.)
 - **Rolling origins.** The forecast origin is rolled weekly over the whole *available period* the
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
   ($2020$-$08$-$02$) plus the 12-week fit/lag lookback, and above by the last CoMix contact week
@@ -582,12 +553,11 @@ the seams at which they would be relaxed:
 
 - **Contact temporal structure.** *Implemented* — contacts are smoothed across weeks by a separable
   spatio-temporal GP (§5), both the structure field and the overall level, sharing one temporal
-  length-scale $\rho_{\text{time}}$. The **dispersion** is now *hierarchical* — a block-pair mean
-  plus a per-age-pair random effect with a **per-week half-Normal scale** $\tau_t$ (§4.3), so pairs are
-  no longer forced equal within a block and the RE scale is estimated for each time step — but the
-  dispersion is still **per-week** (not temporally smoothed). Remaining seams: temporally smoothing the
-  dispersion (block means / $\tau_t$), a per-block (rather than block-shared) random-effect scale, and a
-  longer-memory or non-separable space–time kernel (a stationary RBF is used now).
+  length-scale $\rho_{\text{time}}$. The **dispersion** remains **block-linear** — one $\log\kappa$/
+  $\log\phi$ value per child/adult block pair (§4.3), re-drawn **per week** (not temporally smoothed)
+  with no age-pair random effect. Remaining seams: temporally smoothing the block dispersion, an
+  age-pair dispersion random effect (partial pooling within a block), and a longer-memory or
+  non-separable space–time kernel (a stationary RBF is used now).
 - **Group-contact weight** $w_{\text{group}} = 2.5/240$ is fixed, not estimated.
 - **Fixed generation interval** (5-day mean, log-normal) rather than an estimated or
   variant-specific one.

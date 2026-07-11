@@ -43,7 +43,7 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-hdisp-hn-gsar",
+                              contacts::AbstractString = "temporal-gsar",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -137,35 +137,29 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
 end
 
 """
-    reconstruct_dispersion_draws(lbl, origin, h; weighted, cfg, grid, week_index=nothing,
-                                 contacts, save_dir) -> ndraws × A × A  |  nothing
+    reconstruct_dispersion_draws(lbl, origin, h; weighted, week_index=nothing,
+                                 contacts, save_dir) -> ndraws × 4  |  nothing
 
-Load the cached chain for `(lbl, origin, h)` and rebuild the per-**cell** hierarchical degree-model
-dispersion (κ Weibull shape / φ NegBin dispersion) for one week, once per posterior draw — the
-companion to `reconstruct_mu_draws` (same chain, same draw order, so draw `d` pairs with μ's `d`).
+Load the cached chain for `(lbl, origin, h)` and rebuild the per-cell degree-model dispersion
+(one value per block-linear index `bl = 2(block_of(i)−1) + block_of(j) ∈ {1,2,3,4}`) for one
+week, once per posterior draw — the companion to `reconstruct_mu_draws` (same chain, same draw
+order, so column `d` pairs with μ's draw `d`).
 
-The dispersion is hierarchical (§4.3): a block-linear MEAN `β[bl]`, `bl = 2(block_of(i)−1)+block_of(j)`,
-plus a per-week-scaled per-ordered-pair random effect. Per cell (mirrors `_cell_moments!`,
-joint_model.jl):
+`weighted` selects the parameter and its soft-clamp bounds, mirroring `_cell_moments!`
+(joint_model.jl):
+- Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
+- NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
 
-    τ_t       = tau[t]  (∼ HalfNormal, sampled directly, ≥0)   # per-week RE scale (pooled: scalar tau)
-    pcode     = (i−1)·A + j                                    # ordered-pair index ∈ 1..A²
-    log_disp  = β[bl(i,j)] + τ_t · z[pcode(i,j)]
-    disp[i,j] = exp(softclamp(log_disp, lo, hi))
-
-`weighted` selects the parameter names + soft-clamp bounds:
-- Weibull (`weighted=true`):  β=`log_kappa`, z=`z_kappa`, (lo,hi)=(−3,3)
-- NegBin  (`weighted=false`): β=`log_k`,     z=`z_k`,     (lo,hi)=(−4,5)
-
-Handles the per-week regime (`log_*[bl,t]` 4×Tn + `z_*[p,t]` A²×Tn; `week_index` selects the week,
-defaulting to the last window week — the origin week the NGM is frozen at) and the pooled regime
-(`log_*[bi,bj]` 2×2 mapped column-major to match the model's `vec(log_*)`, + `z_*[p]` A²,
-time-invariant). `block_of` uses `cfg`; `A = grid.N`. Returns `nothing` when the chain file is missing.
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar"`
+chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
+`week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
+regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
+missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE was reverted 2026-07-11.)
 """
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                      weighted::Bool, cfg, grid,
+                                      weighted::Bool,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-hdisp-hn-gsar",
+                                      contacts::AbstractString = "temporal-gsar",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -176,61 +170,28 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
         return nothing
     end
 
-    A      = grid.N
-    bbase  = weighted ? "log_kappa" : "log_k"              # block-mean param
-    zbase  = weighted ? "z_kappa"   : "z_k"                # per-ordered-pair random effect
-    lo, hi = weighted ? (-3.0, 3.0) : (-4.0, 5.0)          # soft-clamp bounds mirror _cell_moments!
-    pnames = string.(names(chn, :parameters))
+    base    = weighted ? "log_kappa" : "log_k"
+    lo, hi  = weighted ? (-3.0, 3.0) : (-4.0, 5.0)        # soft-clamp bounds mirror _cell_moments!
+    pnames  = string.(names(chn, :parameters))
+    perweek = Regex("^" * base * raw"\[(\d+)\s*,\s*(\d+)\]$")
+    D = length(vec(Array(chn[Symbol("log_eta")])))         # draw count (shared with μ reconstruction)
+    disp = Matrix{Float64}(undef, D, 4)
 
-    D = size(chn, 1) * size(chn, 3)                               # posterior draws (iter × chains)
+    # collect (row, col, exact-name) for every disp param. Read via the EXACT stored name — MCMCChains
+    # prints matrix indices as "log_k[1, 2]" (space after the comma), so a rebuilt "log_k[1,2]" misses.
+    entries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
+               for n in pnames for m in (match(perweek, n),) if m !== nothing]
+    isempty(entries) && (@warn "no $base parameters in chain" path; return nothing)
+    read_col!(bl, name) = (disp[:, bl] = exp.(_softclamp.(vec(Array(chn[Symbol(name)])), lo, hi)))
 
-    # --- block means β: D × 4 (block-linear bl). Read via EXACT stored name — MCMCChains prints matrix
-    # indices as "log_k[1, 2]" (space after the comma), so a rebuilt "log_k[1,2]" would miss. ---
-    β  = Matrix{Float64}(undef, D, 4)
-    bw = Regex("^" * bbase * raw"\[(\d+)\s*,\s*(\d+)\]$")
-    bentries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
-                for n in pnames for m in (match(bw, n),) if m !== nothing]
-    isempty(bentries) && (@warn "no $bbase parameters in chain" path; return nothing)
-    if maximum(e[1] for e in bentries) == 4                # per-week: [bl, t]
-        wk = week_index === nothing ? maximum(e[2] for e in bentries) : week_index
-        for (bl, t, name) in bentries
-            t == wk && (β[:, bl] = vec(Array(chn[Symbol(name)])))
+    if maximum(e[1] for e in entries) == 4                 # per-week: row = block-linear bl, col = week
+        wk = week_index === nothing ? maximum(e[2] for e in entries) : week_index
+        for (bl, t, name) in entries
+            t == wk && read_col!(bl, name)
         end
-    else                                                   # pooled: [row, col] 2×2 → column-major bl = row+2(col−1)
-        wk = nothing                                       # (matches the model's `vec(log_*)`)
-        for (r, c, name) in bentries
-            β[:, r + 2 * (c - 1)] = vec(Array(chn[Symbol(name)]))
-        end
-    end
-
-    # --- per-week RE scale τ_t: model draws `tau ~ filldist(HalfNormal, Tn)` ⇒ stored "tau[t]" (select
-    # week `wk`); pooled draws a scalar `tau`. Mirrors _cell_moments!'s per-week `tau[t]`. ---
-    τ = wk === nothing ? vec(Array(chn[:tau])) : vec(Array(chn[Symbol("tau[$wk]")]))
-
-    # --- per-ordered-pair random effect z: D × A² ---
-    Z = Matrix{Float64}(undef, D, A * A)
-    if wk === nothing                                      # pooled: 1-D z[p]
-        zw1 = Regex("^" * zbase * raw"\[(\d+)\]$")
-        for n in pnames
-            m = match(zw1, n); m === nothing && continue
-            Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
-        end
-    else                                                   # per-week: z[p, wk]
-        zw = Regex("^" * zbase * raw"\[(\d+)\s*,\s*(\d+)\]$")
-        for n in pnames
-            m = match(zw, n); m === nothing && continue
-            parse(Int, m.captures[2]) == wk &&
-                (Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])))
-        end
-    end
-
-    # --- per cell: log_disp = β[bl] + τ·z[pcode], then exp∘softclamp (mirrors _cell_moments!) ---
-    disp = Array{Float64,3}(undef, D, A, A)
-    for i in 1:A, j in 1:A
-        bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
-        pcode = (i - 1) * A + j
-        for d in 1:D
-            disp[d, i, j] = exp(_softclamp(β[d, bl] + τ[d] * Z[d, pcode], lo, hi))
+    else                                                   # pooled: 2×2 block matrix log_*[bi,bj]
+        for (bi, bj, name) in entries
+            read_col!(2 * (bi - 1) + bj, name)
         end
     end
     return disp

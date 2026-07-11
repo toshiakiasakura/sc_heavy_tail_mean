@@ -187,8 +187,14 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
 - **`clamp` replaced by a smooth soft-clamp, not deleted (ReverseDiff + numerical stability).**
   The `clamp` *function* is gone from `model_joint` (only the integer thread-cap `clamp` in
   `prefit_chains!` remains), but the bound *ranges* stay — via an interior-preserving softclamp
-  `_softclamp(x,lo,hi) = x - softplus(x-hi) + softplus(lo-x)` (with a sign-branched stable
-  `_softplus`). It is the **identity in the interior** (so the relative-pop-rescaled O(1) latents
+  (with a sign-branched stable `_softplus`). **NOTE (2026-07-11): the formula was reformulated to
+  the Inf-safe nested form** `_softclamp(x,lo,hi) = lo + softplus((hi − softplus(hi − x)) − lo)`;
+  the original `x − softplus(x−hi) + softplus(lo−x)` returns **NaN** at `x=±Inf` (`Inf − Inf`), so
+  when `tau`/`τ·zv`/the GP field overflowed to Inf on a stray step, `κ=exp(softclamp(Inf))` became
+  NaN and `Weibull(κ,λ)` threw `DomainError α>0` — killing the Pathfinder run (seen: origin
+  2020-10-18, weighted-hweibull, **neighbourhood** NGM, whose `gamma(1+2/κ)` second moment drives
+  the optimiser into those extremes). The nested form saturates ±Inf to ≈hi/≈lo; interiors agree to
+  <3e-3. It is the **identity in the interior** (so the relative-pop-rescaled O(1) latents
   are undistorted) and only saturates stray LBFGS excursions; applied to `ρ,η` (`log 3..log 45`,
   `-3..2`), `μ` (`-8..6`), Weibull `κ` (`-3..3`), NegBin `kk` (`-4..5`) — the same ranges the old
   `clamp`s used. AD is switched to **ReverseDiff**:
@@ -286,3 +292,25 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   the zero bin and normalises over positives — divide by `(1−P₀)` so the CCDF is **conditional on
   ≥1** (starts at 1 at the smallest degree). The Weibull hurdle path needs no truncation: its
   positive-part `Weibull(κ, μ/Γ(1+1/κ))` CCDF already matches the positive-only observed CCDF.
+
+## Reverted hierarchical dispersion → block-only 2026-07-11 (`joint_model.jl` + viz + spec — user request)
+- **SUPERSEDES the "Hierarchical dispersion" and "Half-Normal per-week dispersion RE scale" entries
+  above (both 2026-07-11).** Per user request the per-cell dispersion is back to **block-only**:
+  `log_disp_{ij} = dispv[bl]` (just the `4×Tn` / `2×2` block-linear mean `log_kappa`/`log_k`), with
+  NO per-age-pair random effect and NO shared scale. Removed `tau`, `z_kappa`/`z_k`, and the
+  `disp_re_scale` config field; `_cell_moments!` went back to `(K1,K2,G,μ,didx,dispv)`.
+- **The absolute-γ_SAR reparam was KEPT** (it shipped in the same commit `a9a2953` but is
+  independent): `log_gamma_sar` + relative susc/inf (bin-1 = 1, `z_s`/`z_i` length `A-1`),
+  `build_ngm(…; gamma_sar=…)`, `gamma_sar_prior`. Only the dispersion hierarchy was undone.
+- **Cache tag bumped** `temporal/pooled-hdisp-hn-gsar` → `temporal/pooled-gsar` (`contacts_label`).
+  This alone isolates the stale hierarchical `.jld2` (they carry `tau`/`z_kappa`/`z_k`; the reverted
+  model would silently ignore those extra columns and reconstruct a DIFFERENT dispersion) — the new
+  tag means they are simply never reloaded. **A re-fit is required** to populate the `-gsar` caches;
+  old `-hdisp-hn-gsar` chains were left on disk (not deleted).
+- Companion reverts: `reconstruct_dispersion_draws` (10j_viz_utils.jl) back to `ndraws×4`
+  block-linear (dropped `cfg`/`grid` args); the 10j §4 CCDF-grid caller back to `bl`-indexed
+  `view(κdraws,:,bl)` + `agepair_ccdf_panel(…, cfg; …)`; `_softclamp` fix-comment and the CLAUDE.md
+  gotcha updated to cite `log_kappa`/`log_k` (not the now-gone `tau`) as the overflow example.
+- **Lesson**: `a9a2953` bundled two orthogonal changes (dispersion hierarchy + γ_SAR) in one commit,
+  which made this a *surgical partial* revert rather than a `git revert`. Prefer one concern per
+  commit so either can be backed out cleanly.

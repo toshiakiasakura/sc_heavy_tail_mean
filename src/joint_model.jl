@@ -14,8 +14,17 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 # exp-transformed rates/shapes/means finite during aggressive Pathfinder/LBFGS steps without
 # distorting the well-scaled interior where good fits live. `_softplus` branches on the sign to
 # avoid `exp` overflow (branch is on a value, so it is ReverseDiff-safe on an uncompiled tape).
+#
+# The clamp is applied as a NESTED upper-then-lower soft bound: `x` is first squashed against `hi`
+# (`hi − softplus(hi − x)`, itself finite even at x=±Inf), then that result against `lo`. Every
+# intermediate is individually finite, so a ±Inf input SATURATES to ≈hi/≈lo instead of producing
+# the `Inf − Inf = NaN` of the naive `x − softplus(x−hi) + softplus(lo−x)` form. This matters:
+# when the GP field or a raw dispersion latent (`log_kappa`/`log_k`) overflows to Inf on a stray
+# optim step, `dispv`/`rvec` become Inf, and the old form's NaN would make `κ = exp(NaN)` NaN and abort
+# the fit with `Weibull: α > 0 not satisfied`; the nested form keeps κ, λ, μ finite so the fit
+# just sees a bad (finite) objective and backtracks. The interior is unchanged to <3e-3.
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
-_softclamp(x, lo, hi) = x - _softplus(x - hi) + _softplus(lo - x)
+_softclamp(x, lo, hi) = lo + _softplus((hi - _softplus(hi - x)) - lo)
 
 """
     _unordered_pairs(A)
@@ -145,28 +154,23 @@ end
         [exp(_softclamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
     # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
-    # μ matrix. `didx` indexes the (possibly weekly) degree arrays. The dispersion is
-    # HIERARCHICAL (§4.3): `βv` is the length-4 block-linear dispersion MEAN, indexed
-    # `bl = 2(bi−1)+bj ∈ {1,2,3,4}`; `zv` is the per-ordered-pair random effect, indexed
-    # `pcode = (i−1)A+j ∈ 1..A²`; `τ` is the single shared RE scale. The per-cell
-    # log-dispersion is  log_disp_{ij} = βv[bl] + τ·zv[pcode]  (non-centred). Both `βv` and
-    # `zv` are ≤ 2-D `filldist` slices (`4×Tn`, `A²×Tn`) so `generated_quantities` can
-    # reconstruct them — a 3-D `filldist` cannot be (see build sites below).
-    function _cell_moments!(K1, K2, G, μ, didx, βv, zv, τ)
-        ll = zero(eltype(K1))
+    # μ matrix. `didx` indexes the (possibly weekly) degree arrays; `dispv` is the length-4
+    # block-linear dispersion for this context, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`
+    # (kept 1-D per week: DynamicPPL's `generated_quantities` can't reconstruct a 3-D
+    # `filldist`, so dispersion is a 2-D `4×Tn` array sliced per week, never `2×2×Tn`).
+    function _cell_moments!(K1, K2, G, μ, didx, dispv)
+        ll = zero(eltype(μ))
         for i in 1:A, j in 1:A
-            bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
-            pcode = (i - 1) * A + j
-            logd  = βv[bl] + τ * zv[pcode]                  # block mean + shared-scale age-pair random effect
+            bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
             if is_weighted(dm)
-                κ = exp(_softclamp(logd, -3.0, 3.0))        # shape ∈ ≈[0.05, 20], soft-bounded
+                κ = exp(_softclamp(dispv[bl], -3.0, 3.0))   # shape ∈ ≈[0.05, 20], soft-bounded
                 λ = μ[i, j] / gamma(1 + 1 / κ)              # scale stays finite & >0 (μ, κ bounded)
                 pos = didx === nothing ? ds.pos_weight[i, j] : ds.pos_weight[didx, i, j]
                 isempty(pos) || (ll += calculate_loglikelihood(pos, Weibull(κ, λ)))  # collapsed histogram
                 p0 = didx === nothing ? ds.p0[i, j] : ds.p0[didx, i, j]
                 k1, k2, g = _weibull_moments(μ[i, j], κ, p0)
             else
-                kk = exp(_softclamp(logd, -4.0, 5.0))       # dispersion ∈ ≈[0.018, 148], soft-bounded
+                kk = exp(_softclamp(dispv[bl], -4.0, 5.0))  # dispersion ∈ ≈[0.018, 148], soft-bounded
                 dd = didx === nothing ? ds.dd_count[i, j] : ds.dd_count[didx, i, j]
                 ll += calculate_loglikelihood(dd, NegBin(μ[i, j], kk))
                 k1, k2, g = _negbin_moments(μ[i, j], kk)
@@ -181,25 +185,17 @@ end
         # pooled: one latent field, one C* reused for every renewal week.
         c ~ Normal(c0, 3.0)
         z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
-        # hierarchical dispersion (time-invariant here): 2×2 block MEANS + a shared-scale per-age-pair
-        # random effect over the A² ordered pairs (non-centred); log_disp_{ij}=βv[bl]+τ·zv[pcode] (§4.3).
-        tau ~ truncated(Normal(0.0, cfg.disp_re_scale); lower = 0.0)  # half-Normal shared RE scale (≥0)
-        τ = tau                                           # single shared per-age-pair RE scale
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape MEAN by child/adult block
-            z_kappa ~ filldist(Normal(0, 1), A * A)       # per-ordered-pair shape random effect
-            β_disp = vec(log_kappa); z_disp = z_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
+            disp = log_kappa
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion MEAN by block
-            z_k ~ filldist(Normal(0, 1), A * A)           # per-ordered-pair dispersion random effect
-            β_disp = vec(log_k); z_disp = z_k
+            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
+            disp = log_k
         end
         μ = _mu_matrix(c .+ η .* (Lp * z))
-        ETp = promote_type(eltype(μ), typeof(τ))
+        ETp = eltype(μ)
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
-        # vec(2×2)→bl is column-major (off-diagonal blocks bl=2/3 labelled by that order); harmless as
-        # the block-mean prior is exchangeable, and pooled is inactive. See §4.3 / tasks/lessons.md.
-        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, β_disp, z_disp, τ)
+        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, vec(disp))   # 2×2 → block-linear 4
         Cstar1 = contact_star(nb, K1, K2, G)
         Cstar_weeks = [Cstar1 for _ in 1:Tn]
     else
@@ -227,35 +223,26 @@ end
         c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
 
         z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
-        # hierarchical dispersion, per week: block MEAN β (4×Tn, block-linear rows × week) + a
-        # per-week-scaled per-age-pair random effect z_disp (A²×Tn, ordered-pair rows × week), non-centred.
-        # Both 2-D so generated_quantities can reconstruct them (a 3-D filldist can't — see
-        # _cell_moments!). log_disp_{ij,t}=β[bl,t]+τ_t·z_disp[pcode,t]; τ_t is a per-week RE scale shared
-        # across blocks WITHIN a week (user: "estimated for each time step"). Dispersion stays per-week
-        # (not temporally smoothed), so β/z_disp/τ are iid-per-week draws (unlike the temporally-coupled mean field).
-        tau ~ filldist(truncated(Normal(0.0, cfg.disp_re_scale); lower = 0.0), Tn)  # per-week half-Normal RE scale (≥0)
+        # dispersion 4×Tn (block-linear rows × week): 2-D so generated_quantities can
+        # reconstruct it (a 3-D 2×2×Tn filldist can't be — see _cell_moments!).
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape MEAN by block-linear × week
-            z_kappa ~ filldist(Normal(0, 1), A * A, Tn)        # per-ordered-pair shape random effect × week
-            β_disp = log_kappa; z_disp = z_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape by block-linear × week
+            disp = log_kappa
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion MEAN by block-linear × week
-            z_k ~ filldist(Normal(0, 1), A * A, Tn)            # per-ordered-pair dispersion random effect × week
-            β_disp = log_k; z_disp = z_k
+            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
+            disp = log_k
         end
         # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
         # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
         # already carries η; don't re-apply it below.
         Fld = η .* (Lp * z * Lt')                          # P×Tn
-        ETp = promote_type(typeof(c), eltype(Fld), eltype(tau))
+        ETp = promote_type(typeof(c), eltype(Fld))
         Cstar_weeks = Vector{Matrix{ETp}}(undef, Tn)
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         ll = zero(ETp)
         for t in 1:Tn
             μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
-            # `view(...)` (function form) not `@view a, @view b`: a space-form @view in an arg list
-            # greedily swallows the following args ("Invalid use of @view macro").
-            ll += _cell_moments!(K1, K2, G, μ, t, view(β_disp, :, t), view(z_disp, :, t), tau[t])
+            ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
             Cstar_weeks[t] = contact_star(nb, K1, K2, G)
         end
         Turing.@addlogprob! ll
