@@ -87,13 +87,22 @@ Base.@kwdef struct FrameworkConfig
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
     gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
+    # --- hierarchical dispersion: block mean (log_k/log_kappa) + shared-scale age-pair random effect (§4.3) ---
+    disp_re_scale::Float64 = 0.109 # half-Normal scale σ for the per-age-pair dispersion RE scale: τ ~ HalfNormal(σ) = truncated(Normal(0,σ); lower=0). Set 2026-07-11 to match the EXPECTED random-effect variance E[(τ·z)²]=E[τ²] of the previously-implemented log-Normal τ=exp(Normal(log0.10,0.30)): E[τ²]=exp(2log0.10+2·0.30²)=0.01197 ⇒ σ=√0.01197≈0.109. Half-Normal (mode at 0) shrinks data-free empty-cell REs harder onto the block mean. Drawn per-week (`tau[t]`, one per window week) in the per-week regime, scalar when pooled. (Var(τ)-match instead ⇒ σ≈0.053.)
+    # --- absolute transmissibility γ_SAR (§3.2/§6; analysis-plan reparam) ---
+    gamma_sar_prior::Tuple{Float64,Float64} = (log(0.33), 0.56) # log-γ_SAR Normal(μ,σ): the single absolute transmissibility scalar (susc/inf are relative to reference bin 1 "2-10"=1). Calibrated 2026-07-11 from the fitted reference-cell level susc[1]·inf[1] (= the quantity γ_SAR absorbs under bin-1 normalisation) across 18 dt_intermediate_age_pair_temporal_GP chains (both degree models × 9 origins): median 0.33, log-SD 0.56 ⇒ 90% γ_SAR∈[0.13,0.83] covers the observed [0.10,0.56] (weighted ~0.43, unweighted ~0.20). NB the geometric-mean level exp(μ_s+μ_i)≈1.31 is NOT the target — with bin 1 normalised to 1, γ_SAR must reproduce N_11=S_1·I_1, not the cross-bin geometric mean.
 end
 
-"""`contacts_label(cfg)` — tags the contact regime for chain-cache filenames so the
-per-week separable spatio-temporal GP (`"temporal"`) and pooled (`"pooled"`) fits never
-reload each other's stale chains (their parameter spaces differ). The `"temporal"` tag
-also keeps the new chains disjoint from the pre-temporal per-week-iid `"weekly"` caches."""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled" : "temporal"
+"""`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
+different parameter spaces never reload each other's stale chains. The suffix chain is a running
+version tag (the filename does not otherwise encode dispersion/transmission structure):
+`-hdisp` (hierarchical block-mean + per-age-pair dispersion RE, §4.3; disjoint from the pre-hierarchical
+`"temporal"`/`"pooled"` caches that lack `z_k`/`z_kappa`+`tau`); `-hn` (2026-07-11, RE-scale prior
+switch log-Normal `log_tau`→half-Normal `tau`); `-gsar` (2026-07-11, transmission reparam — `μ_s`/`μ_i`
+removed, absolute `log_gamma_sar` added and `z_s`/`z_i` shrunk to length `A-1` with susc/inf normalised to
+reference bin 1, §3.2/§6). Pre-`-gsar` chains lack `log_gamma_sar` and carry `mu_s`/`mu_i`, so they
+reconstruct wrongly — hence the bump."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-hdisp-hn-gsar" : "temporal-hdisp-hn-gsar"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).

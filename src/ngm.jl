@@ -1,8 +1,10 @@
 # ngm.jl — build the next-generation matrix from the age-pair contact-degree
 # distribution. The NGM *builder* is the second swap axis (deterministic dispatch).
 #
-#   N_ab(t) = full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
+#   N_ab(t) = γ_SAR · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
 #   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
+# γ_SAR is the single absolute-transmissibility scalar (analysis-plan reparam); susc/inf are RELATIVE,
+# normalised to reference bin 1 ("2-10") = 1, so γ_SAR reproduces the reference cell N_11 directly.
 #
 # C*_ab = per-capita effective contacts from bin a to bin b (mean or excess degree).
 # There is NO post-hoc reciprocity symmetrisation: reciprocity is carried entirely by
@@ -47,20 +49,22 @@ function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatri
 end
 
 """
-    build_ngm(Cstar, susc, inf, F, A_col)
+    build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)
 
 7×7 next-generation matrix for one week from a precomputed `C*`:
-`N_ab = full_susceptibility_a · C*_ab · inf_b`.
+`N_ab = gamma_sar · full_susceptibility_a · C*_ab · inf_b`. `gamma_sar` is the absolute
+transmissibility scalar (susc/inf relative to reference bin 1); `gamma_sar=1` recovers the
+pre-reparam form.
 """
 function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
     fs = full_susceptibility(susc, F, A_col)
-    return (fs .* Cstar) .* inf'
+    return gamma_sar .* ((fs .* Cstar) .* inf')
 end
 
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
                    G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector)
-    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
+    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col; gamma_sar = gamma_sar)
 end

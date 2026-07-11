@@ -145,23 +145,28 @@ end
         [exp(_softclamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
     # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
-    # μ matrix. `didx` indexes the (possibly weekly) degree arrays; `dispv` is the length-4
-    # block-linear dispersion for this context, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`
-    # (kept 1-D per week: DynamicPPL's `generated_quantities` can't reconstruct a 3-D
-    # `filldist`, so dispersion is a 2-D `4×Tn` array sliced per week, never `2×2×Tn`).
-    function _cell_moments!(K1, K2, G, μ, didx, dispv)
-        ll = zero(eltype(μ))
+    # μ matrix. `didx` indexes the (possibly weekly) degree arrays. The dispersion is
+    # HIERARCHICAL (§4.3): `βv` is the length-4 block-linear dispersion MEAN, indexed
+    # `bl = 2(bi−1)+bj ∈ {1,2,3,4}`; `zv` is the per-ordered-pair random effect, indexed
+    # `pcode = (i−1)A+j ∈ 1..A²`; `τ` is the single shared RE scale. The per-cell
+    # log-dispersion is  log_disp_{ij} = βv[bl] + τ·zv[pcode]  (non-centred). Both `βv` and
+    # `zv` are ≤ 2-D `filldist` slices (`4×Tn`, `A²×Tn`) so `generated_quantities` can
+    # reconstruct them — a 3-D `filldist` cannot be (see build sites below).
+    function _cell_moments!(K1, K2, G, μ, didx, βv, zv, τ)
+        ll = zero(eltype(K1))
         for i in 1:A, j in 1:A
-            bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+            bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+            pcode = (i - 1) * A + j
+            logd  = βv[bl] + τ * zv[pcode]                  # block mean + shared-scale age-pair random effect
             if is_weighted(dm)
-                κ = exp(_softclamp(dispv[bl], -3.0, 3.0))   # shape ∈ ≈[0.05, 20], soft-bounded
+                κ = exp(_softclamp(logd, -3.0, 3.0))        # shape ∈ ≈[0.05, 20], soft-bounded
                 λ = μ[i, j] / gamma(1 + 1 / κ)              # scale stays finite & >0 (μ, κ bounded)
                 pos = didx === nothing ? ds.pos_weight[i, j] : ds.pos_weight[didx, i, j]
                 isempty(pos) || (ll += calculate_loglikelihood(pos, Weibull(κ, λ)))  # collapsed histogram
                 p0 = didx === nothing ? ds.p0[i, j] : ds.p0[didx, i, j]
                 k1, k2, g = _weibull_moments(μ[i, j], κ, p0)
             else
-                kk = exp(_softclamp(dispv[bl], -4.0, 5.0))  # dispersion ∈ ≈[0.018, 148], soft-bounded
+                kk = exp(_softclamp(logd, -4.0, 5.0))       # dispersion ∈ ≈[0.018, 148], soft-bounded
                 dd = didx === nothing ? ds.dd_count[i, j] : ds.dd_count[didx, i, j]
                 ll += calculate_loglikelihood(dd, NegBin(μ[i, j], kk))
                 k1, k2, g = _negbin_moments(μ[i, j], kk)
@@ -176,17 +181,25 @@ end
         # pooled: one latent field, one C* reused for every renewal week.
         c ~ Normal(c0, 3.0)
         z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
+        # hierarchical dispersion (time-invariant here): 2×2 block MEANS + a shared-scale per-age-pair
+        # random effect over the A² ordered pairs (non-centred); log_disp_{ij}=βv[bl]+τ·zv[pcode] (§4.3).
+        tau ~ truncated(Normal(0.0, cfg.disp_re_scale); lower = 0.0)  # half-Normal shared RE scale (≥0)
+        τ = tau                                           # single shared per-age-pair RE scale
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
-            disp = log_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape MEAN by child/adult block
+            z_kappa ~ filldist(Normal(0, 1), A * A)       # per-ordered-pair shape random effect
+            β_disp = vec(log_kappa); z_disp = z_kappa
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
-            disp = log_k
+            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion MEAN by block
+            z_k ~ filldist(Normal(0, 1), A * A)           # per-ordered-pair dispersion random effect
+            β_disp = vec(log_k); z_disp = z_k
         end
         μ = _mu_matrix(c .+ η .* (Lp * z))
-        ETp = eltype(μ)
+        ETp = promote_type(eltype(μ), typeof(τ))
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
-        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, vec(disp))   # 2×2 → block-linear 4
+        # vec(2×2)→bl is column-major (off-diagonal blocks bl=2/3 labelled by that order); harmless as
+        # the block-mean prior is exchangeable, and pooled is inactive. See §4.3 / tasks/lessons.md.
+        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, β_disp, z_disp, τ)
         Cstar1 = contact_star(nb, K1, K2, G)
         Cstar_weeks = [Cstar1 for _ in 1:Tn]
     else
@@ -214,41 +227,58 @@ end
         c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
 
         z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
-        # dispersion 4×Tn (block-linear rows × week): 2-D so generated_quantities can
-        # reconstruct it (a 3-D 2×2×Tn filldist can't be — see _cell_moments!).
+        # hierarchical dispersion, per week: block MEAN β (4×Tn, block-linear rows × week) + a
+        # per-week-scaled per-age-pair random effect z_disp (A²×Tn, ordered-pair rows × week), non-centred.
+        # Both 2-D so generated_quantities can reconstruct them (a 3-D filldist can't — see
+        # _cell_moments!). log_disp_{ij,t}=β[bl,t]+τ_t·z_disp[pcode,t]; τ_t is a per-week RE scale shared
+        # across blocks WITHIN a week (user: "estimated for each time step"). Dispersion stays per-week
+        # (not temporally smoothed), so β/z_disp/τ are iid-per-week draws (unlike the temporally-coupled mean field).
+        tau ~ filldist(truncated(Normal(0.0, cfg.disp_re_scale); lower = 0.0), Tn)  # per-week half-Normal RE scale (≥0)
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape by block-linear × week
-            disp = log_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape MEAN by block-linear × week
+            z_kappa ~ filldist(Normal(0, 1), A * A, Tn)        # per-ordered-pair shape random effect × week
+            β_disp = log_kappa; z_disp = z_kappa
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
-            disp = log_k
+            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion MEAN by block-linear × week
+            z_k ~ filldist(Normal(0, 1), A * A, Tn)            # per-ordered-pair dispersion random effect × week
+            β_disp = log_k; z_disp = z_k
         end
         # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
         # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
         # already carries η; don't re-apply it below.
         Fld = η .* (Lp * z * Lt')                          # P×Tn
-        ETp = promote_type(typeof(c), eltype(Fld))
+        ETp = promote_type(typeof(c), eltype(Fld), eltype(tau))
         Cstar_weeks = Vector{Matrix{ETp}}(undef, Tn)
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         ll = zero(ETp)
         for t in 1:Tn
             μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
-            ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
+            # `view(...)` (function form) not `@view a, @view b`: a space-form @view in an arg list
+            # greedily swallows the following args ("Invalid use of @view macro").
+            ll += _cell_moments!(K1, K2, G, μ, t, view(β_disp, :, t), view(z_disp, :, t), tau[t])
             Cstar_weeks[t] = contact_star(nb, K1, K2, G)
         end
         Turing.@addlogprob! ll
     end
 
-    # ---- transmission latents (reference priors, non-centred; stan:167-174) ----
-    mu_s ~ Beta(24, 24)
-    sig_s ~ truncated(Normal(0.1, 0.02); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A)
-    susc = exp.(mu_s .+ sig_s .* z_s)
+    # ---- transmission latents: absolute γ_SAR + relative susc/inf (analysis-plan reparam) ----
+    # ONE absolute-transmissibility scalar γ_SAR carries the NGM level; inherent susceptibility &
+    # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated).
+    # This removes the old μ_s/μ_i level pair (confounded with each other and with C*'s scale — only
+    # their sum was identified); the level now lives in the single, data-identified γ_SAR. The old
+    # per-bin `susc=exp(μ_s+σ_s z_s)` became `susc=vcat(1, exp(σ_s z_s[2:A]))` (bin-1 reference), so
+    # `z_s`/`z_i` shrink from length A to A-1 (no redundant reference offset). NGM index convention is
+    # unchanged (susc on the susceptible row a, inf on the infectious column b; Munday Eq 3).
+    log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.33), calibrated
+    gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # absolute transmissibility, soft-bounded
 
-    mu_i ~ Beta(4, 12)
+    sig_s ~ truncated(Normal(0.1, 0.02); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A)
+    susc = vcat(one(sig_s), exp.(sig_s .* z_s))            # susc[1] = 1 (relative inherent susceptibility)
+
     sig_i ~ truncated(Normal(0.1, 0.02); lower = 0)
-    z_i ~ filldist(Normal(0, 1), A)
-    inf = exp.(mu_i .+ sig_i .* z_i)
+    z_i ~ filldist(Normal(0, 1), A - 1)
+    inf = vcat(one(sig_i), exp.(sig_i .* z_i))             # inf[1] = 1 (relative infectivity)
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
@@ -256,7 +286,7 @@ end
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
     # (antibody and — now — contacts vary by week; C*_t is Cstar_weeks[t].)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t])
+        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -264,7 +294,7 @@ end
         end
     end
 
-    return (; susc, inf, F, sigma_inf, Cstar = Cstar_weeks)
+    return (; susc, inf, F, gamma_sar, sigma_inf, Cstar = Cstar_weeks)
 end
 
 """
@@ -329,7 +359,7 @@ function posterior_forecast(model, chn, wd::WindowData, cfg::FrameworkConfig, w;
     out = Array{Float64}(undef, A, H, keep)
     for (d, k) in enumerate(idx)
         q = gq[k]
-        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn])  # origin-week C*
+        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn]; gamma_sar = q.gamma_sar)  # origin-week C*
         mean_path = forecast_forward(N_origin, wd.I_mean[:, seed_cols], w, H)
         for a in 1:A, h in 1:H
             σ = max(q.sigma_inf * mean_path[a, h], 1e-6)
@@ -507,7 +537,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
         step_mean = zeros(A)
         for (d, k) in enumerate(idx)
             q = gq[k]
-            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end])   # origin-week C* (t₀+h−1); antibody frozen at t₀
+            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; gamma_sar = q.gamma_sar)   # origin-week C* (t₀+h−1); antibody frozen at t₀
             acc = zeros(A)
             for s in 1:cfg.smax
                 acc .+= w[s] .* hist[:, end - s + 1]

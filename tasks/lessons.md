@@ -2,6 +2,155 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## Absolute γ_SAR + reference-normalised susc/inf 2026-07-11 (`joint_model.jl`, `ngm.jl` — transmission reparam)
+
+- **What changed:** the transmission block dropped the confounded level pair `μ_s ~ Beta(24,24)` /
+  `μ_i ~ Beta(4,12)` (only their sum was identified, and it fought C*'s scale) for a single **absolute
+  transmissibility** `log_gamma_sar ~ Normal(log0.33, 0.56)` → `gamma_sar = exp(softclamp(·,log0.02,log5))`.
+  `susc`/`inf` are now **relative**, normalised so reference **bin 1 ("2-10") = 1**:
+  `susc = vcat(one(sig_s), exp.(sig_s .* z_s))` with `z_s ~ filldist(Normal(0,1), A-1)` (shrunk from `A`;
+  no redundant reference offset). NGM: `N_ab = gamma_sar · susc_a·(1+(F-1)A_a) · C*_ab · inf_b` via
+  `build_ngm(...; gamma_sar=1.0)` (kwarg, default 1 keeps the convenience/test method valid). This is the
+  analysis-plan `γ_SAR` + baseline-"2-10" form (docx wins); §3.2/§6 updated.
+- **NGM ordering: follow the paper/code, NOT the docx's `diag(γ_inf)C diag(γ_sus)`.** Munday 2023 Eq 3 is
+  `N = diag(s) C diag(i)` — susceptibility on the susceptible **row** `a`, infectivity on the infectious
+  **column** `b`. The docx transposes this (a typo vs its own source); keep the existing code convention.
+- **γ_SAR prior is CALIBRATED, not prior-implied.** The naive "current level" `exp(μ_s+μ_i)` from prior
+  MEANS (≈2.1) is doubly wrong: (a) the data pull `μ_s≈0.2, μ_i≈0.05` (well below the Beta means 0.5/0.25),
+  and (b) under bin-1 normalisation γ_SAR must reproduce the **reference cell** `N_11 = susc[1]·inf[1]`, NOT
+  the geometric-mean level `exp(μ_s+μ_i)≈1.31`. Reading 18 pre-reparam `dt_intermediate_age_pair_temporal_GP`
+  chains (both degree models × 9 origins), `susc[1]·inf[1]` had **median 0.33, log-SD 0.56** (weighted ~0.43,
+  unweighted ~0.20) ⇒ prior `Normal(log0.33, 0.56)`, 90% γ_SAR∈[0.13,0.83].
+- **Param space changed ⇒ cache-bust.** `contacts_label` bumped `…-hn`→`…-hn-gsar` (framework.jl) + the 4
+  hardcoded `contacts=` viz defaults (8j/10j). Pre-`-gsar` chains carry `mu_s`/`mu_i` and lack
+  `log_gamma_sar`, and `z_s`/`z_i` are the wrong length — so `generated_quantities` / `load_transmission_draws`
+  reconstruct wrongly. The filename does NOT encode the transmission block, so a transmission change would
+  silently reload stale chains WITHOUT the tag bump — always bump.
+- **`load_transmission_draws` must mirror the model:** `gamma_sar=exp.(softclamp.(chn[:log_gamma_sar],…))`,
+  `susc = hcat(ones(nd), exp.(sig_s .* z_s))` (z_s is now `nd×(A-1)`), col 1 pinned to 1; returns
+  `gamma_sar`. All three `build_ngm` NGM call sites (`joint_model` infection loop + `posterior_forecast` +
+  `iterated_forecast`, plus `reproduction_draws`) pass `gamma_sar`.
+- **Surfaced, not fixed:** fitted `σ_s≈0.22–0.28`, `σ_i≈0.14–0.24` ≫ the tight `N⁺(0.1,0.02)` prior, with
+  3–5× age profiles carried by extreme `z` (`z_s[1]≈−4.5`). Kept the tight offset prior for a minimal
+  reparam; widening `σ_s/σ_i` (spread carried by `σ`, `z∼N(0,1)`) is the recommended next step.
+
+## Half-Normal per-week dispersion RE scale 2026-07-11 (`src/joint_model.jl` — τ prior form + per-week τ_t)
+
+- **The per-age-pair RE scale τ changed twice, same day:** (1) log-Normal `log_tau ~ Normal(log0.25,0.5)`
+  → tightened to `Normal(log0.10,0.30)`; then (2) replaced by a **half-Normal** and made **per-week**:
+  `tau ~ filldist(truncated(Normal(0.0, cfg.disp_re_scale); lower=0), Tn)` in the per-week branch
+  (one `tau[t]` per window week, iid; passed as `tau[t]` into `_cell_moments!`). The **pooled** branch
+  keeps a single scalar `tau`. The `exp(softclamp(log_tau,-4,1))` transform is **gone** — a half-Normal
+  is already ≥0, so `τ = tau` directly.
+- **Scale σ = `cfg.disp_re_scale` = 0.109 is E[τ²]-matched, NOT Var(τ)-matched.** For a random-effect
+  scale the meaningful "equivalent variance" is the marginal RE variance `Var(τz)=E[τ²]=σ²`. Matching
+  E[τ²] of the prior log-Normal `exp(Normal(log0.10,0.30))` (E[τ²]=exp(2log0.10+2·0.30²)=0.01197) gives
+  σ=√0.01197≈**0.109**, which also keeps the typical τ magnitude ~0.10. Matching **Var(τ)** instead gives
+  σ≈**0.053** — rejected: half-Normal has mode 0, so Var-matching nearly extinguishes the RE. (Formula in
+  the framework.jl comment.)
+- **Empirical basis (why shrink hard):** the pre-hierarchical block-only temporal-GP fits in
+  `dt_intermediate_age_pair_temporal_GP/` (tag `temporal`, **no** `z_*`/`log_tau` latents — 48 = 4 blocks
+  × 12 weeks only) show κ **homogeneous** across blocks (0.88–1.03, log-SD≈0.06, ~2× week swing) and φ
+  typical ~0.28 but volatile (0.05–18, **per-week swings up to 71×**). So per-pair REs should shrink onto
+  the block mean. (Reconstruct via `reconstruct_dispersion_draws(...; contacts="temporal", save_dir=…)`.)
+- **Param name `log_tau`→`tau` ⇒ cache-bust.** `contacts_label` bumped `temporal-hdisp`→`temporal-hdisp-hn`
+  / `pooled-hdisp`→`pooled-hdisp-hn` (framework.jl), plus the 4 hardcoded `contacts="temporal-hdisp"`
+  defaults in 8j/10j viz utils and `reconstruct_mu_draws`/`reconstruct_dispersion_draws`. A prior-VALUE
+  change alone wouldn't bust the cache (same param space) — but a prior-FORM/name change does.
+- **`reconstruct_dispersion_draws` reads τ AFTER `wk` is known:** `τ = wk===nothing ? vec(Array(chn[:tau]))
+  : vec(Array(chn[Symbol("tau[$wk]")]))` (pooled scalar vs per-week `tau[wk]`). `D=size(chn,1)*size(chn,3)`
+  (was `length(τ)`, no longer available before the read). `ETp` promote uses `eltype(tau)` not `typeof(τ)`.
+- **Verified** (`scratchpad/verify_tau.jl`): both κ/φ models build, sample `tau[1..12]`, full logjoint finite.
+  Full refit under the new `-hn` tag is still required to regenerate chains (old `-hdisp` chains are stale).
+
+## Hierarchical dispersion 2026-07-11 (`src/joint_model.jl` — block mean + age-pair random effect on φ/κ)
+
+- **The block dispersion (NegBin `log_k` / Weibull `log_kappa`) is now HIERARCHICAL: a block MEAN +
+  a per-age-pair random effect.** It is a strictly *additive* extension of the old per-block-per-week
+  `4×Tn` array: that array is **kept** (same name `log_k`/`log_kappa`, same `Normal(0,1|0.5)` prior)
+  but reinterpreted as the block MEAN β; on top of it each ordered age pair `(i,j)` deviates by
+  `τ·z[pcode]`, `pcode=(i-1)A+j ∈ 1..A²`. So `log_disp_{ij,t} = β[bl,t] + τ·z_disp[pcode,t]`,
+  `bl=2(block_of i −1)+block_of j`. New latents: `z_kappa`/`z_k ~ filldist(Normal(0,1), A*A, Tn)`
+  (per-week, **2-D** = 49×Tn, reconstructable) and a **single scalar** `log_tau ~
+  Normal(cfg.disp_re_scale_prior=(log0.25,0.5))`, `τ = exp(softclamp(log_tau,-4,1))`, shared across
+  **all** blocks and weeks (user's choice: per-week + single shared scale). Dispersion is still
+  per-week (not temporally smoothed) — unlike the mean field.
+- **User decisions that shaped it (don't silently "improve"):** (i) **per-week** not time-invariant —
+  β and z_disp are re-drawn each week; (ii) **single shared τ** not per-block — one scalar, more
+  identifiable than a per-block scale (child→child has only 4 ordered pairs); (iii) **49 ordered
+  pairs** (directional), forced by the 4 **directional** blocks (child→adult ≠ adult→child), not 28
+  unordered; self-pairs `(i,i)` included.
+- **`_cell_moments!` signature changed** `(…, dispv)` → `(…, βv, zv, τ)`: it now computes
+  `logd = βv[bl] + τ·zv[pcode]` per cell (bl and pcode both integer, data-independent ⇒ ReverseDiff-safe),
+  then the same `exp(softclamp(logd, …))`. `didx` still indexes the degree DATA arrays. `ll` accumulator
+  is `zero(eltype(K1))` (=ETp) — ETp now promotes `τ` too (`promote_type(typeof(c), eltype(Fld), typeof(τ))`
+  per-week; `promote_type(eltype(μ), typeof(τ))` pooled).
+- **Reconstruction contract changed `ndraws×4` → `ndraws×A×A`** (`reconstruct_dispersion_draws`,
+  `10j_viz_utils.jl`). It now needs `cfg` (for `block_of`) and `grid` (for `A`) as kwargs, reads the
+  block means (`log_*[bl,t]` per-week / column-major `log_*[bi,bj]` pooled), the scalar `log_tau`, and
+  the per-pair `z_*[p,t]`/`z_*[p]` (space-tolerant regex, read columns by EXACT stored name — MCMCChains
+  prints `z_k[1, 2]` with a space), then rebuilds per cell `exp(softclamp(β[bl]+τ·z[pcode], lo, hi))`.
+  The one consumer (10j §4 CCDF grid, `agepair_ccdf_panel`) changed `view(κdraws,:,bl)` → `view(κdraws,:,i,j)`
+  and its call passes `grid=grid, cfg=cfg`. `reconstruct_mu_draws` is UNAFFECTED (μ ⟂ dispersion).
+- **Cache-bust via `contacts_label`** (`framework.jl`): `"temporal"→"temporal-hdisp"`,
+  `"pooled"→"pooled-hdisp"` — the param space gained `z_*`/`log_tau`, so old-named chains lack them and
+  mis-reconstruct. Bumped the three hardcoded `contacts="temporal"` viz defaults to `"temporal-hdisp"`
+  (`chain_path`, `load_transmission_draws` in 8j_viz_utils.jl; `reconstruct_mu_draws`,
+  `reconstruct_dispersion_draws` in 10j_viz_utils.jl). Pre-hierarchical chains archived to
+  `dt_intermediate_bf_hdisp/`; refit under the new label.
+- **Pooled regime (inactive) preserved as-is:** it keeps the `2×2` block-mean matrix, and the
+  model's `vec(2×2)`→`bl` is **column-major** (off-diagonal blocks labelled by that order; harmless as
+  the block-mean prior is exchangeable). The reconstruction pooled branch mirrors this exactly
+  (`β[:, r+2(c-1)]`) — do NOT reuse the old row-major `2(bi-1)+bj` there. The **active per-week path is
+  unambiguous** (`4×Tn` rows indexed directly by `bl`).
+- **Spec updated**: `inst/3_preliminary_model_struct.md` §4.1/§4.2 (per-cell `φ_{ij}`/`κ_{ij}`), §4.3
+  (rewritten: hierarchical block mean + shared-scale age-pair RE), §6 sampling block (new `β_t`,
+  `log_tau`, `z^disp_t`), §10 (`disp_re_scale_prior`, `temporal-hdisp` label), §11 (seam partially
+  relaxed).
+
+## Separable spatio-temporal GP 2026-07-10 (`src/joint_model.jl` — per-week contact mean gains a temporal axis)
+
+- **The per-week (`constant_contacts=false`) contact-mean GP is now separable spatio-*temporal*,
+  replacing the per-week-iid regime.** The 28-age-pair spatial RBF (ρ_diag/ρ_gap, `Lp`) is unchanged;
+  what changed is that the weekly fields are no longer iid. Added a temporal RBF over week indices
+  `1:Tn`: `Kt[s,t]=exp(-(s-t)²/(2ρ_time²))`, `Lt=chol(Sym(Kt)+1e-4·I).L`, with a **shared** `ρ_time`
+  (`log_rho_time ~ Normal(gp_time_len_prior=(log4,0.5))`, soft-clamp `[log0.5,log26]` weeks). The
+  structure field is matrix-normal, **precomputed once** before the week loop:
+  `Fld = η .* (Lp * z * Lt')` (P×Tn), so `Cov(vec R)=η²(Kt⊗Kage)` — each age-pair a temporally-correlated
+  GP, each week the spatial RBF. `ρ_diag=ρ_gap` recovers the isotropic spatial kernel; `ρ_time→0` iid,
+  `→∞` pooled.
+- **The temporal coupling means you CANNOT slice `z[:,t]` per week anymore** — week `t`'s column of
+  `Lp*z*Lt'` mixes ALL columns of `z`. Precompute `Fld` once, then `μ = _mu_matrix(c_vec[t] .+ @view Fld[:,t])`.
+  Don't re-apply `η` in the loop (`Fld` already carries it). Fix the eltype: `ETp = promote_type(typeof(c),
+  eltype(Fld))` — `c` is now a **scalar** (`typeof`, not `eltype`).
+- **Decoupled temporal LEVEL (user's choice), not just a scalar c.** The overall weekly level is
+  `c_t = c + σ_c·(Lt·z_c)`: a stored scalar intercept `c ~ Normal(c0,3)` (kept stored so the viz mirror
+  reads it directly — no data-derived `c0` recompute) plus a 1-D temporal GP with its OWN amplitude
+  `σ_c` (`log_sigma_c ~ Normal(gp_level_scale_prior=(0,0.5))`, soft-clamp `[-3,2]`, mirrors η), sharing
+  `Lt`. This frees `η` to govern age-structure amplitude only. Dispersion (`log_kappa`/`log_k`, `4×Tn`)
+  stays per-week iid — temporal smoothing is on the **mean field only**.
+- **`Kt` jitter is 1e-4, NOT 1e-6.** At the upper clamp (ρ_time≈26 over a 12-week window) `Kt` is near
+  rank-1; the Pathfinder call in `fit_joint` is **not** try/caught (unlike NUTS), so a `PosDefException`
+  aborts the whole fit. 1e-4 keeps the near-pooled limit reachable without failing the Cholesky.
+- **Parameter space changed ⇒ label bumped `"weekly"→"temporal"`** (`contacts_label`, framework.jl). New
+  latents (`log_rho_time`, `log_sigma_c`, `z_c`, scalar `c` instead of `c[t]`) mean old per-week-iid
+  `"weekly"` chains would mis-reconstruct. The two hardcoded `contacts="weekly"` defaults in
+  `8j_viz_utils.jl` (`chain_path`, `load_transmission_draws`) and `10j_viz_utils.jl` (`reconstruct_mu_draws`,
+  `reconstruct_dispersion_draws`) were bumped to `"temporal"` too. Pre-temporal chains live in
+  `dt_intermediate_bf_temporal_GP/`; the orphaned `9j_*_weekly.jld2` caches are simply not read under
+  the new label.
+- **Viz mirror `reconstruct_mu_draws` (10j) rewritten** — regime detection is now `log_rho_time`-first:
+  (1) present ⇒ temporal (scalar `c`, `log_sigma_c`, `z_c`, 2-D `z[p,t]`; infer `Tn=max t`; per draw
+  build `Lt(ρ_time)`; `R[:,wk]=η·(Lp·(z·Lt[wk,:]))`, `c_wk = c + σ_c·(Lt[wk,:]·z_c)` — needs the **full**
+  `z` matrix + `z_c`, not week wk's column, since `Lt[wk,:]` mixes weeks `1..wk`); (2) `c[\d+]` ⇒ legacy
+  per-week iid; (3) pooled. `reconstruct_dispersion_draws` needed no logic change (dispersion still `4×Tn`).
+- **`load_transmission_draws` (8j) returns `rho_time` too** (`NaN` for pooled); the 9j length-scale panel
+  (`collect_transmission_structure` rho-store `nO×2→nO×3`, `plot_lengthscales` 3 series solid/dash/dot)
+  now plots ρ_diag/ρ_gap (age-yrs) + ρ_time (weeks) on one axis.
+- **Spec updated**: `inst/3_preliminary_model_struct.md` §5 (separable spatio-temporal kernel + matrix-normal
+  field + decoupled level), §6 sampling block, §10 config/outputs, §11 (temporal structure now *implemented*;
+  remaining seams = per-week dispersion, longer-memory/non-separable kernel).
+
 ## Anisotropic diagonal-coordinate GP 2026-07-09 (`src/joint_model.jl` — age-pair contact-mean kernel)
 
 - **The age-pair GP kernel is now anisotropic in DIAGONAL coordinates.** The old isotropic RBF had
@@ -117,3 +266,23 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   approximation the pooled scheme already made, and the meaningful contact for the step is the
   `[end]` slice. Reuse the `K1/K2/G` buffers across weeks — `contact_star` materialises a fresh
   `C*_t` each iteration so there's no aliasing.
+
+- **Reconstructing per-cell params from a cached chain (10j viz): use the EXACT stored
+  parameter name — MCMCChains prints matrix indices with a space after the comma.** A `2-D`
+  Turing param `log_k ~ filldist(…, 4, Tn)` is stored in the chain as
+  `"log_k[1, 2]"` (space after the comma), **not** `"log_k[1,2]"`. Rebuilding the symbol as
+  `Symbol("log_k[$bl,$wk]")` throws `ArgumentError: index log_k[1,12] not found` even though the
+  column exists. `reconstruct_mu_draws` sidesteps this for `z` by iterating `names(chn,:parameters)`
+  and indexing `chn[Symbol(n)]` with the *actual* name string; `reconstruct_dispersion_draws`
+  (added for the 10j §4 age-pair degree-CCDF grid) does the same — regex-scan the param names
+  (`^log_k\[(\d+)\s*,\s*(\d+)\]$`, `\s*` tolerates the space), then read each matched column by its
+  own name. The scalar/1-D reads (`c[$wk]`, `log_eta`) have no comma so `Symbol("c[$wk]")` is fine.
+- **Plotting the estimated NegBin degree CCDF per draw: build it from `pdf` on a bounded integer
+  grid, NOT `ccdf(::PoissonMixture,·)`.** The custom `Distributions.ccdf(d::PoissonMixture,k)` in
+  `turing_utils.jl` is `@memoize`d and recurses up to `k_max=20_000` (summing `pdf` from `k` to
+  `k_max`); across ~200 draws × 49 cells that is ~10⁸ `pdf` evals and hangs. Instead evaluate
+  `pdf.(NegBin(μ,k), 0:kmax)` on a bounded grid (`kmax` = max observed degree in the cell),
+  reverse-cumsum for the tail, and — to match the OBSERVED `plot_ccdf!(dd)` convention, which strips
+  the zero bin and normalises over positives — divide by `(1−P₀)` so the CCDF is **conditional on
+  ≥1** (starts at 1 at the smallest degree). The Weibull hurdle path needs no truncation: its
+  positive-part `Weibull(κ, μ/Γ(1+1/κ))` CCDF already matches the positive-only observed CCDF.
