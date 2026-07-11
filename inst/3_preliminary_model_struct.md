@@ -442,11 +442,12 @@ interior and gradients are unaffected.
 **Per-horizon window offset (forecasting use).** Although the contact and infection blocks share the
 index $t = 1,\dots,T$, they need not span the same calendar weeks. In forecasting (§8) the joint
 model is re-fit once **per horizon** $h$: the contact-degree block's window is slid forward to end at
-$t_0 + (h-1)$, while the infection/renewal block stays anchored at the origin $t_0$ (`wd` is fixed;
+$t_0 + h$, while the infection/renewal block stays anchored at the origin $t_0$ (`wd` is fixed;
 only the degree data `ds` changes with $h$, and each $(dm, nb, t_0, h)$ chain is cached separately as
-`..._h<h>.jld2`). Thus for $h>1$ the contact term is fit over weeks offset $h-1$ **ahead** of the
-infection term — the age-pair degree distribution is observed up to one week before the target
-$t_0+h$, whereas infections and antibody are frozen at $t_0$. For $h=1$ the two windows coincide.
+`..._h<h>.jld2`). Thus for every horizon the contact term is fit over weeks offset $h$ **ahead** of the
+infection term — the age-pair degree distribution is observed **at** the target week $t_0+h$
+(contemporaneous with it), whereas infections and antibody are frozen at $t_0$. The two windows never
+coincide (even at $h=1$ the contacts lead the infection block by one week).
 
 ---
 
@@ -476,7 +477,7 @@ runs are resumable.
 
 The notebook forecasts with `iterated_forecast`, the *contact-updated* iterate. For a baseline
 origin $t_0$, the infection and antibody series are **frozen at $t_0$**, while the contact/degree
-window is allowed to slide: for horizon $h$ the degree window ends at $t_0 + (h-1)$ weeks, the joint
+window is allowed to slide: for horizon $h$ the degree window ends at $t_0 + h$ weeks, the joint
 model is re-fit (or its cached chain reloaded), and a fresh NGM is formed from that window's
 origin-week $C^\ast$ (with antibody held at $t_0$). A single renewal step is then taken,
 
@@ -533,7 +534,7 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 - **Rolling origins.** The forecast origin is rolled weekly over the whole *available period* the
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
   ($2020$-$08$-$02$) plus the 12-week fit/lag lookback, and above by the last CoMix contact week
-  minus $(\max h - 1)$ weeks (the iterate needs contacts out to $t_0 + 3$).
+  minus $\max h$ weeks (the iterate needs contacts out to $t_0 + 4$).
 - **Four ways.** At each origin the four combos
   $\{$`NegBinAgePair`, `HurdleWeibullAgePair`$\} \times \{$`MeanNGM`, `NeighbourhoodDegreeNGM`$\}$
   are fit and forecast $1$–$4$ weeks ahead. The run is memory-bounded and resumable: per origin only

@@ -484,7 +484,7 @@ end
 
 Contact-updated iterated `A × H × K` forecast (spec inst/1d, points 2–3). Infections
 and antibody are **frozen at the baseline** `win0.origin` (t₀); for each horizon
-`h = 1..H` the contact/degree window slides to end at `t₀+h−1`, the joint model is
+`h = 1..H` the contact/degree window slides to end at `t₀+h`, the joint model is
 re-fit (or a saved chain reloaded), the NGM is refreshed, and one renewal step is
 taken. The forecast for week `t₀+h` uses the observed history up to t₀ plus the
 **mean** forecasts of the intervening weeks as renewal lags (per-draw coherence
@@ -506,8 +506,8 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
     hist = collect(float.(wd0.I_mean))                 # A × Tn0, last col = origin (t₀)
     cols = Vector{Matrix{Float64}}(undef, H)           # per-horizon A × keep draws
     for (hi, h) in enumerate(cfg.horizons)
-        # contact/degree window ending at t₀ + (h-1) weeks (sliding; infections stay at t₀)
-        origin_h = win0.origin + Day(7 * (h - 1))
+        # contact/degree window ending at t₀ + h weeks (sliding; infections stay at t₀)
+        origin_h = win0.origin + Day(7 * h)
         win_h = WeeklyWindow(origin_h; n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons)
         apd_h = apd_by_h === nothing ?
             prepare_degree_data(win_h, cfg; grid = grid, setting = setting) : apd_by_h[hi]
@@ -524,7 +524,7 @@ function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowDa
         step_mean = zeros(A)
         for (d, k) in enumerate(idx)
             q = gq[k]
-            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; gamma_sar = q.gamma_sar)   # origin-week C* (t₀+h−1); antibody frozen at t₀
+            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; gamma_sar = q.gamma_sar)   # origin-week C* (t₀+h); antibody frozen at t₀
             acc = zeros(A)
             for s in 1:cfg.smax
                 acc .+= w[s] .* hist[:, end - s + 1]

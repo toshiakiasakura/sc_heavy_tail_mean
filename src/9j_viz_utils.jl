@@ -121,7 +121,7 @@ function assemble_or_load_forecasts(wins, combos, cfg;
         truth_o = load_forecast_truth(win_o; grid = grid)
         # this origin's 4 contact/degree windows (reuse the single raw read); discarded after.
         apd_o = [prepare_degree_data(
-                     WeeklyWindow(win_o.origin + Day(7 * (h - 1));
+                     WeeklyWindow(win_o.origin + Day(7 * h);
                                   n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons),
                      cfg; grid = grid, setting = :all,
                      df_part_raw = raw.df_part, craw_raw = raw.craw)
@@ -330,8 +330,13 @@ function reproduction_over_time(combos, labels4, wins, cfg;
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o  = load_window_data(win_o; grid = grid)
-        apd_o = prepare_degree_data(win_o, cfg; grid = grid, setting = :all,   # h=1 window = origin
-                                    df_part_raw = raw.df_part, craw_raw = raw.craw)
+        # horizon-h contact window ends at origin+h (contacts observed h wks ahead), matching how
+        # the (origin, h) chain was fit — so generated_quantities' Cstar[end] is coherent.
+        apd_o = prepare_degree_data(
+                    WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
+                                 horizons = cfg.horizons),
+                    cfg; grid = grid, setting = :all,
+                    df_part_raw = raw.df_part, craw_raw = raw.craw)
         for ((dm, nb), lbl) in zip(combos, labels4)
             R = reproduction_draws(dm, nb, apd_o, wd_o, cfg, win_o; h = h, save_dir = save_dir)
             R === nothing && continue
@@ -404,8 +409,8 @@ held constant forward from each origin week, matching the NGM frozen at that ori
 `store` is `reproduction_over_time`'s output; `origins` its window origins.
 """
 function plot_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
-    x = week_mid.(origins)
-    fig = plot(; xlabel = "forecast origin",
+    x = week_mid.(origins .+ Day(7 * h))   # R derives from the origin+h contact week; plot it there
+    fig = plot(; xlabel = "contact week (origin + $(h) wk)",
                ylabel = "reproduction number R  (dominant NGM eigenvalue)",
                title = "9j — reproduction number over time by model (h=$h, step; 90% CI)",
                size = (950, 520), legend = :topleft, xrotation = 45, ylims = (0, 3))

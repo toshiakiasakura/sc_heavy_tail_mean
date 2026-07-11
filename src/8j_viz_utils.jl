@@ -104,17 +104,17 @@ pick_origins(origins::AbstractVector{Date}; n::Int = 9) =
     reproduction_draws(dm, nb, apd, wd, cfg, w; h=1, save_dir) -> Vector{Float64} | nothing
 
 Per-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue
-of the **origin-week** next-generation matrix, exactly the NGM the forecast is frozen at
-(`posterior_forecast`/`iterated_forecast` use `q.Cstar[end]` with antibody held at the
-origin). `apd` is the raw age-pair `AgePairData` for the origin window (as returned by
-`prepare_degree_data`); it is turned into the model's degree stats with
+of the horizon-`h` next-generation matrix, exactly the NGM the forecast is frozen at
+(`iterated_forecast` uses `q.Cstar[end]` = contacts at origin+h, with antibody held at the
+origin). `apd` is the raw age-pair `AgePairData` for the **origin+h** contact window (matching
+the chain, as returned by `prepare_degree_data`); it is turned into the model's degree stats with
 `build_degree_stats(dm, apd, cfg)` — mirroring `iterated_forecast`. Reloads the cached `h`
 chain via `fit_or_load_chain` (rebuilds the model so `generated_quantities` works), then
 for each posterior draw builds
 `N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:,end]; gamma_sar=q.gamma_sar)` and takes
 `max real(eigvals(N))` (the NGM is nonnegative, so its Perron root is real & positive).
 
-`h=1` is the direct 1-week-ahead fit (contacts observed up to the origin). Returns
+`h` selects the cached chain; its contacts are observed at origin+h (h=1 ⇒ origin+1). Returns
 `nothing` when the chain file is missing, so callers can leave a gap.
 """
 function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, apd, wd, cfg, win;

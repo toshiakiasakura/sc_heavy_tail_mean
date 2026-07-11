@@ -55,8 +55,8 @@ end
 Rolling Sunday-start forecast origins the current data support. Lower bound: the
 12-week fit/lag window (`origin−11wk … origin`) must lie within the infection series
 (`infection_start` = first full inc2prev week). Upper bound: the contact-updated
-iterate needs contact data out to `origin + (max horizon − 1)` weeks, so the last
-origin is `last_contact_week − (max(horizons)−1)`. `craw` is the raw contact table
+iterate needs contact data out to `origin + max horizon` weeks, so the last
+origin is `last_contact_week − max(horizons)`. `craw` is the raw contact table
 (from `load_raw_contact_inputs`); if `nothing` it is read.
 """
 function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
@@ -68,7 +68,7 @@ function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
     last_contact_week = maximum(cweeks)
     lookback = cfg.n_fit - 1 + cfg.smax                         # all_weeks[1] = origin − lookback
     tmin = week_start(infection_start) + Day(7 * lookback)
-    tmax = last_contact_week - Day(7 * (maximum(cfg.horizons) - 1))
+    tmax = last_contact_week - Day(7 * maximum(cfg.horizons))
     return collect(tmin:Day(7 * step_weeks):tmax)
 end
 
