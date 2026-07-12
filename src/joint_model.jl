@@ -273,7 +273,7 @@ end
 # C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
 # secondary attack rate and reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly.
 # ======================================================================================
-@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig)
+@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig, age_mid)
     A = wd.A
     Tn = length(wd.weeks)
 
@@ -285,36 +285,33 @@ end
     log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.33), calibrated
     gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # secondary attack rate, soft-bounded
 
-    # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
-    # is a looser safety bound. Age variation in inherent susceptibility/infectivity is empirically
-    # small, so (2026-07-12) the offset scale `sig` was tightened N⁺(0.5, 0.25²) → N⁺(0.2, 0.1²)
-    # (offset σ·z has marginal SD ≈ 0.22 ⇒ ±2 SD ≈ ±0.44 in log ⇒ TYPICAL susc/inf ≈ [0.64, 1.55]).
-    # The log-offset soft-clamp is [log 0.2, log 5] ≈ [−1.61, +1.61] ⇒ HARD-bounded susc/inf ∈
-    # [0.2, 5.0]: wide enough that realistic profiles never touch it, but it still caps a stray
-    # Stage-2 Pathfinder draw that would otherwise send `σ·z` to ±100 → `exp` ~1e8 → supercritical/Inf
-    # NGM. Prior mass ⊂ clamp ⇒ real profiles interior and undistorted (mirrors κ/γ_SAR).
+    # susc/inf are RELATIVE (bin 1 = 1), smoothed across age by a first-order RANDOM WALK (RW1). The
+    # log-offset soft-clamp [log 0.2, log 5] ≈ [−1.61, +1.61] HARD-bounds susc/inf ∈ [0.2, 5.0]: wide
+    # enough that realistic profiles never touch it, but it still caps a stray Stage-2 Pathfinder draw
+    # that would otherwise send the offset to ±100 → `exp` ~1e8 → supercritical/Inf NGM.
     #
-    # SHARED GAUSSIAN SMOOTHING (2026-07-12): the A-1 non-reference offsets get a squared-exponential
-    # GP prior over the age-bin axis with ONE length-scale ρ_si (age-bin units) shared by BOTH susc
-    # and inf, replacing the old iid `sig·z`. The offset becomes `sig·(Lsi·z)`, Lsi = chol(K(ρ_si)).
-    # K has UNIT DIAGONAL ⇒ each bin's marginal SD is unchanged (= sig), so the [0.64,1.55]/[0.2,5]
-    # calibration above is preserved — this only correlates NEIGHBOURING bins (ρ_si→0 ⇒ iid/rough;
-    # ρ_si large ⇒ near-flat shared shape). Only the length-scale is shared; sig_s/sig_i, z_s/z_i differ.
-    log_rho_si ~ Normal(cfg.susc_inf_gp_len_prior[1], cfg.susc_inf_gp_len_prior[2])
-    ρ_si = exp(_softclamp(log_rho_si, log(0.5), log(6.0)))   # age-bin length-scale, soft-bounded
-    Ksi = [exp(-((m - n)^2) / (2 * ρ_si^2)) for m in 1:(A - 1), n in 1:(A - 1)]
-    # jitter 1e-4 (not 1e-6): at the upper clamp K is near rank-1 (few bins, near-flat) and the
-    # Pathfinder fit is NOT try/caught, so a PosDefException would abort the whole Stage-2 fit
-    # (tasks/lessons.md 2026-07-11; mirrors the Kt temporal kernel in model_degree).
-    Lsi = Matrix(cholesky(Symmetric(Ksi) + 1e-4 * I).L)     # DENSE (see model_degree Lp note)
+    # RW1 SMOOTHING (2026-07-12): the relative log-offset follows a first-order random walk along the
+    # age axis, anchored at reference bin 1 (offset 0), with SEPARATE innovation variances τ_s², τ_i²
+    # for susc and inf ("variances separately estimated"). The step-a increment (bin a-1 → a) has
+    # variance τ²·Δ_a scaled by the gap Δ_a between adjacent age-bin MIDPOINTS (irregular-spacing /
+    # Brownian RW1): a wider age gap ⇒ larger allowed jump. Δ is normalised to unit-mean gap so τ ≈ the
+    # typical per-step offset SD. NOTE: unlike a stationary GP, RW1 variance GROWS with distance from
+    # the reference bin — intended; near-reference bins are tightly constrained, the oldest bins least
+    # so, and the [0.2,5] clamp still hard-bounds. No Cholesky ⇒ no PosDef risk. Midpoints arrive via
+    # the `age_mid` arg (computed ONCE in fit_stage2_pooled — never call cis_age_midpoints() in the body:
+    # it reads a CSV). Only τ_s/τ_i and z_s/z_i differ between susc and inf; Δ is shared (same age grid).
+    Δ  = diff(age_mid)                                      # A-1 adjacent midpoint gaps (age-years, >0)
+    Δn = Δ ./ (sum(Δ) / (A - 1))                            # normalise to unit-mean gap (Σ Δn = A-1)
 
-    sig_s ~ truncated(Normal(0.2, 0.1); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), smoothed by Lsi
-    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* (Lsi * z_s), log(0.2), log(5.0))))  # susc[1]=1; ∈ [0.2,5.0]
+    tau_s ~ truncated(Normal(cfg.susc_inf_rw_sd_prior[1], cfg.susc_inf_rw_sd_prior[2]); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 RW1 innovations (steps 1→2,…,A-1→A)
+    o_s = vcat(zero(tau_s), cumsum(tau_s .* sqrt.(Δn) .* z_s))                     # o_s[1]=0 (reference)
+    susc = exp.(_softclamp.(o_s, log(0.2), log(5.0)))      # susc[1]=exp(0)=1; ∈ [0.2,5.0]
 
-    sig_i ~ truncated(Normal(0.2, 0.1); lower = 0)
+    tau_i ~ truncated(Normal(cfg.susc_inf_rw_sd_prior[1], cfg.susc_inf_rw_sd_prior[2]); lower = 0)
     z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* (Lsi * z_i), log(0.2), log(5.0))))   # inf[1]=1;  ∈ [0.2,5.0]
+    o_i = vcat(zero(tau_i), cumsum(tau_i .* sqrt.(Δn) .* z_i))
+    inf = exp.(_softclamp.(o_i, log(0.2), log(5.0)))       # inf[1]=exp(0)=1; ∈ [0.2,5.0]
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
@@ -432,6 +429,7 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
     A = wd.A; Tn = length(wd.weeks)
     w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
+    age_mid = cis_age_midpoints()          # computed ONCE (reads a CSV); passed into the Stage-2 RW1
     M = length(moment_draws)
     Cstar_end = Vector{Matrix{Float64}}(undef, M)
     per_m = Vector{Any}(undef, M)
@@ -439,7 +437,7 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         md = moment_draws[m]
         Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tn]
         Cstar_end[m] = Cstar_m[end]
-        model = model_transmission(Cstar_m, wd, w, cfg)
+        model = model_transmission(Cstar_m, wd, w, cfg, age_mid)
         rng = Random.Xoshiro(base_seed + m)
         pf = adtype === nothing ? pathfinder(model; ndraws = n_draw, rng = rng) :
                                   pathfinder(model; ndraws = n_draw, rng = rng, adtype = adtype)
