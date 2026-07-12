@@ -657,29 +657,39 @@ end
 
 """
     make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols, origin;
-                         fit_h=1, qs_lo=0.05, qs_hi=0.95, res_dir="../res") -> Plots.Plot
+                         fit_h=1, qs_lo=0.05, qs_hi=0.95, age_idx=nothing, age_desc="all ages",
+                         file_tag="", res_dir="../res") -> Plots.Plot
 
 §1 — total-infection forecast point + 90% CI for the four models at one origin, overlaid on
 observed (all ages). Solid + ○ + ribbon = self-iterated forecast (`fc_store[lbl]`, H×draws over
 the forecast weeks); dashed + ◇ + ribbon = in-sample fitted mean (`fit_store[lbl]`, A×n_fit×draws
 over the fit weeks, from the horizon-`fit_h` chain — `fit_window_infection_draws(...; h=fit_h)`).
 Both age-summed; the origin week is marked with a vertical rule. Saves to
-`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h>.png`.
+`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h><file_tag>.png`.
+
+`age_idx` restricts the ages summed into the reported total (default `nothing` ⇒ all `A` bins);
+pass e.g. the non-70+ bins to report the 2–69 total only. NOTE: this excludes 70+ only from the
+*reported sum*, not from the coupled NGM dynamics — the cached forecast draws already propagate all
+ages, so this is a report-side subset, not a 6-bin re-fit. `age_desc` labels the axis/title and
+`file_tag` is appended to the PNG name so a subset figure never overwrites the all-ages one.
 """
 function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
                               origin::Date; fit_h::Integer = 1, qs_lo = 0.05, qs_hi = 0.95,
-                              res_dir::AbstractString = "../res")
-    H = length(cfg.horizons)
+                              age_idx = nothing, age_desc::AbstractString = "all ages",
+                              file_tag::AbstractString = "", res_dir::AbstractString = "../res")
+    H  = length(cfg.horizons)
+    A  = size(wd.I_mean, 1)
+    ai = age_idx === nothing ? (1:A) : age_idx          # age bins summed into the reported total
     x_hist = week_mid.(win.fit_weeks)
-    y_hist = vec(sum(wd.I_mean[:, (cfg.smax + 1):end]; dims = 1))    # history (all ages)
+    y_hist = vec(sum(wd.I_mean[ai, (cfg.smax + 1):end]; dims = 1))   # history (included ages)
     x_fore = week_mid.(win.forecast_weeks)
-    y_fore = [sum(truth[:, h]) for h in 1:H]                         # realised targets (all ages)
+    y_fore = [sum(truth[ai, h]) for h in 1:H]                        # realised targets (included ages)
 
-    fig = plot(; title = "10j — total infections vs observed: in-sample fit (h$(fit_h), dashed) + " *
-                         "forecast (solid), origin $(origin) (90%)",
+    fig = plot(; title = "10j — total infections ($(age_desc)) vs observed: in-sample fit " *
+                         "(h$(fit_h), dashed) + forecast (solid), origin $(origin) (90%)",
                titlefontsize = 8, xrotation = 45, legend = :topleft, size = (950, 540),
                left_margin = 8Plots.mm, bottom_margin = 14Plots.mm,   # room for y-label & rotated dates
-               xlabel = "week (Wed mid-date)", ylabel = "weekly infections (all ages)")
+               xlabel = "week (Wed mid-date)", ylabel = "weekly infections ($(age_desc))")
     plot!(fig, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
           color = :black, lw = 2, marker = :circle, ms = 3, label = "observed")
     vline!(fig, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
@@ -687,7 +697,7 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     # self-iterated forecast fans (solid + ○) over the forecast weeks (right of the origin line).
     for (ci, lbl) in enumerate(labels4)
         haskey(fc_store, lbl) || continue
-        tot = dropdims(sum(fc_store[lbl]; dims = 1); dims = 1)       # H × draws (age-summed)
+        tot = dropdims(sum(fc_store[lbl][ai, :, :]; dims = 1); dims = 1)   # H × draws (over included ages)
         med = [_fmed(tot[h, :])     for h in 1:H]                    # finite-robust (fan may be ±Inf)
         lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
         hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
@@ -698,7 +708,7 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     # visually separate from the solid+○ forecast.
     for (ci, lbl) in enumerate(labels4)
         haskey(fit_store, lbl) || continue
-        tot = dropdims(sum(fit_store[lbl]; dims = 1); dims = 1)      # n_fit × draws (age-summed)
+        tot = dropdims(sum(fit_store[lbl][ai, :, :]; dims = 1); dims = 1)  # n_fit × draws (over included ages)
         med = [_fmed(tot[t, :])     for t in 1:length(x_hist)]       # finite-robust (fit may be huge)
         lo  = [_fq(tot[t, :], qs_lo) for t in 1:length(x_hist)]
         hi  = [_fq(tot[t, :], qs_hi) for t in 1:length(x_hist)]
@@ -707,7 +717,90 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     end
     plot!(fig, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash, marker = :diamond, ms = 3,
           label = "in-sample fit (h$(fit_h)), 90%")   # proxy: dashed ⇒ fitted; colour ⇒ model
-    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h).png"))
+    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h)$(file_tag).png"))
+    return fig
+end
+
+"""
+    forecast_ci_age_panel(a, fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols;
+                          fit_h=1, qs_lo=0.05, qs_hi=0.95, ttl="", showleg=false) -> Plots.Plot
+
+One §1b panel: the §1 forecast-CI content (`make_forecast_ci_fig`) restricted to a SINGLE age bin
+`a` — observed weekly infections (fit-week history ++ realised targets), per-model self-iterated
+forecast (solid + ○ + 90% band, right of the origin) and per-model in-sample fitted mean
+(dashed + ◇ + 90% band, left of the origin). Same colours/styling as §1; `showleg` toggles the
+per-model legend (only the first panel carries it, to avoid clutter across the grid).
+"""
+function forecast_ci_age_panel(a::Integer, fc_store, fit_store, win, wd, truth, cfg, labels4,
+                               model_cols; fit_h::Integer = 1, qs_lo = 0.05, qs_hi = 0.95,
+                               ttl::AbstractString = "", showleg::Bool = false)
+    H      = length(cfg.horizons)
+    x_hist = week_mid.(win.fit_weeks)
+    y_hist = vec(wd.I_mean[a, (cfg.smax + 1):end])        # single-age history
+    x_fore = week_mid.(win.forecast_weeks)
+    y_fore = [truth[a, h] for h in 1:H]                   # single-age realised targets
+
+    pnl = plot(; title = ttl, titlefontsize = 8, xrotation = 45,
+               legend = (showleg ? :topleft : false), legendfontsize = 5,
+               xlabel = "week (Wed mid-date)", ylabel = "weekly infections")
+    plot!(pnl, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
+          color = :black, lw = 2, marker = :circle, ms = 2, label = "observed")
+    vline!(pnl, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
+
+    # self-iterated forecast fans (solid + ○) over the forecast weeks (right of the origin line).
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fc_store, lbl) || continue
+        tot = fc_store[lbl][a, :, :]                      # H × draws (single age)
+        med = [_fmed(tot[h, :])      for h in 1:H]        # finite-robust (fan may be ±Inf)
+        lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+        hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
+        plot!(pnl, x_fore, med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = lbl)
+    end
+    # in-sample fitted mean (dashed + ◇) over the fit weeks (left of the origin line).
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fit_store, lbl) || continue
+        tot = fit_store[lbl][a, :, :]                     # n_fit × draws (single age)
+        med = [_fmed(tot[t, :])      for t in 1:length(x_hist)]
+        lo  = [_fq(tot[t, :], qs_lo) for t in 1:length(x_hist)]
+        hi  = [_fq(tot[t, :], qs_hi) for t in 1:length(x_hist)]
+        plot!(pnl, x_hist, med; color = model_cols[ci], lw = 1.6, ls = :dash, marker = :diamond,
+              ms = 2, ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = "")
+    end
+    showleg && plot!(pnl, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash,
+                     marker = :diamond, ms = 3, label = "in-sample fit (h$(fit_h)), 90%")
+    return pnl
+end
+
+"""
+    make_forecast_ci_by_age_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
+                                origin, grid; fit_h=1, qs_lo=0.05, qs_hi=0.95, file_tag="_byage",
+                                res_dir="../res") -> Plots.Plot
+
+§1b — the §1 forecast-CI diagnostic broken out PER AGE GROUP: one panel per CIS age bin (7 panels
+in a 2×4 grid, 8th cell blank), each the single-age analogue of `make_forecast_ci_fig` (observed
+++ per-model self-iterated forecast solid+○+90% and in-sample fitted mean dashed+◇+90%). Free y per
+panel (age magnitudes differ widely); colours/styling match §1; only the first panel carries the
+per-model legend. Under the two-stage cut the cached draws propagate all 7 ages through the coupled
+NGM, so each panel is that age's slice of the joint 7-age forecast. Saves to
+`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h><file_tag>.png`.
+"""
+function make_forecast_ci_by_age_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
+                                     origin::Date, grid; fit_h::Integer = 1, qs_lo = 0.05,
+                                     qs_hi = 0.95, file_tag::AbstractString = "_byage",
+                                     res_dir::AbstractString = "../res")
+    A = grid.N
+    panels = [forecast_ci_age_panel(a, fc_store, fit_store, win, wd, truth, cfg, labels4,
+                                    model_cols; fit_h = fit_h, qs_lo = qs_lo, qs_hi = qs_hi,
+                                    ttl = "age $(grid.LAB[a])", showleg = (a == 1))
+              for a in 1:A]
+    push!(panels, plot(; framestyle = :none))            # blank cell fills the 2×4 grid (A=7)
+    fig = plot(panels...; layout = (2, 4), size = (1550, 760),
+               left_margin = 6Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "10j — weekly infections BY AGE GROUP vs observed: in-sample fit " *
+                            "(h$(fit_h), dashed) + forecast (solid), origin $(origin) (90%)",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h)$(file_tag).png"))
     return fig
 end
 
