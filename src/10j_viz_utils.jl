@@ -196,3 +196,503 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
     end
     return disp
 end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Figure builders for the 10j diagnostics notebook (moved out of the notebook so
+# the notebook keeps only config + data prep + calls + display). All read-only:
+# they reload cached joint-model chains and never re-fit. Requires the full
+# forecast preamble (forecast_utils.jl) plus 8j_viz_utils.jl (chain_path).
+#
+# Most origin-week helpers take a small context bundle assembled once in the
+# notebook:  oc = (; apd, t_o, t_o_est, origin, grid, cfg)
+#   apd     — AgePairData for the origin window (last week == origin)
+#   t_o     — origin week index (last of apd.weeks); observed overlays read column t_o
+#   t_o_est — the h=1 chain's GP column for t₀ (= t_o − 1, contacts observed h wks ahead)
+#   origin  — the forecast origin Date; grid — CIS age grid; cfg — FrameworkConfig
+# ─────────────────────────────────────────────────────────────────────────────
+
+# participant split (upper young / lower older) + per-participant colours for the
+# §2 age-pair panels — 7-CIS-bin specific; overridable via the figure helpers.
+const _PART_ROWS = ((1, 2, 3, 4), (5, 6, 7))
+const _ROW_TITLE = ("participants 2-34", "participants 35+")
+const _PART_COLS = [:steelblue, :darkorange, :seagreen, :purple, :crimson, :goldenrod, :teal]
+
+"""
+    _observed_cell_mean(apd, t, i, j, weighted) -> Float64
+
+Empirical contact mean of age-pair cell `(i→j)` in week `t`, matched to the degree family's
+scale: positive duration-weighted mean (`whist_mean(pos_weight)`, `NaN` if the cell is empty)
+when `weighted`, else the per-capita count mean (`emp_mean`).
+"""
+function _observed_cell_mean(apd, t::Integer, i::Integer, j::Integer, weighted::Bool)
+    if weighted
+        pw = apd.pos_weight[t, i, j]
+        return isempty(pw) ? NaN : whist_mean(pw)
+    else
+        return apd.emp_mean[t, i, j]
+    end
+end
+
+"""
+    fit_window_infection_draws(dm, nb, apd_o, wd, cfg, origin; h=1, use_nuts=false, save_dir)
+        -> A × n_fit × draws  |  nothing
+
+In-sample expected (fitted) infections over the fit window, from a model's horizon-`h` chain:
+the MEAN of the joint model's Normal infection likelihood (joint_model.jl:288-295). Per draw,
+`pred_t = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:,t]; γ=q.γ) · Σ_s w[s]·wd.I_mean[:,t-s]`
+using OBSERVED lags ⇒ one-step-ahead fitted mean (NOT the self-iterated forecast). Columns
+`(smax+1):Tn` == the window's fit weeks. Reloads the cached chain (NO re-fit); mirrors
+`reproduction_draws`. `apd_o[h]` is the h-window degree data (matches the cached chain). Returns
+`nothing` when the chain file is missing/unloadable.
+"""
+function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
+                                    apd_o, wd, cfg, origin::Date;
+                                    h::Int = 1, use_nuts::Bool = false,
+                                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    path = chain_path(lbl, origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    isfile(path) || (@warn "no chain for fit-window fit" lbl; return nothing)
+    w_gi = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
+    ds   = build_degree_stats(dm, apd_o[h], cfg)              # h-window degree stats (matches cached chain)
+    fl = try
+        fit_or_load_chain(path, dm, nb, ds, wd, cfg, w_gi; use_nuts = use_nuts)  # reload + rebuild model
+    catch err
+        @warn "could not load chain for fit-window fit" lbl err; return nothing
+    end
+    gq = [q for q in vec(generated_quantities(fl.model, fl.chn)) if q !== nothing]
+    A = wd.A; Tn = length(wd.weeks); fitcols = (cfg.smax + 1):Tn
+    out = Array{Float64}(undef, A, length(fitcols), length(gq))
+    for (d, q) in enumerate(gq), (c, t) in enumerate(fitcols)
+        N = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:, t]; γ = q.γ)
+        out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+    end
+    return out
+end
+
+"""
+    agepair_panel(parts, ttl, μdraws, weighted, oc; part_cols=_PART_COLS) -> Plots.Plot
+
+One §2 panel: overlay every participant in `parts` — GP-smoothed μ (median line + 90% ribbon,
+from `μdraws` = ndraws×A×A) and the matching observed mean (× markers, `_observed_cell_mean` at
+`oc.t_o`), coloured by participant; x-axis = contactee age group.
+"""
+function agepair_panel(parts, ttl::AbstractString, μdraws, weighted::Bool, oc;
+                       part_cols = _PART_COLS)
+    grid = oc.grid
+    pnl = plot(; title = "$(ttl)  (lines = smoothed μ, 90%;  × = observed)", titlefontsize = 8,
+               xticks = (1:grid.N, grid.LAB), xrotation = 45,
+               xlabel = "contactee age group", ylabel = "contact mean μ",
+               legend = :topright, legendfontsize = 6, legendtitle = "participant",
+               legendtitlefontsize = 6)
+    for i in parts
+        obs = [_observed_cell_mean(oc.apd, oc.t_o, i, j, weighted) for j in 1:grid.N]
+        med = [median(μdraws[:, i, j]) for j in 1:grid.N]
+        lo  = [quantile(μdraws[:, i, j], 0.05) for j in 1:grid.N]
+        hi  = [quantile(μdraws[:, i, j], 0.95) for j in 1:grid.N]
+        c = part_cols[i]
+        plot!(pnl, 1:grid.N, med; ribbon = (med .- lo, hi .- med), color = c, lw = 2,
+              marker = :circle, ms = 3, fillalpha = 0.08, label = grid.LAB[i])
+        scatter!(pnl, 1:grid.N, obs; color = c, marker = :x, ms = 5, msw = 2, label = "")
+    end
+    return pnl
+end
+
+"""
+    make_agepair_fig(dm, nb, oc; part_rows=_PART_ROWS, row_titles=_ROW_TITLE, res_dir="../res")
+        -> Plots.Plot | nothing
+
+§2 — the 2×1 (upper young / lower older) observed-vs-smoothed-μ figure for one model. μ is
+reconstructed at the origin week (`oc.t_o_est` column of the h=1 chain). Saves to
+`res_dir/10j_agepair_mean_{negbin|hweibull}_<origin>.png`. `nothing` if the chain is missing.
+"""
+function make_agepair_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
+                          part_rows = _PART_ROWS, row_titles = _ROW_TITLE,
+                          res_dir::AbstractString = "../res")
+    grid = oc.grid
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    μdraws === nothing && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
+    weighted = is_weighted(dm)
+    panels = [agepair_panel(part_rows[r], row_titles[r], μdraws, weighted, oc)
+              for r in 1:length(part_rows)]
+    scale_note = weighted ? "positive duration-weighted degree" : "per-capita count"
+    fig = plot(panels...; layout = (2, 1), size = (760, 820),
+               left_margin = 10Plots.mm, bottom_margin = 12Plots.mm,   # room for x-/y-labels
+               plot_title = "$(lbl) — observed vs smoothed μ ($(scale_note)), origin $(oc.origin)",
+               plot_titlefontsize = 10)
+    fname = weighted ? "10j_agepair_mean_hweibull_$(oc.origin).png" :
+                       "10j_agepair_mean_negbin_$(oc.origin).png"
+    savefig(fig, joinpath(res_dir, fname))
+    return fig
+end
+
+"""
+    make_mu_horizon_fig(dm, cells, tag, title_desc, apd_o, origin, grid, cfg, labels4,
+                        model_cols; hz=collect(cfg.horizons), res_dir="../res") -> Plots.Plot
+
+§2b — contact mean μ across horizons h1..h4 for one degree family, one panel per `cell`
+`(i, j, panel_title)` (participant `i` → contactee `j`). The two lines per panel are the
+mean- vs neighbourhood-NGM fits (coloured via `labels4`/`model_cols`); × = observed at the
+forecast week t₀+h (`apd_o[k]`, whose last window week is t₀+h). μ for horizon `h` is read at
+that horizon's own chain default (last) week — the C*-slice the forecast is frozen at.
+
+Unifies the participant-row (`cells = [(PART_I, j, …) for j …]`, `tag="vs_horizon"`) and the
+diagonal self-contact (`cells = [(i, i, …) for i …]`, `tag="diag_vs_horizon"`) figures. Saves to
+`res_dir/10j_agepair_mu_<tag>_<degree>_<origin>.png`.
+"""
+function make_mu_horizon_fig(dm::ContactDegreeModel, cells, tag::AbstractString,
+                             title_desc::AbstractString, apd_o, origin::Date, grid, cfg,
+                             labels4, model_cols;
+                             hz = collect(cfg.horizons), res_dir::AbstractString = "../res")
+    weighted = is_weighted(dm)
+    ncell = length(cells)
+
+    # μ stats per NGM builder: reconstruct each (lbl, h) chain ONCE, slice each cell.
+    stats = Dict{String,NTuple{3,Matrix{Float64}}}()          # ngm_label => (med, lo, hi), each |hz|×ncell
+    for nb in (MeanNGM(), NeighbourhoodDegreeNGM())
+        lbl = string(degree_label(dm), "|", ngm_label(nb))
+        med = fill(NaN, length(hz), ncell); lo = copy(med); hi = copy(med)
+        for (k, h) in enumerate(hz)
+            μd = reconstruct_mu_draws(lbl, origin, h; grid = grid)   # default week = forecast week t₀+h
+            μd === nothing && (@warn "no chain for $lbl @ $origin h$h"; continue)
+            for (p, (ci_, cj_, _)) in enumerate(cells)
+                col = @view μd[:, ci_, cj_]
+                med[k, p] = median(col); lo[k, p] = quantile(col, 0.05); hi[k, p] = quantile(col, 0.95)
+            end
+        end
+        stats[ngm_label(nb)] = (med, lo, hi)
+    end
+
+    # observed μ at each forecast week t₀+h (matched to the family's scale).
+    obs = fill(NaN, length(hz), ncell)
+    for (k, h) in enumerate(hz)
+        apd = apd_o[k]
+        @assert apd.weeks[end] == origin + Day(7 * h)
+        for (p, (ci_, cj_, _)) in enumerate(cells)
+            obs[k, p] = _observed_cell_mean(apd, lastindex(apd.weeks), ci_, cj_, weighted)
+        end
+    end
+
+    panels = Any[]
+    for (p, (_, _, ptitle)) in enumerate(cells)
+        pnl = plot(; title = ptitle, titlefontsize = 8,
+                   xticks = (hz, ["h$(h)" for h in hz]), xlabel = "horizon",
+                   ylabel = "contact mean μ", legend = (p == 1 ? :best : false), legendfontsize = 5)
+        for nb in (MeanNGM(), NeighbourhoodDegreeNGM())
+            lbl = string(degree_label(dm), "|", ngm_label(nb))
+            ci  = findfirst(==(lbl), labels4)                    # colour consistent with §1/§3
+            med, lo, hi = stats[ngm_label(nb)]
+            m = med[:, p]; l = lo[:, p]; u = hi[:, p]
+            plot!(pnl, hz, m; ribbon = (m .- l, u .- m), color = model_cols[ci], lw = 2,
+                  marker = :circle, ms = 3, fillalpha = 0.10, label = ngm_label(nb))
+        end
+        scatter!(pnl, hz, obs[:, p]; color = :black, marker = :x, ms = 5, msw = 2, label = "observed")
+        push!(panels, pnl)
+    end
+    push!(panels, plot(; framestyle = :none))                    # 8th blank cell fills the 2×4 grid
+
+    scale_note = weighted ? "positive duration-weighted degree" : "per-capita count"
+    fig = plot(panels...; layout = (2, 4), size = (1400, 700),
+               left_margin = 6Plots.mm, bottom_margin = 9Plots.mm,
+               plot_title = "$(degree_label(dm)) — $(title_desc) " *
+                            "($(scale_note)); lines = mean/neighbourhood NGM (90%), × observed; origin $(origin)",
+               plot_titlefontsize = 9)
+    savefig(fig, joinpath(res_dir, "10j_agepair_mu_$(tag)_$(degree_label(dm))_$(origin).png"))
+    return fig
+end
+
+"""
+    make_mu_timeline_fig(dm, cells, tag, title_desc, apd_h, origin, grid, cfg, labels4,
+                         model_cols; h_chain=maximum(cfg.horizons), res_dir="../res") -> Plots.Plot
+
+§2c — contact mean μ over the fit window + horizons h1..h4, reconstructed from the SINGLE
+horizon-`h_chain` chain (default h4), for one degree family. One panel per `cell`
+`(i, j, panel_title)`. Unlike §2b (`make_mu_horizon_fig`, which reads each horizon from its OWN
+chain at that chain's forecast week), this traces μ over TIME from one fit: the h4 chain's per-week
+GP spans exactly the origin window's 8 fit weeks (its `all_weeks[1:8]`, ending at t₀) ++ the 4
+horizon weeks h1..h4 (`all_weeks[9:12]`, ending at t₀+4), because `constant_contacts = false`
+estimates μ per week. It is the μ analogue of §1's h4 in-sample fit.
+
+`reconstruct_mu_draws(lbl, origin, h_chain; week_index = t)` reads μ at each window week `t`;
+observed comes from that same window `apd_h` (= `apd_o[h_chain]`) per week (`_observed_cell_mean`).
+x-axis = week (Wed mid-date); the origin t₀ is marked with a rule (fit weeks left, horizons h1..h4
+right). Two lines per panel = mean- vs neighbourhood-NGM (median + 90% ribbon); × = observed. Saves
+to `res_dir/10j_agepair_mu_<tag>_<degree>_<origin>.png`.
+"""
+function make_mu_timeline_fig(dm::ContactDegreeModel, cells, tag::AbstractString,
+                              title_desc::AbstractString, apd_h, origin::Date, grid, cfg,
+                              labels4, model_cols;
+                              h_chain::Integer = maximum(cfg.horizons),
+                              res_dir::AbstractString = "../res")
+    weighted = is_weighted(dm)
+    ncell = length(cells)
+    weeks = apd_h.weeks                       # Tn dates: origin's 8 fit weeks ++ horizons h1..h_chain
+    Tn = length(weeks)
+    xdate = week_mid.(weeks)
+
+    # μ stats per NGM builder: reconstruct the SAME (lbl, h_chain) chain at EVERY window week t.
+    stats = Dict{String,NTuple{3,Matrix{Float64}}}()          # ngm_label => (med, lo, hi), each Tn×ncell
+    for nb in (MeanNGM(), NeighbourhoodDegreeNGM())
+        lbl = string(degree_label(dm), "|", ngm_label(nb))
+        med = fill(NaN, Tn, ncell); lo = copy(med); hi = copy(med)
+        for t in 1:Tn
+            μd = reconstruct_mu_draws(lbl, origin, h_chain; week_index = t, grid = grid)  # h4 chain, week t
+            μd === nothing && (@warn "no chain for $lbl @ $origin h$h_chain"; break)
+            for (p, (ci_, cj_, _)) in enumerate(cells)
+                col = @view μd[:, ci_, cj_]
+                med[t, p] = median(col); lo[t, p] = quantile(col, 0.05); hi[t, p] = quantile(col, 0.95)
+            end
+        end
+        stats[ngm_label(nb)] = (med, lo, hi)
+    end
+
+    # observed μ per week (matched to the family's scale) from the h_chain degree window.
+    obs = fill(NaN, Tn, ncell)
+    for t in 1:Tn, (p, (ci_, cj_, _)) in enumerate(cells)
+        obs[t, p] = _observed_cell_mean(apd_h, t, ci_, cj_, weighted)
+    end
+
+    panels = Any[]
+    for (p, (_, _, ptitle)) in enumerate(cells)
+        pnl = plot(; title = ptitle, titlefontsize = 8, xrotation = 45,
+                   xlabel = "week (Wed mid-date)", ylabel = "contact mean μ",
+                   legend = (p == 1 ? :best : false), legendfontsize = 5)
+        vline!(pnl, [week_mid(origin)]; color = :gray, ls = :dash, lw = 1, label = "")   # origin t₀
+        for nb in (MeanNGM(), NeighbourhoodDegreeNGM())
+            lbl = string(degree_label(dm), "|", ngm_label(nb))
+            ci  = findfirst(==(lbl), labels4)                    # colour consistent with §1/§2b/§3
+            med, lo, hi = stats[ngm_label(nb)]
+            m = med[:, p]; l = lo[:, p]; u = hi[:, p]
+            plot!(pnl, xdate, m; ribbon = (m .- l, u .- m), color = model_cols[ci], lw = 2,
+                  marker = :circle, ms = 2, fillalpha = 0.10, label = ngm_label(nb))
+        end
+        scatter!(pnl, xdate, obs[:, p]; color = :black, marker = :x, ms = 4, msw = 2, label = "observed")
+        push!(panels, pnl)
+    end
+    push!(panels, plot(; framestyle = :none))                    # 8th blank cell fills the 2×4 grid
+
+    scale_note = weighted ? "positive duration-weighted degree" : "per-capita count"
+    fig = plot(panels...; layout = (2, 4), size = (1400, 700),
+               left_margin = 6Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "$(degree_label(dm)) — $(title_desc) (from h$(h_chain) chain, $(scale_note)); " *
+                            "lines = mean/neighbourhood NGM (90%), × observed; origin $(origin)",
+               plot_titlefontsize = 9)
+    savefig(fig, joinpath(res_dir, "10j_agepair_mu_$(tag)_$(degree_label(dm))_$(origin).png"))
+    return fig
+end
+
+"""
+    make_contactmatrix_fig(dm, nb, oc; res_dir="../res") -> Plots.Plot | nothing
+
+§3 — 7×7 contact-matrix heatmaps, OBSERVED vs ESTIMATED (median reconstructed μ at the origin
+week `oc.t_o_est`), two panels sharing one colour scale. Observed = `_observed_cell_mean` at
+`oc.t_o`. Saves to `res_dir/10j_contactmatrix_<degree>_<ngm>_<origin>.png`.
+"""
+function make_contactmatrix_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
+                                res_dir::AbstractString = "../res")
+    grid = oc.grid; A = grid.N
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    μdraws === nothing && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
+    weighted = is_weighted(dm)
+    obs = [_observed_cell_mean(oc.apd, oc.t_o, i, j, weighted) for i in 1:A, j in 1:A]
+    est = [median(μdraws[:, i, j]) for i in 1:A, j in 1:A]
+    cmax  = maximum(x for x in Iterators.flatten((obs, est)) if isfinite(x))
+    clims = (0.0, cmax)                              # shared across both panels
+    hm(M, ttl) = heatmap(1:A, 1:A, M; clims = clims, c = :viridis, yflip = true,
+                         xticks = (1:A, grid.LAB), yticks = (1:A, grid.LAB), xrotation = 45,
+                         title = ttl, titlefontsize = 9, aspect_ratio = :equal,
+                         xlabel = "contactee age group j", ylabel = "participant age group i")
+    scale_note = weighted ? "positive duration-weighted degree" : "per-capita count"
+    fig = plot(hm(obs, "Observed"), hm(est, "Estimated (smoothed μ)"); layout = (1, 2),
+               size = (1050, 470), left_margin = 10Plots.mm, bottom_margin = 12Plots.mm,  # room for x-/y-labels
+               plot_title = "$(lbl) — contact matrix ($(scale_note)), origin $(oc.origin)",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_contactmatrix_$(degree_label(dm))_$(ngm_label(nb))_$(oc.origin).png"))
+    return fig
+end
+
+# ── §4 age-pair degree-distribution CCDF (observed ● vs estimated 90% band) ──
+
+"""Expand a `WeightedDegreeHist` (distinct value → count) to a raw vector of positive weighted degrees."""
+_whist_to_vec(w::WeightedDegreeHist) = isempty(w) ? Float64[] :
+    vcat((fill(x, y) for (x, y) in zip(w.x, w.y))...)
+
+"""
+    estimated_ccdf_band(μd, κd, weighted, xgrid) -> (med, lo, hi)
+
+Per-x estimated CCDF band over the `D` posterior draws (`μd`, `κd` are length-`D`), matched to
+each path's observed normalisation:
+- `weighted`  → positive-part `Weibull(κ, λ=μ/Γ(1+1/κ))` CCDF (closed form, positive-only).
+- `!weighted` → NegBin count CCDF CONDITIONAL ON ≥1 (matches `plot_ccdf!`, which strips the zero
+  bin): the pdf is evaluated on a bounded integer grid `0:kmax`, reverse-cumsummed, divided by
+  `(1−P₀)`. We do NOT call `ccdf(::PoissonMixture,·)` — it is memoised and recurses to k_max=20_000,
+  far too slow across D×49 cells.
+Returns `(med, lo, hi)` (0.05/0.5/0.95 quantiles across draws) aligned to `xgrid`.
+"""
+function estimated_ccdf_band(μd::AbstractVector, κd::AbstractVector, weighted::Bool, xgrid::AbstractVector)
+    D = length(μd)
+    C = Matrix{Float64}(undef, D, length(xgrid))
+    if weighted
+        for d in 1:D
+            κ = κd[d]; λ = μd[d] / gamma(1 + 1 / κ)               # Weibull scale, as in _cell_moments!
+            C[d, :] = ccdf.(Weibull(κ, λ), xgrid)
+        end
+    else
+        kmax = Int(maximum(xgrid)); ks = collect(0:kmax)
+        for d in 1:D
+            pk   = pdf.(NegBin(μd[d], κd[d]), ks)                 # bounded grid; pdf is cheap & exact
+            tail = reverse(cumsum(reverse(pk)))                   # tail[k+1] = Σ_{j≥k} pdf(j)
+            denom = max(1 - pk[1], 1e-12)                         # 1 − P₀  ⇒ condition on ≥1
+            C[d, :] = [tail[Int(k) + 1] / denom for k in xgrid]
+        end
+    end
+    med = [median(view(C, :, m)) for m in eachindex(xgrid)]
+    lo  = [quantile(view(C, :, m), 0.05) for m in eachindex(xgrid)]
+    hi  = [quantile(view(C, :, m), 0.95) for m in eachindex(xgrid)]
+    return med, lo, hi
+end
+
+"""
+    agepair_ccdf_panel(i, j, μdraws, κdraws, weighted, oc; xlim=:auto) -> Plots.Plot
+
+One small age-pair CCDF panel: observed CCDF markers (at `oc.t_o`) + estimated median line & 90%
+ribbon (`estimated_ccdf_band`). `xlim` is the figure-wide shared x-range (from `_shared_xlim`).
+Dispersion is sliced at block-linear index `bl = 2(block_of(i)−1)+block_of(j)`.
+"""
+function agepair_ccdf_panel(i, j, μdraws, κdraws, weighted::Bool, oc; xlim = :auto)
+    grid = oc.grid; apd = oc.apd; t_o = oc.t_o; cfg = oc.cfg
+    bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)           # block-linear dispersion index
+    κd = view(κdraws, :, bl); μd = view(μdraws, :, i, j)
+    pnl = plot(; title = "$(grid.LAB[i])→$(grid.LAB[j])", titlefontsize = 6, xaxis = :log10, xlim = xlim,
+               yscale = weighted ? :log10 : :identity, ylim = weighted ? (1e-5, 1.0) : (-5.0, 0.0),
+               left_margin = 5Plots.mm, bottom_margin = 5Plots.mm,   # room for per-panel axis ticks
+               legend = false, tickfontsize = 5, guidefontsize = 6, xlabel = "", ylabel = "")
+    if weighted
+        pos = sort(filter(>(0), _whist_to_vec(apd.pos_weight[t_o, i, j])))
+        isempty(pos) && return pnl
+        n = length(pos)
+        scatter!(pnl, pos, (n .- (0:n-1)) ./ n; color = :black, ms = 2, msw = 0.0, label = "")
+        xgrid = exp10.(range(log10(minimum(pos)), log10(maximum(pos)); length = 60))
+        med, lo, hi = estimated_ccdf_band(μd, κd, true, xgrid)
+        plot!(pnl, xgrid, med; ribbon = (med .- lo, hi .- med), color = :darkorange,
+              lw = 1.5, fillalpha = 0.15, label = "")
+    else
+        dd = apd.dd_count[t_o, i, j]
+        posx = dd.x[dd.x .> 0]
+        isempty(posx) && return pnl
+        plot_ccdf!(pnl, dd; color = :black, markersize = 2, markerstrokewidth = 0.0,
+                   linealpha = 0.0, label = "")
+        xgrid = 1:maximum(posx)
+        med, lo, hi = estimated_ccdf_band(μd, κd, false, xgrid)
+        lmed = log10.(max.(med, 1e-12)); llo = log10.(max.(lo, 1e-12)); lhi = log10.(max.(hi, 1e-12))
+        plot!(pnl, collect(xgrid), lmed; ribbon = (lmed .- llo, lhi .- lmed),
+              color = :darkorange, lw = 1.5, fillalpha = 0.15, label = "")
+    end
+    return pnl
+end
+
+"""
+    _shared_xlim(weighted, oc) -> Tuple{Float64,Float64} | Symbol
+
+Figure-wide shared log10 x-range = the global positive-degree span over all 49 cells at `oc.t_o`
+(negbin: integer counts ≥1; hweibull: positive weighted degrees). `:auto` if no cell has data.
+"""
+function _shared_xlim(weighted::Bool, oc)
+    apd = oc.apd; t_o = oc.t_o; A = oc.grid.N
+    xs = Float64[]
+    for i in 1:A, j in 1:A
+        if weighted
+            append!(xs, filter(>(0), _whist_to_vec(apd.pos_weight[t_o, i, j])))
+        else
+            dd = apd.dd_count[t_o, i, j]; append!(xs, dd.x[dd.x .> 0])
+        end
+    end
+    isempty(xs) && return :auto
+    return (minimum(xs), maximum(xs))
+end
+
+"""
+    make_agepair_ccdf_fig(dm, nb, oc; res_dir="../res") -> Plots.Plot | nothing
+
+§4 — 7×7 grid of observed-vs-estimated log-log CCDF panels for one model. Reconstructs μ and
+block-linear dispersion at the origin week (`oc.t_o_est`) and compares the estimated degree-
+distribution SHAPE (not just the §3 mean) with the empirical CCDF. Saves to
+`res_dir/10j_degdist_<degree>_<ngm>_<origin>.png`. `nothing` if a chain is missing.
+"""
+function make_agepair_ccdf_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
+                               res_dir::AbstractString = "../res")
+    grid = oc.grid; A = grid.N
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    κdraws = reconstruct_dispersion_draws(lbl, oc.origin, 1; weighted = is_weighted(dm),
+                                          week_index = oc.t_o_est)
+    (μdraws === nothing || κdraws === nothing) && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
+    weighted = is_weighted(dm)
+    xlim_shared = _shared_xlim(weighted, oc)                     # one x-axis for the whole grid
+    panels = [agepair_ccdf_panel(i, j, μdraws, κdraws, weighted, oc; xlim = xlim_shared)
+              for i in 1:A for j in 1:A]
+    scale_note = weighted ? "positive duration-weighted degree" : "count (CCDF | ≥1)"
+    fig = plot(panels...; layout = (A, A), size = (1500, 1500),
+               left_margin = 5Plots.mm, bottom_margin = 5Plots.mm,   # room for per-panel axis ticks
+               plot_title = "$(lbl) — age-pair degree CCDF ($(scale_note)): observed ● vs estimated (90%), origin $(oc.origin)",
+               plot_titlefontsize = 11)
+    savefig(fig, joinpath(res_dir, "10j_degdist_$(degree_label(dm))_$(ngm_label(nb))_$(oc.origin).png"))
+    return fig
+end
+
+"""
+    make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols, origin;
+                         fit_h=1, qs_lo=0.05, qs_hi=0.95, res_dir="../res") -> Plots.Plot
+
+§1 — total-infection forecast point + 90% CI for the four models at one origin, overlaid on
+observed (all ages). Solid + ○ + ribbon = self-iterated forecast (`fc_store[lbl]`, H×draws over
+the forecast weeks); dashed + ◇ + ribbon = in-sample fitted mean (`fit_store[lbl]`, A×n_fit×draws
+over the fit weeks, from the horizon-`fit_h` chain — `fit_window_infection_draws(...; h=fit_h)`).
+Both age-summed; the origin week is marked with a vertical rule. Saves to
+`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h>.png`.
+"""
+function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
+                              origin::Date; fit_h::Integer = 1, qs_lo = 0.05, qs_hi = 0.95,
+                              res_dir::AbstractString = "../res")
+    H = length(cfg.horizons)
+    x_hist = week_mid.(win.fit_weeks)
+    y_hist = vec(sum(wd.I_mean[:, (cfg.smax + 1):end]; dims = 1))    # history (all ages)
+    x_fore = week_mid.(win.forecast_weeks)
+    y_fore = [sum(truth[:, h]) for h in 1:H]                         # realised targets (all ages)
+
+    fig = plot(; title = "10j — total infections vs observed: in-sample fit (h$(fit_h), dashed) + " *
+                         "forecast (solid), origin $(origin) (90%)",
+               titlefontsize = 8, xrotation = 45, legend = :topleft, size = (950, 540),
+               left_margin = 8Plots.mm, bottom_margin = 14Plots.mm,   # room for y-label & rotated dates
+               xlabel = "week (Wed mid-date)", ylabel = "weekly infections (all ages)")
+    plot!(fig, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
+          color = :black, lw = 2, marker = :circle, ms = 3, label = "observed")
+    vline!(fig, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
+
+    # self-iterated forecast fans (solid + ○) over the forecast weeks (right of the origin line).
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fc_store, lbl) || continue
+        tot = dropdims(sum(fc_store[lbl]; dims = 1); dims = 1)       # H × draws (age-summed)
+        med = [median(tot[h, :])          for h in 1:H]
+        lo  = [quantile(tot[h, :], qs_lo) for h in 1:H]
+        hi  = [quantile(tot[h, :], qs_hi) for h in 1:H]
+        plot!(fig, x_fore, med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = lbl)
+    end
+    # in-sample fitted mean (dashed + ◇) over the fit weeks only (left of the origin line) ⇒
+    # visually separate from the solid+○ forecast.
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fit_store, lbl) || continue
+        tot = dropdims(sum(fit_store[lbl]; dims = 1); dims = 1)      # n_fit × draws (age-summed)
+        med = [median(tot[t, :])          for t in 1:length(x_hist)]
+        lo  = [quantile(tot[t, :], qs_lo) for t in 1:length(x_hist)]
+        hi  = [quantile(tot[t, :], qs_hi) for t in 1:length(x_hist)]
+        plot!(fig, x_hist, med; color = model_cols[ci], lw = 1.6, ls = :dash, marker = :diamond,
+              ms = 3, ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = "")
+    end
+    plot!(fig, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash, marker = :diamond, ms = 3,
+          label = "in-sample fit (h$(fit_h)), 90%")   # proxy: dashed ⇒ fitted; colour ⇒ model
+    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h).png"))
+    return fig
+end
