@@ -96,6 +96,8 @@ Base.@kwdef struct FrameworkConfig
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.33), 0.56) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. Calibrated by reading 18 pre-gnorm dt_intermediate_age_pair_temporal_GP chains (both degree models × 9 origins): susc[1]·inf[1] had median 0.33, log-SD 0.56 ⇒ Normal(log0.33, 0.56), 90% γ_SAR∈[0.13,0.83], interior to the softclamp [log0.02,log5].
+    # --- shared Gaussian smoothing of the relative susc/inf age profile (Stage-2 transmission block) ---
+    susc_inf_gp_len_prior::Tuple{Float64,Float64} = (log(1.5), 0.5) # log-ρ_si Normal(μ,σ), age-BIN units; ONE squared-exponential length-scale SHARED by both relative susc & inf offset vectors. Softclamped [log0.5,log6]: ρ_si≈1.5 bins ⇒ neighbour corr≈0.80, 2-apart≈0.41. K has unit diagonal ⇒ per-bin marginal SD unchanged (=sig_s/sig_i), so this only correlates neighbouring bins and preserves the [0.66,1.5] typical band / [0.2,5] soft-clamp. ρ_si→0 ⇒ iid (rough); ρ_si large ⇒ near-flat shared shape.
 end
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
@@ -110,8 +112,12 @@ feeds the NGM at its raw level and the transmissibility scalar is again the per-
 Pathfinder draw can't blow the NGM up); it changes the Stage-2 posterior, so the pre-`-sc` `8j_s2_*`
 files carry unclamped susc/inf and must not be reused. The `-cut` artefacts (`8j_s1_*`/`8j_s2_*`) are
 structurally disjoint from the single-file `-gnorm` joint chains (`8j_chn_*`, differently-scaled
-`log_gamma`), so nothing reloads the stale ones."""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc" : "temporal-gsar-cut-sc"
+`log_gamma`), so nothing reloads the stale ones. The `-sm` suffix (2026-07-12) marks the Stage-2
+**shared Gaussian smoothing** of the relative susc/inf profile (`sig·(Lsi·z)` with one shared
+length-scale ρ_si) — it changes only the Stage-2 posterior, NOT Stage 1, so the existing `8j_s1_*`
+chains were RENAMED `-sc`→`-sc-sm` on disk (Stage-1 is unchanged, so they are reused as-is, not
+refit); pre-`-sm` `8j_s2_*` pooled files carry unsmoothed susc/inf and must not be reused."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc-sm" : "temporal-gsar-cut-sc-sm"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).

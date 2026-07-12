@@ -285,18 +285,36 @@ end
     log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.33), calibrated
     gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # secondary attack rate, soft-bounded
 
-    # susc/inf are RELATIVE (bin 1 = 1) and SOFT-CLAMPED to ≈[0.05, 20]: the fitted age profiles
-    # are only ~3-5× (deep in the interior where _softclamp is the identity), but a stray Stage-2
-    # Pathfinder draw can send a raw offset `σ·z` to ±100 → `exp` gives susc/inf ~1e8, an
-    # astronomically supercritical NGM and an Inf/NaN forecast. Bounding the log-offset caps that
-    # tail at the source while leaving real profiles undistorted (mirrors the κ/γ_SAR clamps).
-    sig_s ~ truncated(Normal(0.1, 0.02); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A)
-    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, -3.0, 3.0)))  # susc[1]=1; ∈ ≈[0.05,20]
+    # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
+    # is a looser safety bound. Age variation in inherent susceptibility/infectivity is empirically
+    # small, so (2026-07-12) the offset scale `sig` was tightened N⁺(0.5, 0.25²) → N⁺(0.2, 0.1²)
+    # (offset σ·z has marginal SD ≈ 0.22 ⇒ ±2 SD ≈ ±0.44 in log ⇒ TYPICAL susc/inf ≈ [0.64, 1.55]).
+    # The log-offset soft-clamp is [log 0.2, log 5] ≈ [−1.61, +1.61] ⇒ HARD-bounded susc/inf ∈
+    # [0.2, 5.0]: wide enough that realistic profiles never touch it, but it still caps a stray
+    # Stage-2 Pathfinder draw that would otherwise send `σ·z` to ±100 → `exp` ~1e8 → supercritical/Inf
+    # NGM. Prior mass ⊂ clamp ⇒ real profiles interior and undistorted (mirrors κ/γ_SAR).
+    #
+    # SHARED GAUSSIAN SMOOTHING (2026-07-12): the A-1 non-reference offsets get a squared-exponential
+    # GP prior over the age-bin axis with ONE length-scale ρ_si (age-bin units) shared by BOTH susc
+    # and inf, replacing the old iid `sig·z`. The offset becomes `sig·(Lsi·z)`, Lsi = chol(K(ρ_si)).
+    # K has UNIT DIAGONAL ⇒ each bin's marginal SD is unchanged (= sig), so the [0.64,1.55]/[0.2,5]
+    # calibration above is preserved — this only correlates NEIGHBOURING bins (ρ_si→0 ⇒ iid/rough;
+    # ρ_si large ⇒ near-flat shared shape). Only the length-scale is shared; sig_s/sig_i, z_s/z_i differ.
+    log_rho_si ~ Normal(cfg.susc_inf_gp_len_prior[1], cfg.susc_inf_gp_len_prior[2])
+    ρ_si = exp(_softclamp(log_rho_si, log(0.5), log(6.0)))   # age-bin length-scale, soft-bounded
+    Ksi = [exp(-((m - n)^2) / (2 * ρ_si^2)) for m in 1:(A - 1), n in 1:(A - 1)]
+    # jitter 1e-4 (not 1e-6): at the upper clamp K is near rank-1 (few bins, near-flat) and the
+    # Pathfinder fit is NOT try/caught, so a PosDefException would abort the whole Stage-2 fit
+    # (tasks/lessons.md 2026-07-11; mirrors the Kt temporal kernel in model_degree).
+    Lsi = Matrix(cholesky(Symmetric(Ksi) + 1e-4 * I).L)     # DENSE (see model_degree Lp note)
 
-    sig_i ~ truncated(Normal(0.1, 0.02); lower = 0)
+    sig_s ~ truncated(Normal(0.2, 0.1); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), smoothed by Lsi
+    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* (Lsi * z_s), log(0.2), log(5.0))))  # susc[1]=1; ∈ [0.2,5.0]
+
+    sig_i ~ truncated(Normal(0.2, 0.1); lower = 0)
     z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, -3.0, 3.0)))   # inf[1]=1;  ∈ ≈[0.05,20]
+    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* (Lsi * z_i), log(0.2), log(5.0))))   # inf[1]=1;  ∈ [0.2,5.0]
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)

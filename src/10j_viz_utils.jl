@@ -43,7 +43,7 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gsar-cut-sc",
+                              contacts::AbstractString = "temporal-gsar-cut-sc-sm",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -150,7 +150,7 @@ order, so column `d` pairs with μ's draw `d`).
 - Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
 - NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
 
-Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc"`
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc-sm"`
 chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
 `week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
 regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
@@ -159,7 +159,7 @@ missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE w
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
                                       weighted::Bool,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gsar-cut-sc",
+                                      contacts::AbstractString = "temporal-gsar-cut-sc-sm",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -708,5 +708,57 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     plot!(fig, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash, marker = :diamond, ms = 3,
           label = "in-sample fit (h$(fit_h)), 90%")   # proxy: dashed ⇒ fitted; colour ⇒ model
     savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h).png"))
+    return fig
+end
+
+"""
+    make_susc_inf_fig(combos, labels4, model_cols, origin, cfg, grid; h=1, res_dir="../res")
+        -> Plots.Plot
+
+§5 — age-specific RELATIVE susceptibility and infectivity (reference bin 1 "2-10" fixed = 1) for the
+four models at one forecast origin. Reloads each model's Stage-2 pooled draws
+(`load_transmission_draws`, 8j_viz_utils.jl) — `susc`/`inf` are `N×A` pooled draws relative to the
+reference bin — and plots the per-age-group median + 90% band. Two panels (susceptibility |
+infectivity); x = age group, one coloured line per model (colours consistent with §1–§4 via
+`labels4`/`model_cols`). Under the two-stage cut susc/inf are fit in Stage 2 conditioning on that
+model's `C*`, so — unlike the NGM-independent μ — they genuinely differ across all four combos.
+Finite-robust quantiles (`_fmed`/`_fq`) because the pooled draws are heavy-tailed. Read-only
+(no re-fit). Saved to `res/10j_susc_inf_<origin>.png`. Missing artefacts are skipped (their line
+is dropped) with a warning.
+"""
+function make_susc_inf_fig(combos, labels4, model_cols, origin::Date, cfg, grid;
+                           h::Integer = 1, res_dir::AbstractString = "../res")
+    A   = grid.N
+    tag = contacts_label(cfg)
+    xs  = 1:A
+
+    mk(sym, ttl, showleg) = begin
+        pnl = plot(; title = ttl, titlefontsize = 9,
+                   xticks = (xs, grid.LAB), xrotation = 45,
+                   xlabel = "age group", ylabel = "relative $(sym == :susc ? "susceptibility" : "infectivity")",
+                   legend = (showleg ? :topleft : false), legendfontsize = 6)
+        hline!(pnl, [1.0]; color = :gray, ls = :dash, lw = 1, label = "")   # reference bin = 1
+        for (ci, (dm, nb)) in enumerate(combos)
+            lbl = string(degree_label(dm), "|", ngm_label(nb))
+            td  = load_transmission_draws(lbl, origin, h; contacts = tag)
+            td === nothing && (@warn "no Stage-2 pooled artefact for susc/inf" lbl origin; continue)
+            V   = sym == :susc ? td.susc : td.inf          # N × A pooled draws
+            med = [_fmed(view(V, :, a))        for a in 1:A]
+            lo  = [_fq(view(V, :, a), 0.05)    for a in 1:A]
+            hi  = [_fq(view(V, :, a), 0.95)    for a in 1:A]
+            plot!(pnl, xs, med; ribbon = (med .- lo, hi .- med), color = model_cols[ci], lw = 2,
+                  marker = :circle, ms = 3, fillalpha = 0.08, label = labels4[ci])
+        end
+        pnl
+    end
+
+    fig = plot(mk(:susc, "Relative susceptibility", true),
+               mk(:inf,  "Relative infectivity",    false);
+               layout = (1, 2), size = (1150, 500),
+               left_margin = 9Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "10j — relative age-specific susceptibility & infectivity " *
+                            "(ref bin \"$(grid.LAB[1])\" = 1), median + 90%, origin $(origin) (h$(h))",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_susc_inf_$(origin).png"))
     return fig
 end

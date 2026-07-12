@@ -2,6 +2,32 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## Shared Gaussian smoothing of relative susc/inf 2026-07-12 (`joint_model.jl`, `framework.jl`, viz utils, spec)
+
+- **The A-1 non-reference susc/inf offsets are now smoothed across age by a shared SE kernel.** In
+  `model_transmission` the old iid `sig .* z` became `sig .* (Lsi * z)` with `Lsi =
+  Matrix(cholesky(Symmetric(Ksi) + 1e-4*I).L)`, `Ksi[m,n]=exp(-(m-n)²/2ρ_si²)` over the A-1 offset
+  bins. **One** length-scale `ρ_si` (`log_rho_si ~ Normal(cfg.susc_inf_gp_len_prior…)`, softclamped
+  `[log0.5,log6]`, age-BIN units) is **shared by both** susc and inf — only the scale (`sig_s`,`sig_i`)
+  and raw draws (`z_s`,`z_i`) differ.
+- **Unit-diagonal kernel ⇒ marginals preserved.** `K[a,a]=1`, so `Var(Lsi z)[a]=sig²` unchanged: the
+  smoothing does NOT move the tuned `[0.66,1.5]` typical band or the `[0.2,5]` soft-clamp — it only
+  correlates neighbours. This is WHY I smoothed the A-1 non-reference offsets (not the full A-vector +
+  re-anchor by subtraction, which would inflate SD by ≈√2 and force retuning `sig`).
+- **Jitter is 1e-4, not 1e-6** (mirrors the `Kt` temporal kernel): at the ρ_si upper clamp `Ksi` is
+  near rank-1 over few bins and the Stage-2 Pathfinder is not try/caught, so a `PosDefException` would
+  abort the whole fit. `I`/`cholesky`/`Symmetric`/`Matrix` are already in scope in `joint_model.jl`.
+- **`ρ_si` is NOT stored.** `model_transmission`'s return `(; susc, inf, F, gamma_sar, sigma_inf)` is
+  unchanged and `fit_stage2_pooled` reads susc/inf from `generated_quantities`, so smoothing flows into
+  the stored `N×A` arrays automatically — no storage/viz changes (10j `make_susc_inf_fig` just reads
+  the stored draws). Add `ρ_si` to the pooled tuple later only if a length-scale diagnostic is wanted.
+- **Cache: bumped the shared tag `-sc`→`-sc-sm` and RENAMED the 256 `8j_s1_*` files on disk** (`mv
+  …-sc_…→…-sc-sm_…`) rather than refitting — Stage 1 (`model_degree`) is untouched so the chains are
+  valid as-is. Only the SHARED `contacts_label` was bumped (single source; the 8j notebook literal uses
+  it dynamically) plus the 3+2 hardcoded default `contacts="temporal-gsar-cut-sc"` literals in
+  `8j_viz_utils.jl`/`10j_viz_utils.jl`. There were 0 `8j_s2_*` files, so nothing stale to delete; any
+  future pre-`-sm` s2 pooled files carry unsmoothed susc/inf and must not be reused.
+
 ## Two-stage cut inference + γ_SAR revert 2026-07-12 (`joint_model.jl`, `ngm.jl`, `framework.jl`, viz utils, 8j/9j/10j) — inst/4_cut_Bayes.md
 
 - **The single joint `model_joint` was SPLIT into a two-stage CUT inference.** `model_degree(dm, ds,
