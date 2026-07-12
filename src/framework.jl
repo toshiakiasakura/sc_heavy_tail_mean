@@ -96,8 +96,8 @@ Base.@kwdef struct FrameworkConfig
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.33), 0.56) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. Calibrated by reading 18 pre-gnorm dt_intermediate_age_pair_temporal_GP chains (both degree models × 9 origins): susc[1]·inf[1] had median 0.33, log-SD 0.56 ⇒ Normal(log0.33, 0.56), 90% γ_SAR∈[0.13,0.83], interior to the softclamp [log0.02,log5].
-    # --- RW1 smoothing of the relative susc/inf age profile (Stage-2 transmission block) ---
-    susc_inf_rw_sd_prior::Tuple{Float64,Float64} = (0.2, 0.1) # N⁺(mean,sd) innovation-SD prior for the age RW1; used SEPARATELY by τ_s (susc) and τ_i (inf) — two distinct latents, one shared prior form. The step-(a-1→a) increment has variance τ²·Δ_a scaled by the gap Δ_a between adjacent age-bin MIDPOINTS, with Δ normalised to unit-mean gap so τ ≈ the typical per-step offset SD (≈ the old marginal `sig`). NOTE: RW1 variance GROWS with distance from reference bin 1 (near bins tight, oldest bins loosest); the offset is soft-clamped [log0.2,log5] ⇒ susc/inf ∈ [0.2,5.0].
+    # --- RW2 / integrated-Wiener-process smoothing of the relative susc/inf age profile (Stage-2 transmission block) ---
+    susc_inf_rw_sd_prior::Tuple{Float64,Float64} = (0.2, 0.1) # N⁺(mean,sd) innovation-SD prior for the age RW2/IWP; used SEPARATELY by τ_s (susc) and τ_i (inf) — two distinct latents, one shared prior form. The relative log-offset follows a SECOND-order random walk (2nd-order Integrated Wiener Process for the irregular age bins): over a gap δ the exact IWP increment covariance is τ²·[δ³/3 δ²/2; δ²/2 δ] (value var ∝ δ³ ⇒ curvature-, not slope-, penalised ⇒ SMOOTHER than RW1), scaled by the gap δ_a between adjacent age-bin MIDPOINTS, with Δ normalised to unit-mean gap so τ ≈ the typical per-step innovation SD. τ also scales the FREE initial slope (v0 ~ N(0,1), scaled τ/√(A-1)). NOTE: RW2 variance GROWS with distance from reference bin 1 (near bins tight, oldest bins loosest); the offset is soft-clamped [log0.2,log5] ⇒ susc/inf ∈ [0.2,5.0].
 end
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
@@ -113,11 +113,13 @@ Pathfinder draw can't blow the NGM up); it changes the Stage-2 posterior, so the
 files carry unclamped susc/inf and must not be reused. The `-cut` artefacts (`8j_s1_*`/`8j_s2_*`) are
 structurally disjoint from the single-file `-gnorm` joint chains (`8j_chn_*`, differently-scaled
 `log_gamma`), so nothing reloads the stale ones. The `-sm` suffix (2026-07-12) marks the Stage-2
-**RW1 smoothing** of the relative susc/inf profile (a first-order random walk along age with SEPARATE
-distance-scaled innovation variances τ_s/τ_i) — it changes only the Stage-2 posterior, NOT Stage 1, so
-the existing `8j_s1_*` chains were RENAMED `-sc`→`-sc-sm` on disk (Stage-1 is unchanged, so they are
-reused as-is, not refit); pre-`-sm` `8j_s2_*` pooled files carry differently-smoothed susc/inf and must
-not be reused."""
+**RW2 / integrated-Wiener-process smoothing** of the relative susc/inf profile (a second-order random
+walk along age — the 2nd-order IWP for the irregular age bins — with SEPARATE distance-scaled innovation
+scales τ_s/τ_i) — it changes only the Stage-2 posterior, NOT Stage 1, so the existing `8j_s1_*` chains
+were RENAMED `-sc`→`-sc-sm` on disk (Stage-1 is unchanged, so they are reused as-is, not refit); pre-`-sm`
+`8j_s2_*` pooled files carry differently-smoothed susc/inf and must not be reused. (`-sm` is a
+mechanism-agnostic "smoothing" marker: it covered the earlier RW1 and now the RW2/IWP, so the tag is
+unchanged and the renamed Stage-1 chains need no further rename.)"""
 contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc-sm" : "temporal-gsar-cut-sc-sm"
 
 ##########################################################################

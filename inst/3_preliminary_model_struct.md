@@ -417,36 +417,60 @@ $$
 \begin{aligned}
 \log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.33,\, 0.56^2), &&
 \gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.02,\log 5)),\\
-\log\rho_{si} &\sim \mathcal N(\log 1.5,\, 0.5^2), & \rho_{si} &= \exp(\operatorname{softclamp}(\log\rho_{si},\log 0.5,\log 6)), & L_{si} &= \operatorname{chol}\!\big(K(\rho_{si})\big),\\
-\sigma_s &\sim \mathcal N^+(0.2, 0.1^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
-\text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,L_{si}z_s, \log 0.2, \log 5))\big),\\
-\sigma_i &\sim \mathcal N^+(0.2, 0.1^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
-\text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,L_{si}z_i, \log 0.2, \log 5))\big),\\
+\tau_s &\sim \mathcal N^+(0.2, 0.1^2), & (v_{0,s},z_s) &\sim \mathcal N(0,1)^{1+2(A-1)}, &
+\text{susc} &= \exp\!\big(\operatorname{softclamp}(o_s, \log 0.2, \log 5)\big),\\
+\tau_i &\sim \mathcal N^+(0.2, 0.1^2), & (v_{0,i},z_i) &\sim \mathcal N(0,1)^{1+2(A-1)}, &
+\text{inf} &= \exp\!\big(\operatorname{softclamp}(o_i, \log 0.2, \log 5)\big),\\
 F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2). & & &
 \end{aligned}
 $$
+
+where the relative log-offsets follow a **second-order random walk** (RW2) — for the irregular age
+bins this is the 2nd-order **Integrated Wiener Process** (IWP). Carrying the augmented state
+$s_{\bullet,a}=(o_{\bullet,a},v_{\bullet,a})^\top$ (log-offset $o$ and its age-slope $v$), anchored at
+the reference bin $o_{\bullet,1}=0$ with a **free initial slope** $v_{\bullet,1}=(\tau_\bullet/\sqrt{A-1})\,v_{0,\bullet}$
+(the linear null-space component of an intrinsic RW2), the exact IWP transition over a normalised gap
+$\tilde\Delta_a$ is
+
+$$
+s_{\bullet,a}=\begin{pmatrix}1&\tilde\Delta_a\\0&1\end{pmatrix}s_{\bullet,a-1}+L(\tilde\Delta_a)\,z_{\bullet,a},
+\qquad
+L(\delta)L(\delta)^\top=\tau_\bullet^2\begin{pmatrix}\delta^3/3&\delta^2/2\\\delta^2/2&\delta\end{pmatrix},
+$$
+
+so per step the value gains $\tau_\bullet\,\delta^{3/2}/\sqrt3\;z_{\bullet,a,1}$ and the slope
+$\tau_\bullet\sqrt\delta\,(\tfrac{\sqrt3}{2}z_{\bullet,a,1}+\tfrac12 z_{\bullet,a,2})$; the value-increment
+variance grows as $\delta^3$ (vs RW1's $\delta^1$) so a wider age gap admits a larger **but smoother**
+jump. Age-gap weights $\tilde\Delta_a=\Delta_a/\bar\Delta$ with $\Delta_a=\mathrm{mid}_a-\mathrm{mid}_{a-1}$
+the gap between adjacent age-bin **midpoints** ($[6,13,20,29.5,42,59.5,74.5]$, normalised to unit mean).
 
 With $C^\ast$ **un-normalised** (§3.2 update, 2026-07-12), $\gamma_{\mathrm{SAR}}$ is the per-contact
 secondary attack rate: it reproduces the reference cell $N_{11}=\text{susc}_1\cdot\text{inf}_1$
 directly and is comparable across origins. The prior is calibrated by reading 18 pre-`-gnorm`
 `temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$ had median
 $0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$, 90% $\gamma_{\mathrm{SAR}}\in[0.13,0.83]$,
-interior to the softclamp $[\log 0.02,\log 5]$. Age variation in inherent susceptibility/infectivity
-is empirically small, so (2026-07-12) the offset **prior** was tightened to hold susc/inf within a
-~1.5× multiplicative band while the **soft-clamp** is a looser safety bound: the offset scale
-$\sigma_{s,i}\sim\mathcal N^+(0.1,0.02^2)\to\mathcal N^+(0.5,0.25^2)\to\mathcal N^+(0.2,0.1^2)$ (offset
-$\sigma z$ has marginal SD $\approx0.22$ ⟹ $\pm2$ SD $\approx\pm0.44$ in log ⟹ TYPICAL
-$\text{susc},\text{inf}\in[0.64,1.55]$), and each non-reference log-offset $\sigma\,z$ is soft-clamped
-to $[\log 0.2,\log 5]\approx[-1.61,1.61]$, **hard-bounding** $\text{susc},\text{inf}\in[0.2,5.0]$ — wide
-enough that realistic profiles never touch it, but still capping a stray Pathfinder draw's
-supercritical NGM at the source. Prior mass $\subset$ clamp ⟹ profiles interior and undistorted.
-The $A-1$ non-reference offsets are additionally **smoothed across age** (2026-07-12) by a
-squared-exponential GP over the age-bin index with a **single length-scale $\rho_{si}$ shared by both**
-susc and inf: $z\mapsto L_{si}z$ where $K(\rho_{si})_{mn}=\exp(-(m-n)^2/2\rho_{si}^2)$ and
-$L_{si}=\operatorname{chol}(K+10^{-4}I)$. Because $K$ has **unit diagonal**, each bin's marginal SD is
-unchanged ($=\sigma_{s,i}$), so the $[0.66,1.5]$ band and $[0.2,5]$ clamp above are **preserved** — the
-kernel only correlates neighbouring bins ($\rho_{si}\to0$ ⟹ iid/rough; $\rho_{si}$ large ⟹ near-flat
-shared shape; prior centre $\rho_{si}\approx1.5$ bins ⟹ neighbour correlation $\approx0.8$).
+interior to the softclamp $[\log 0.02,\log 5]$. The relative susc/inf age profiles are **smoothed
+across age by an RW2 / IWP** (2026-07-12, replacing an earlier RW1 — itself replacing a
+shared-length-scale squared-exponential GP): the log-offset follows a *second-order* random walk, so
+the prior penalises the profile's **curvature** (second differences) rather than its slope (RW1) or
+level (GP), yielding a much **smoother** age profile. The innovation SDs $\tau_s,\tau_i$
+($\mathcal N^+(0.2,0.1^2)$ each) are **separately estimated**; the exact IWP increment covariance
+$\tau^2[\tilde\Delta^3/3\ \ \tilde\Delta^2/2;\ \tilde\Delta^2/2\ \ \tilde\Delta]$ scales the step by the
+age-gap $\tilde\Delta_a$ between adjacent bin midpoints (value variance $\propto\tilde\Delta^3$), and
+$\tau$ also sets the free initial slope ($v_0\!\sim\!\mathcal N(0,1)$, scaled $\tau/\sqrt{A-1}$).
+Normalising $\tilde\Delta$ to unit mean makes $\tau$ the **typical per-step innovation** SD. Like RW1
+(and unlike a stationary GP), the marginal variance **grows with distance from the reference bin**, but
+far more steeply because it is doubly integrated: in the equal-gap approximation
+$\operatorname{Var}(o_2)=\tau^2/2$ (SD $\approx0.14$) but $\operatorname{Var}(o_A)\approx78\,\tau^2$
+(SD $\approx1.77$ at the oldest bin, $\tau=0.2$). So near-reference bins are **very** tightly
+constrained ($\text{susc}_2\in[0.75,1.33]$ at $\pm2$ SD) while the oldest bin is only weakly informed
+in *level* (its prior spans essentially the full clamp $[0.2,5]$) though still smooth in *shape* — the
+RW2 signature (curvature-penalised, level-diffuse), and intended since older-age inference should be
+less certain. The log-offset is soft-clamped to $[\log 0.2,\log 5]\approx[-1.61,1.61]$,
+**hard-bounding** $\text{susc},\text{inf}\in[0.2,5.0]$: it binds increasingly at the oldest bins under
+the diffuse RW2 prior and still caps a stray Pathfinder draw's supercritical NGM at the source. The IWP
+recursion is 2×2 (`_iwp_offsets`), so — like RW1 — it uses **no dense Cholesky**, hence no
+PosDef/jitter concern.
 Stage 2 returns the generated quantities
 $(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}})$; Stage 1 returns the raw
 moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_t\})$.
@@ -622,12 +646,13 @@ the seams at which they would be relaxed:
   susceptibility/infectivity **relative** to the reference bin $1$ (the plan's $\gamma_{\mathrm{SAR}}$ +
   baseline-"2-10" form), replacing the old confounded $\mu_s,\mu_i$ level pair; the block is fit as
   **Stage 2** of the cut (§6.0), conditioning on Stage-1 contact draws. The relative-offset scales
-  $\sigma_s,\sigma_i\sim\mathcal N^+(0.2,0.1^2)$ keep the TYPICAL susc/inf within $\approx[0.66,1.5]$
-  and each log-offset is soft-clamped to $[\log 0.2,\log 5]$ **hard-bounding** susc/inf to $[0.2,5.0]$
-  (tightened 2026-07-12, since age variation in inherent susceptibility/infectivity is empirically
-  small), and the offsets are **smoothed across age** by a shared squared-exponential length-scale
-  $\rho_{si}$ (unit-diagonal kernel ⟹ marginals unchanged; 2026-07-12). *Remaining seams*: $F$ keeps
-  the $\mathrm{Beta}(5,1)$ reference prior (paper uses
+  the relative offsets are **smoothed across age by an RW2 / integrated Wiener process** with
+  **separately estimated** innovation SDs $\tau_s,\tau_i\sim\mathcal N^+(0.2,0.1^2)$ and step covariance
+  scaled by the age-gap between adjacent bin midpoints (value variance $\propto\tilde\Delta^3$; curvature-
+  not slope-penalised ⇒ smoother than RW1), and each log-offset is soft-clamped to $[\log 0.2,\log 5]$
+  **hard-bounding** susc/inf to $[0.2,5.0]$ (2026-07-12, replacing an earlier RW1; RW2 variance grows
+  steeply with distance from the reference bin — near bins very tight, oldest bin level-diffuse but
+  smooth). *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
   $\Gamma(2,2)T[0,1]$), and infection observation error uses an independence approximation across the week
   and across ages.
 - **Hurdle zero probability** in the weighted path is taken empirically ($p^0$), not fitted.

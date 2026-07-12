@@ -33,6 +33,19 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
 _softclamp(x, lo, hi) = lo + _softplus((hi - _softplus(hi - x)) - lo)
 
+# Exact 2nd-order Integrated-Wiener-Process (irregular-spacing RW2) forward recursion. Returns the
+# length-A log-offset vector `o` (o[1]=0) from initial slope `v0`, unit-mean-normalised gaps `δ`
+# (length A-1) and standard-normal innovations `z` (2×(A-1)), scaled by innovation SD `τ`. Over each
+# gap the exact IWP increment covariance τ²[δ³/3 δ²/2; δ²/2 δ] is Cholesky-factored: the value gets
+# τ·δ^{3/2}/√3·z₁, the slope τ·√δ·(√3/2·z₁ + ½·z₂). Non-mutating (cumsum) ⇒ AD-safe under ReverseDiff.
+function _iwp_offsets(τ, v0, δ, z)
+    sd   = sqrt.(δ)
+    go   = τ .* δ .* sd ./ sqrt(3) .* z[1, :]                    # value innovations   (A-1)
+    hv   = τ .* sd .* (sqrt(3) / 2 .* z[1, :] .+ 0.5 .* z[2, :]) # slope innovations   (A-1)
+    vpre = vcat(v0, v0 .+ cumsum(hv)[1:end-1])                   # slope entering each step (A-1)
+    return vcat(zero(τ), cumsum(δ .* vpre .+ go))                # o[1]=0, then integrate (length A)
+end
+
 """
     _unordered_pairs(A)
 
@@ -285,32 +298,37 @@ end
     log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.33), calibrated
     gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # secondary attack rate, soft-bounded
 
-    # susc/inf are RELATIVE (bin 1 = 1), smoothed across age by a first-order RANDOM WALK (RW1). The
+    # susc/inf are RELATIVE (bin 1 = 1), smoothed across age by a second-order RANDOM WALK (RW2). The
     # log-offset soft-clamp [log 0.2, log 5] ≈ [−1.61, +1.61] HARD-bounds susc/inf ∈ [0.2, 5.0]: wide
     # enough that realistic profiles never touch it, but it still caps a stray Stage-2 Pathfinder draw
     # that would otherwise send the offset to ±100 → `exp` ~1e8 → supercritical/Inf NGM.
     #
-    # RW1 SMOOTHING (2026-07-12): the relative log-offset follows a first-order random walk along the
-    # age axis, anchored at reference bin 1 (offset 0), with SEPARATE innovation variances τ_s², τ_i²
-    # for susc and inf ("variances separately estimated"). The step-a increment (bin a-1 → a) has
-    # variance τ²·Δ_a scaled by the gap Δ_a between adjacent age-bin MIDPOINTS (irregular-spacing /
-    # Brownian RW1): a wider age gap ⇒ larger allowed jump. Δ is normalised to unit-mean gap so τ ≈ the
-    # typical per-step offset SD. NOTE: unlike a stationary GP, RW1 variance GROWS with distance from
-    # the reference bin — intended; near-reference bins are tightly constrained, the oldest bins least
-    # so, and the [0.2,5] clamp still hard-bounds. No Cholesky ⇒ no PosDef risk. Midpoints arrive via
-    # the `age_mid` arg (computed ONCE in fit_stage2_pooled — never call cis_age_midpoints() in the body:
-    # it reads a CSV). Only τ_s/τ_i and z_s/z_i differ between susc and inf; Δ is shared (same age grid).
+    # RW2 / IWP SMOOTHING (2026-07-12): the relative log-offset follows a SECOND-order random walk along
+    # the age axis — for irregular age-bin spacing this is the 2nd-order Integrated Wiener Process (IWP).
+    # State s_a=(o_a,v_a) carries the log-offset and its age-slope; anchored o_1=0 (⇒ susc[1]=1) with a
+    # FREE initial slope v0 (the linear null-space of an intrinsic RW2), non-centred & scaled τ/√(A-1).
+    # Over a normalised gap δ the exact IWP increment covariance is τ²[δ³/3 δ²/2; δ²/2 δ] (value var ∝ δ³
+    # ⇒ a wider age gap gives a larger but SMOOTHER jump; RW2 penalises curvature, not slope). SEPARATE
+    # innovation scales τ_s²,τ_i² for susc and inf ("variances separately estimated"). Δ is normalised to
+    # unit-mean gap so τ ≈ typical per-step innovation SD. NOTE: like RW1 (and unlike a stationary GP),
+    # RW2 variance GROWS with distance from the reference bin — intended; near-reference bins are tightly
+    # constrained, the oldest bins least so, and the [0.2,5] clamp still hard-bounds. The recursion is 2×2
+    # ⇒ no dense Cholesky ⇒ no PosDef risk. Midpoints arrive via the `age_mid` arg (computed ONCE in
+    # fit_stage2_pooled — never call cis_age_midpoints() in the body: it reads a CSV). Only τ_•/v0_•/z_•
+    # differ between susc and inf; Δ is shared (same age grid). See `_iwp_offsets` for the exact recursion.
     Δ  = diff(age_mid)                                      # A-1 adjacent midpoint gaps (age-years, >0)
     Δn = Δ ./ (sum(Δ) / (A - 1))                            # normalise to unit-mean gap (Σ Δn = A-1)
 
     tau_s ~ truncated(Normal(cfg.susc_inf_rw_sd_prior[1], cfg.susc_inf_rw_sd_prior[2]); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 RW1 innovations (steps 1→2,…,A-1→A)
-    o_s = vcat(zero(tau_s), cumsum(tau_s .* sqrt.(Δn) .* z_s))                     # o_s[1]=0 (reference)
+    v0_s ~ Normal(0, 1)                                    # non-centred free initial slope (scaled below)
+    z_s ~ filldist(Normal(0, 1), 2, A - 1)                 # 2 IWP innovations per step (value & slope)
+    o_s = _iwp_offsets(tau_s, (tau_s / sqrt(A - 1)) * v0_s, Δn, z_s)   # length A, o_s[1]=0 (reference)
     susc = exp.(_softclamp.(o_s, log(0.2), log(5.0)))      # susc[1]=exp(0)=1; ∈ [0.2,5.0]
 
     tau_i ~ truncated(Normal(cfg.susc_inf_rw_sd_prior[1], cfg.susc_inf_rw_sd_prior[2]); lower = 0)
-    z_i ~ filldist(Normal(0, 1), A - 1)
-    o_i = vcat(zero(tau_i), cumsum(tau_i .* sqrt.(Δn) .* z_i))
+    v0_i ~ Normal(0, 1)
+    z_i ~ filldist(Normal(0, 1), 2, A - 1)
+    o_i = _iwp_offsets(tau_i, (tau_i / sqrt(A - 1)) * v0_i, Δn, z_i)
     inf = exp.(_softclamp.(o_i, log(0.2), log(5.0)))       # inf[1]=exp(0)=1; ∈ [0.2,5.0]
 
     F ~ Beta(5, 1)
@@ -429,7 +447,7 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
     A = wd.A; Tn = length(wd.weeks)
     w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
-    age_mid = cis_age_midpoints()          # computed ONCE (reads a CSV); passed into the Stage-2 RW1
+    age_mid = cis_age_midpoints()          # computed ONCE (reads a CSV); passed into the Stage-2 RW2/IWP
     M = length(moment_draws)
     Cstar_end = Vector{Matrix{Float64}}(undef, M)
     per_m = Vector{Any}(undef, M)

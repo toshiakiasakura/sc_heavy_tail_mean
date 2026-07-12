@@ -2,31 +2,50 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
-## Shared Gaussian smoothing of relative susc/inf 2026-07-12 (`joint_model.jl`, `framework.jl`, viz utils, spec)
+## RW2 / IWP smoothing of relative susc/inf 2026-07-12 (`joint_model.jl`, `framework.jl`, spec)
 
-- **The A-1 non-reference susc/inf offsets are now smoothed across age by a shared SE kernel.** In
-  `model_transmission` the old iid `sig .* z` became `sig .* (Lsi * z)` with `Lsi =
-  Matrix(cholesky(Symmetric(Ksi) + 1e-4*I).L)`, `Ksi[m,n]=exp(-(m-n)²/2ρ_si²)` over the A-1 offset
-  bins. **One** length-scale `ρ_si` (`log_rho_si ~ Normal(cfg.susc_inf_gp_len_prior…)`, softclamped
-  `[log0.5,log6]`, age-BIN units) is **shared by both** susc and inf — only the scale (`sig_s`,`sig_i`)
-  and raw draws (`z_s`,`z_i`) differ.
-- **Unit-diagonal kernel ⇒ marginals preserved.** `K[a,a]=1`, so `Var(Lsi z)[a]=sig²` unchanged: the
-  smoothing does NOT move the tuned `[0.66,1.5]` typical band or the `[0.2,5]` soft-clamp — it only
-  correlates neighbours. This is WHY I smoothed the A-1 non-reference offsets (not the full A-vector +
-  re-anchor by subtraction, which would inflate SD by ≈√2 and force retuning `sig`).
-- **Jitter is 1e-4, not 1e-6** (mirrors the `Kt` temporal kernel): at the ρ_si upper clamp `Ksi` is
-  near rank-1 over few bins and the Stage-2 Pathfinder is not try/caught, so a `PosDefException` would
-  abort the whole fit. `I`/`cholesky`/`Symmetric`/`Matrix` are already in scope in `joint_model.jl`.
-- **`ρ_si` is NOT stored.** `model_transmission`'s return `(; susc, inf, F, gamma_sar, sigma_inf)` is
-  unchanged and `fit_stage2_pooled` reads susc/inf from `generated_quantities`, so smoothing flows into
-  the stored `N×A` arrays automatically — no storage/viz changes (10j `make_susc_inf_fig` just reads
-  the stored draws). Add `ρ_si` to the pooled tuple later only if a length-scale diagnostic is wanted.
-- **Cache: bumped the shared tag `-sc`→`-sc-sm` and RENAMED the 256 `8j_s1_*` files on disk** (`mv
-  …-sc_…→…-sc-sm_…`) rather than refitting — Stage 1 (`model_degree`) is untouched so the chains are
-  valid as-is. Only the SHARED `contacts_label` was bumped (single source; the 8j notebook literal uses
-  it dynamically) plus the 3+2 hardcoded default `contacts="temporal-gsar-cut-sc"` literals in
-  `8j_viz_utils.jl`/`10j_viz_utils.jl`. There were 0 `8j_s2_*` files, so nothing stale to delete; any
-  future pre-`-sm` s2 pooled files carry unsmoothed susc/inf and must not be reused.
+- **The relative susc/inf age profiles are smoothed by a second-order RANDOM WALK (RW2), i.e. a 2nd-order
+  Integrated Wiener Process (IWP) for the irregular age bins — not RW1, not a GP.** (RW2 superseded a
+  short-lived RW1 the same day, which had superseded a squared-exponential GP — see git history if the
+  RW1 `cumsum(τ√Δ·z)` form or the GP `Lsi`/`ρ_si`/`Ksi` names resurface.) The offset is built by the
+  helper `_iwp_offsets(τ, v0, δ, z)` (a non-mutating `cumsum`-based 2×2 state recursion, AD-safe under
+  ReverseDiff), then `susc/inf = exp.(_softclamp.(o_•, log0.2, log5))`, so `o[1]=0 ⇒ susc[1]=inf[1]=1`
+  (reference bin anchors the walk). **RW2 penalises the profile's CURVATURE (second differences), not
+  its slope (RW1) or level (GP)** ⇒ a much smoother age profile.
+- **Exact IWP, not a naive double-cumsum.** Over a normalised gap δ the increment covariance is the
+  exact continuous-time IWP `τ²[δ³/3 δ²/2; δ²/2 δ]` (Cholesky-factored in the helper: value gets
+  `τ·δ^{3/2}/√3·z₁`, slope `τ·√δ·(√3/2·z₁+½·z₂)`), NOT `o=cumsum(cumsum(...))`. This is what "IWP for
+  irregular age bins" means; the state carries a slope `v` alongside the value `o`. `z_•` is a
+  **2×(A-1)** matrix (two innovations per step), not a length-(A-1) vector.
+- **Free initial slope.** `o_1=0` pins only the *level* at the reference bin; the *slope* `v_1` is free
+  (`v0_• ~ Normal(0,1)`, scaled `τ_•/√(A-1)`) — the linear null-space of an intrinsic RW2. Don't pin
+  `v_1=0` (that would force a flat start and drop the RW2's linear component).
+- **Separate variances, distance-scaled steps.** `τ_s`,`τ_i ~ truncated(Normal(cfg.susc_inf_rw_sd_prior…);
+  lower=0)` are TWO distinct latents (the "separately estimated variances"), one shared prior form; each
+  also scales its profile's `v0`. `Δ = diff(age_mid)` are the adjacent age-bin MIDPOINT gaps,
+  **normalised to unit mean** (`Δn = Δ ./ (sum(Δ)/(A-1))`) so `τ` ≈ typical per-step innovation SD.
+- **RW2 far-field is MUCH more diffuse than RW1** (doubly integrated): equal-gap approx
+  `Var(o_2)=τ²/2` (SD≈0.14, near-reference VERY tight, `susc_2∈[0.75,1.33]`) but `Var(o_A)≈78·τ²`
+  (SD≈1.77 at τ=0.2 — the oldest bin's *level* is near-uninformed a priori, spanning the full clamp
+  `[0.2,5]`, though its *shape* stays smooth). Intended (curvature-penalised, level-diffuse). The
+  `_softclamp(o, log0.2, log5)` binds increasingly at the oldest bins and still hard-bounds
+  susc/inf ∈ [0.2,5]. **2×2 recursion ⇒ no dense Cholesky ⇒ no PosDef/jitter concern.**
+- **Midpoints must NOT be fetched inside the model body** — `cis_age_midpoints()` reads a CSV. Compute
+  `age_mid = cis_age_midpoints()` ONCE in `fit_stage2_pooled` and pass it as the 5th positional arg of
+  `model_transmission(Cstar_weeks, wd, w, cfg, age_mid)`. (User declined adding an `age_mid` field to
+  the `WindowData` struct, so it's threaded as a model arg instead — canonical midpoints
+  `[6,13,20,29.5,42,59.5,74.5]`, 70+ → 74.5, same source the degree GP uses at `joint_model.jl:81`.)
+- **τ/v0 are NOT stored.** `model_transmission`'s return `(; susc, inf, F, gamma_sar, sigma_inf)` is
+  unchanged; `fit_stage2_pooled` reads susc/inf from `generated_quantities`, so RW2 flows into the
+  stored `N×A` arrays automatically — no storage/viz change (10j `make_susc_inf_fig` reads stored draws).
+- **Cache: shared tag `-sc-sm` (mechanism-agnostic "smoothing" marker); the 256 `8j_s1_*` chains were
+  RENAMED `-sc`→`-sc-sm`** rather than refit (Stage 1 is untouched). `-sm` covered the earlier RW1 and
+  now the RW2/IWP with **no further rename** (the smoother lives entirely in Stage 2; switching RW1→RW2
+  changes only the Stage-2 posterior). Only `contacts_label` (single source; the 8j notebook literal
+  uses it dynamically) + the hardcoded default `contacts="temporal-gsar-cut-sc-sm"` literals in
+  `8j_viz_utils.jl`/`10j_viz_utils.jl` carry the tag. 0 `8j_s2_*` files existed, so nothing stale; any
+  pre-existing s2 pooled files (RW1- or GP-smoothed) carry differently-smoothed susc/inf and must not be
+  reused.
 
 ## Two-stage cut inference + γ_SAR revert 2026-07-12 (`joint_model.jl`, `ngm.jl`, `framework.jl`, viz utils, 8j/9j/10j) — inst/4_cut_Bayes.md
 
