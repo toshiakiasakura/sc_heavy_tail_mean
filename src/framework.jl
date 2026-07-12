@@ -81,26 +81,37 @@ Base.@kwdef struct FrameworkConfig
     gen_sd_days::Float64   = 5.0      # generation-interval sd
     child_bins::Int       = 2         # bins 1..child_bins ("2-10","11-15") are "child"
     quantiles::Vector{Float64} = collect(0.05:0.05:0.95)
-    n_forecast_draws::Int = 200       # posterior draws retained for scoring
+    n_forecast_draws::Int = 200       # posterior draws retained per fan for the stored (capped) assembly cache
+    # --- two-stage cut inference (inst/4_cut_Bayes.md) ---
+    # Stage 1 (contact degree) is fit once; `n_stage1_post` of its posterior draws are carried into
+    # Stage 2 (infection), which is re-fit conditioning on each and yields `n_stage2_draws` samples.
+    # The 100×100 = 10_000 pooled infection draws form the predictive distribution scored by WIS.
+    n_stage1_post::Int    = 100       # Stage-1 posterior draws imputed into Stage 2 (the "100 posteriors")
+    n_stage2_draws::Int   = 100       # Stage-2 samples kept per Stage-1 draw (the "100 samples each")
+    stage1_use_nuts::Bool = false     # Stage-1 sampler: false = Pathfinder (preliminary), true = NUTS (later)
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
     gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
     gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
-    # --- absolute transmissibility γ (§3.2/§6; analysis-plan reparam + C* normalisation) ---
-    gamma_prior::Tuple{Float64,Float64} = (log(0.8), 0.5) # log-γ Normal(μ,σ): the single absolute transmissibility scalar. C* is normalised inside model_joint to unit fit-window mean intensity (C*→C*/S̄), so γ = susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*) carries the absolute level and is decoupled from the contact scale (no longer a per-contact SAR; window-relative, not comparable across origins). Calibrated 2026-07-11 by reconstructing new-γ = susc₁·inf₁·S̄ per draw from the pre-gsar dt_intermediate_age_pair_temporal_GP chains, 6 origins × all 4 (degree×NGM) combos: new-γ medians 0.69 (hweibull·mean), 0.73 (hweibull·neigh), 0.83 (negbin·mean), 1.20 (negbin·neigh); per-combo log-SD 0.12–0.34. A SINGLE prior serves all four (geo-mean centre 0.84; S̄ itself spans ~100× — negbin·neigh S̄≈173 — but susc₁·inf₁ compensates the builder scale, so γ stays O(1)). 90% γ∈[0.35,1.8] sits interior to the softclamp [log0.02,log5].
+    # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
+    gamma_sar_prior::Tuple{Float64,Float64} = (log(0.33), 0.56) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. Calibrated by reading 18 pre-gnorm dt_intermediate_age_pair_temporal_GP chains (both degree models × 9 origins): susc[1]·inf[1] had median 0.33, log-SD 0.56 ⇒ Normal(log0.33, 0.56), 90% γ_SAR∈[0.13,0.83], interior to the softclamp [log0.02,log5].
 end
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains. The suffix is a running version
-tag (the filename does not otherwise encode dispersion/transmission structure): `-gnorm` (2026-07-11,
-C*-normalisation + γ rename — C* divided by its unit fit-window mean intensity inside `model_joint`,
-transmission scalar renamed `log_gamma_sar`→`log_gamma`/`gamma_sar`→`γ` and its prior recalibrated,
-§3.2/§6). Predecessor `-gsar` (absolute `log_gamma_sar`, susc/inf bin-1 relative, `z_s`/`z_i` length
-`A-1`) used a NON-normalised C*; the `-gnorm` chains carry a differently-scaled γ (`log_gamma`), so
-they are disjoint from `-gsar`, from `-hdisp-hn-gsar` (which also carry `z_k`/`z_kappa`+`tau`), and
-from the pre-`gsar` `"temporal"`/`"pooled"` chains (`mu_s`/`mu_i`), and reload none of them."""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gnorm" : "temporal-gnorm"
+tag (the filename does not otherwise encode dispersion/transmission structure): `-gsar-cut`
+(2026-07-12, inst/4_cut_Bayes.md — the JOINT fit was split into a two-stage CUT inference: Stage 1
+fits the contact-degree GP alone (saved `8j_s1_*`), Stage 2 re-fits the infection block conditioning
+on each of 100 Stage-1 draws (pooled `8j_s2_*`). The C*-normalisation (`C*→C*/S̄`) was REVERTED, so C*
+feeds the NGM at its raw level and the transmissibility scalar is again the per-contact SAR
+`log_gamma_sar`/`gamma_sar`). The `-sc` suffix (2026-07-12) marks the Stage-2 susc/inf **soft-clamp**
+`exp(softclamp(σ·z, -3, 3))` (bounds relative susceptibility/infectivity to ≈[0.05,20] so a stray
+Pathfinder draw can't blow the NGM up); it changes the Stage-2 posterior, so the pre-`-sc` `8j_s2_*`
+files carry unclamped susc/inf and must not be reused. The `-cut` artefacts (`8j_s1_*`/`8j_s2_*`) are
+structurally disjoint from the single-file `-gnorm` joint chains (`8j_chn_*`, differently-scaled
+`log_gamma`), so nothing reloads the stale ones."""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc" : "temporal-gsar-cut-sc"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).

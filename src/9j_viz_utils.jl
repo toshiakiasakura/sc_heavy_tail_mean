@@ -14,8 +14,8 @@
 # Reference model = `unweighted-negbin|mean` (the "no-interaction" analog); WIS on the LOG
 # scale is the headline (robust — the neighbourhood-NGM natural-scale WIS blows up).
 #
-# Depends on the forecasting framework (`forecast_utils.jl`) and the read-only chain helpers
-# in `8j_viz_utils.jl` (`reproduction_draws`, `chain_path`, …), included below.
+# Depends on the forecasting framework (`forecast_utils.jl`) and the read-only two-stage helpers
+# in `8j_viz_utils.jl` (`reproduction_draws`, `load_transmission_draws`, …), included below.
 
 include("8j_viz_utils.jl")
 
@@ -78,7 +78,7 @@ _relwis(wis, hz, ref_by_h) = wis ./ [get(ref_by_h, h, NaN) for h in hz]
 
 # ── Forecast assembly + on-disk cache ─────────────────────────────────────────────────
 """
-    assemble_or_load_forecasts(wins, combos, cfg; grid, raw, use_nuts, save_dir,
+    assemble_or_load_forecasts(wins, combos, cfg; grid, raw, save_dir,
                                cache_path, rebuild) -> (; qall, fc_store, crps, skipped)
 
 Reload the cached 8j chains for every `origin × combo` and assemble the forecast products
@@ -86,16 +86,15 @@ used downstream: `qall` (long quantile table for WIS scoring), `fc_store`
 (`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `crps`
 (per-origin native CRPS cross-check) and `skipped` (origin×combo pairs whose reload threw).
 
-This loop (`iterated_forecast` → `fit_or_load_chain` → `generated_quantities`, per origin ×
-combo) is the notebook's dominant cost, yet fully determined by the cached chains — so the
-result is **cached to `cache_path`** (JLD2) and reused. The cache stores `origins`/`labels`
+This loop (`two_stage_forecast` → `fit_or_load_stage2` → pooled draws, per origin × combo) is the
+notebook's dominant cost, yet fully determined by the cached Stage-1 chains + Stage-2 pooled files —
+so the result is **cached to `cache_path`** (JLD2) and reused. The cache stores `origins`/`labels`
 alongside the products and is treated as **stale** (rebuilt) if either changed; `rebuild=true`
-forces a fresh reload. Missing chains fall through to `iterated_forecast`'s own re-fit — run
-8j first so the chains exist.
+forces a fresh reload. Missing artefacts fall through to `two_stage_forecast`'s own re-fit — run
+8j first so the Stage-1/Stage-2 files exist.
 """
 function assemble_or_load_forecasts(wins, combos, cfg;
                                     grid = cis_age_grid(), raw,
-                                    use_nuts::Bool = false,
                                     save_dir::AbstractString = "../dt_intermediate",
                                     cache_path::AbstractString =
                                         joinpath(save_dir, "9j_assembly_$(contacts_label(cfg)).jld2"),
@@ -129,9 +128,9 @@ function assemble_or_load_forecasts(wins, combos, cfg;
         for (dm, nb) in combos
             lbl = string(degree_label(dm), "|", ngm_label(nb))
             try   # keep the multi-origin run alive if a single origin×combo reload is pathological
-                fc = iterated_forecast(dm, nb, wd_o, cfg, win_o;
-                                       grid = grid, setting = :all, use_nuts = use_nuts,
-                                       save_dir = save_dir, apd_by_h = apd_o)
+                fc = two_stage_forecast(dm, nb, wd_o, cfg, win_o;
+                                        grid = grid, setting = :all,
+                                        save_dir = save_dir, apd_by_h = apd_o)
                 fc_store[(win_o.origin, lbl)] = fc
                 push!(qtabs, to_quantile_long(fc, truth_o, lbl, win_o, cfg, grid.LAB))
                 push!(crps_rows, (origin = win_o.origin, model = lbl, mean_crps = mean_crps(fc, truth_o)))
@@ -330,15 +329,10 @@ function reproduction_over_time(combos, labels4, wins, cfg;
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o  = load_window_data(win_o; grid = grid)
-        # horizon-h contact window ends at origin+h (contacts observed h wks ahead), matching how
-        # the (origin, h) chain was fit — so generated_quantities' Cstar[end] is coherent.
-        apd_o = prepare_degree_data(
-                    WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
-                                 horizons = cfg.horizons),
-                    cfg; grid = grid, setting = :all,
-                    df_part_raw = raw.df_part, craw_raw = raw.craw)
+        # R reads the Stage-2 pooled file directly (Cstar_end = contacts at origin+h, antibody at
+        # origin) — no degree-data rebuild needed under the two-stage cut.
         for ((dm, nb), lbl) in zip(combos, labels4)
-            R = reproduction_draws(dm, nb, apd_o, wd_o, cfg, win_o; h = h, save_dir = save_dir)
+            R = reproduction_draws(dm, nb, wd_o, cfg, win_o; h = h, save_dir = save_dir)
             R === nothing && continue
             store[lbl].med[oi] = median(R)
             store[lbl].lo[oi]  = quantile(R, 0.05)
@@ -552,9 +546,9 @@ function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
         for (ci, lbl) in enumerate(labels4)
             haskey(fc_store, (origin, lbl)) || continue      # skipped origin×combo → gap
             tot = dropdims(sum(fc_store[(origin, lbl)]; dims = 1); dims = 1)   # H × draws
-            med = [median(tot[h, :]) for h in 1:H]
-            lo  = [quantile(tot[h, :], qs_lo) for h in 1:H]
-            hi  = [quantile(tot[h, :], qs_hi) for h in 1:H]
+            med = [_fmed(tot[h, :]) for h in 1:H]                              # finite-robust (fan may be ±Inf)
+            lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+            hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
             plot!(p, x_fore, med; color = model_cols[ci], lw = 1.6,
                   ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = (pi == 1 ? lbl : ""))
         end
@@ -570,12 +564,12 @@ end
     collect_transmission_structure(labels4, origins; grid, h) -> (; susc, inf, rho, gamma)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
-cached `h`-chains: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
+two-stage artefacts: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
 (≡ 1 by construction); `rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2
 ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the
-scalar absolute-transmissibility level γ (window-relative). `susc`/`inf` stores are
+per-contact secondary attack rate γ_SAR. `susc`/`inf` stores are
 `Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`, `gamma` of `nO × 1`;
-missing chains leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
+missing artefacts leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
 """
 function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
     nO = length(origins)
@@ -600,7 +594,7 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
             rho_store[lbl].hi[oi, g]  = quantile(rv, 0.95)
         end
-        γ = d.γ                                          # scalar-per-draw (not per-age) → no super-groups
+        γ = d.gamma_sar                                  # scalar-per-draw (not per-age) → no super-groups
         gamma_store[lbl].med[oi, 1] = median(γ)
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
@@ -667,21 +661,20 @@ end
 """
     plot_gamma(store, labels4, model_cols, origins; h) -> Plot
 
-Absolute-transmissibility γ over the forecast origins, one line per model config (median + 90%
-ribbon) in a single panel — γ is a scalar-per-draw (one value per model×origin), so unlike
-`plot_ratio` there are no per-age super-groups to facet. `store` is the `gamma` field of
+Per-contact secondary attack rate γ_SAR over the forecast origins, one line per model config
+(median + 90% ribbon) in a single panel — γ_SAR is a scalar-per-draw (one value per model×origin),
+so unlike `plot_ratio` there are no per-age super-groups to facet. `store` is the `gamma` field of
 `collect_transmission_structure` (`Dict(label => (med, lo, hi))` of `nO × 1` matrices).
 
-NOTE: γ is **window-relative** — each window normalises `C*` to unit fit-window mean intensity,
-so γ carries the absolute NGM level *for that window* and its cross-origin level is partly a
-normalisation artefact. Read it as a within-origin level, not a clean temporal trend. γ has no
-natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
+Under the two-stage cut, C* is NOT normalised, so γ_SAR is the per-contact secondary attack rate
+(it reproduces the reference cell N_11 = susc₁·inf₁ directly) and IS comparable across origins.
+γ_SAR has no natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
 """
 function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
-    fig = plot(; xlabel = "forecast origin", ylabel = "γ (absolute transmissibility, window-relative)",
-               title = "8j — absolute transmissibility γ over time by model (h=$h; 90% CI)",
+    fig = plot(; xlabel = "forecast origin", ylabel = "γ_SAR (per-contact secondary attack rate)",
+               title = "8j — secondary attack rate γ_SAR over time by model (h=$h; 90% CI)",
                size = (950, 520), legend = :topright, xrotation = 45)
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]

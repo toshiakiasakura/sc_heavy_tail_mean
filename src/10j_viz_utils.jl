@@ -1,11 +1,11 @@
 # 10j_viz_utils.jl — read-only helper for the 10j single-time-point diagnostics.
 #
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
-# cached joint-model chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
+# cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
 # (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
-# log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_joint`
-# (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `chain_path`) to be included first.
+# log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
+# (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
 # forecast_utils.jl.
 
@@ -43,9 +43,9 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gnorm",
+                              contacts::AbstractString = "temporal-gsar-cut-sc",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
         load(path, "result")
@@ -150,7 +150,7 @@ order, so column `d` pairs with μ's draw `d`).
 - Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
 - NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
 
-Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gnorm"`
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc"`
 chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
 `week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
 regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
@@ -159,9 +159,9 @@ missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE w
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
                                       weighted::Bool,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gnorm",
+                                      contacts::AbstractString = "temporal-gsar-cut-sc",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
         load(path, "result")
@@ -201,7 +201,7 @@ end
 # Figure builders for the 10j diagnostics notebook (moved out of the notebook so
 # the notebook keeps only config + data prep + calls + display). All read-only:
 # they reload cached joint-model chains and never re-fit. Requires the full
-# forecast preamble (forecast_utils.jl) plus 8j_viz_utils.jl (chain_path).
+# forecast preamble (forecast_utils.jl) plus 8j_viz_utils.jl (stage1_chain_path / stage2_pooled_path).
 #
 # Most origin-week helpers take a small context bundle assembled once in the
 # notebook:  oc = (; apd, t_o, t_o_est, origin, grid, cfg)
@@ -234,37 +234,51 @@ function _observed_cell_mean(apd, t::Integer, i::Integer, j::Integer, weighted::
 end
 
 """
-    fit_window_infection_draws(dm, nb, apd_o, wd, cfg, origin; h=1, use_nuts=false, save_dir)
+    fit_window_infection_draws(dm, nb, apd_o, wd, cfg, origin; h=1, save_dir)
         -> A × n_fit × draws  |  nothing
 
-In-sample expected (fitted) infections over the fit window, from a model's horizon-`h` chain:
-the MEAN of the joint model's Normal infection likelihood (joint_model.jl:288-295). Per draw,
-`pred_t = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:,t]; γ=q.γ) · Σ_s w[s]·wd.I_mean[:,t-s]`
+In-sample expected (fitted) infections over the fit window, from the two-stage artefacts of the
+horizon-`h` fit: the MEAN of Stage 2's Normal infection likelihood (`model_transmission`). Per
+pooled draw `d` (from Stage-1 draw `m = post_index[d]`),
+`pred_t = build_ngm(Cstar_m[t], susc[d], inf[d], F[d], wd.antibody[:,t]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
 using OBSERVED lags ⇒ one-step-ahead fitted mean (NOT the self-iterated forecast). Columns
-`(smax+1):Tn` == the window's fit weeks. Reloads the cached chain (NO re-fit); mirrors
-`reproduction_draws`. `apd_o[h]` is the h-window degree data (matches the cached chain). Returns
-`nothing` when the chain file is missing/unloadable.
+`(smax+1):Tn` == the window's fit weeks. The per-week `Cstar_m` is rebuilt from the Stage-1 chain
+(`stage1_moment_draws` → `contact_star(nb, …)`), in the SAME draw order the pooling used, so
+`post_index` aligns. `apd_o[h]` is the h-window degree data (matches the cached Stage-1 chain).
+Read-only (NO re-fit). Returns `nothing` when either artefact is missing/unloadable.
 """
 function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
                                     apd_o, wd, cfg, origin::Date;
-                                    h::Int = 1, use_nuts::Bool = false,
+                                    h::Int = 1,
                                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    path = chain_path(lbl, origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
-    isfile(path) || (@warn "no chain for fit-window fit" lbl; return nothing)
+    lbl = string(degree_label(dm), "|", ngm_label(nb))
+    tag = contacts_label(cfg)
+    s1p = stage1_chain_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
+    s2p = stage2_pooled_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
+    (isfile(s1p) && isfile(s2p)) || (@warn "no two-stage artefacts for fit-window fit" lbl; return nothing)
     w_gi = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     ds   = build_degree_stats(dm, apd_o[h], cfg)              # h-window degree stats (matches cached chain)
-    fl = try
-        fit_or_load_chain(path, dm, nb, ds, wd, cfg, w_gi; use_nuts = use_nuts)  # reload + rebuild model
+    local md, pooled
+    try
+        s1chn  = load(s1p, "result")
+        md     = stage1_moment_draws(dm, ds, wd.pop, cfg, s1chn; n_post = cfg.n_stage1_post)
+        pooled = load(s2p, "pooled")
     catch err
-        @warn "could not load chain for fit-window fit" lbl err; return nothing
+        @warn "could not load two-stage artefacts for fit-window fit" lbl err; return nothing
     end
-    gq = [q for q in vec(generated_quantities(fl.model, fl.chn)) if q !== nothing]
     A = wd.A; Tn = length(wd.weeks); fitcols = (cfg.smax + 1):Tn
-    out = Array{Float64}(undef, A, length(fitcols), length(gq))
-    for (d, q) in enumerate(gq), (c, t) in enumerate(fitcols)
-        N = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:, t]; γ = q.γ)
-        out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+    # per-Stage-1-draw per-week C* (nb applied) — reused across that draw's pooled infection draws.
+    Cstar_by_m = [[contact_star(nb, md[m].K1[t], md[m].K2[t], md[m].G[t]) for t in 1:Tn]
+                  for m in eachindex(md)]
+    Np = length(pooled.gamma_sar)
+    out = Array{Float64}(undef, A, length(fitcols), Np)
+    for d in 1:Np
+        m = pooled.post_index[d]
+        for (c, t) in enumerate(fitcols)
+            N = build_ngm(Cstar_by_m[m][t], pooled.susc[d, :], pooled.inf[d, :],
+                          pooled.F[d], wd.antibody[:, t]; gamma_sar = pooled.gamma_sar[d])
+            out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+        end
     end
     return out
 end
@@ -674,9 +688,9 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     for (ci, lbl) in enumerate(labels4)
         haskey(fc_store, lbl) || continue
         tot = dropdims(sum(fc_store[lbl]; dims = 1); dims = 1)       # H × draws (age-summed)
-        med = [median(tot[h, :])          for h in 1:H]
-        lo  = [quantile(tot[h, :], qs_lo) for h in 1:H]
-        hi  = [quantile(tot[h, :], qs_hi) for h in 1:H]
+        med = [_fmed(tot[h, :])     for h in 1:H]                    # finite-robust (fan may be ±Inf)
+        lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+        hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
         plot!(fig, x_fore, med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
               ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = lbl)
     end
@@ -685,9 +699,9 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     for (ci, lbl) in enumerate(labels4)
         haskey(fit_store, lbl) || continue
         tot = dropdims(sum(fit_store[lbl]; dims = 1); dims = 1)      # n_fit × draws (age-summed)
-        med = [median(tot[t, :])          for t in 1:length(x_hist)]
-        lo  = [quantile(tot[t, :], qs_lo) for t in 1:length(x_hist)]
-        hi  = [quantile(tot[t, :], qs_hi) for t in 1:length(x_hist)]
+        med = [_fmed(tot[t, :])     for t in 1:length(x_hist)]       # finite-robust (fit may be huge)
+        lo  = [_fq(tot[t, :], qs_lo) for t in 1:length(x_hist)]
+        hi  = [_fq(tot[t, :], qs_hi) for t in 1:length(x_hist)]
         plot!(fig, x_hist, med; color = model_cols[ci], lw = 1.6, ls = :dash, marker = :diamond,
               ms = 3, ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = "")
     end

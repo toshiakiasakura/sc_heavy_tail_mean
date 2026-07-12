@@ -16,8 +16,9 @@
 #   prepare_degree_data, pool_over_time                                (degree_agepair.jl)
 #   gen_interval_pmf, renewal_next, forecast_forward                   (renewal.jl)
 #   MeanNGM / NeighbourhoodDegreeNGM, build_ngm, contact_star          (ngm.jl)
-#   NegBinAgePair / HurdleWeibullAgePair, model_joint, fit_joint,
-#     build_degree_stats, posterior_forecast                          (joint_model.jl)
+#   NegBinAgePair / HurdleWeibullAgePair, model_degree, model_transmission,
+#     fit_stage1, fit_stage2_pooled, two_stage_forecast, build_degree_stats,
+#     prefit_stage1! / prefit_stage2! / prefit_two_stage!               (joint_model.jl)
 #   to_quantile_long, score_wis, crps_sample, mean_crps               (scoring.jl)
 #
 # Run scripts/notebooks from `src/` — relative data paths assume `cwd == src/`.
@@ -35,5 +36,5 @@ include("infection_data.jl")        # weekly infections (rolling-sum × pop) + g
 include("degree_agepair.jl")        # age-pair binning + per-cell weekly degree assembly
 include("renewal.jl")               # generation-interval PMF + renewal iteration/forecast
 include("ngm.jl")                   # NGM builders (mean / neighbourhood) + reciprocity + susceptibility
-include("joint_model.jl")           # joint Turing model + Pathfinder→NUTS fit + posterior forecast
+include("joint_model.jl")           # two-stage (cut) models + Pathfinder→NUTS fits + pooled forecast
 include("scoring.jl")               # WIS via scoringutils (RCall) + native CRPS cross-check
