@@ -567,20 +567,21 @@ end
 
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
-    collect_transmission_structure(labels4, origins; grid, h) -> (; susc, inf, rho)
+    collect_transmission_structure(labels4, origins; grid, h) -> (; susc, inf, rho, gamma)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 cached `h`-chains: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
 (≡ 1 by construction); `rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2
-ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains). `susc`/`inf` stores
-are `Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`; missing chains leave
-`NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
+ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the
+scalar absolute-transmissibility level γ (window-relative). `susc`/`inf` stores are
+`Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`, `gamma` of `nO × 1`;
+missing chains leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
 """
 function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
     nO = length(origins)
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
-    susc_store, inf_store, rho_store = mkstore(2), mkstore(2), mkstore(3)
+    susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
         d === nothing && continue
@@ -599,8 +600,12 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
             rho_store[lbl].hi[oi, g]  = quantile(rv, 0.95)
         end
+        γ = d.γ                                          # scalar-per-draw (not per-age) → no super-groups
+        gamma_store[lbl].med[oi, 1] = median(γ)
+        gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
+        gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
     end
-    return (; susc = susc_store, inf = inf_store, rho = rho_store)
+    return (; susc = susc_store, inf = inf_store, rho = rho_store, gamma = gamma_store)
 end
 
 """
@@ -657,4 +662,31 @@ function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
     return plot(panels...; layout = (2, 2), size = (1150, 780),
                 plot_title = "8j — separable GP length-scales ρ_diag / ρ_gap / ρ_time over time (h=$h)",
                 plot_titlefontsize = 11)
+end
+
+"""
+    plot_gamma(store, labels4, model_cols, origins; h) -> Plot
+
+Absolute-transmissibility γ over the forecast origins, one line per model config (median + 90%
+ribbon) in a single panel — γ is a scalar-per-draw (one value per model×origin), so unlike
+`plot_ratio` there are no per-age super-groups to facet. `store` is the `gamma` field of
+`collect_transmission_structure` (`Dict(label => (med, lo, hi))` of `nO × 1` matrices).
+
+NOTE: γ is **window-relative** — each window normalises `C*` to unit fit-window mean intensity,
+so γ carries the absolute NGM level *for that window* and its cross-origin level is partly a
+normalisation artefact. Read it as a within-origin level, not a clean temporal trend. γ has no
+natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
+"""
+function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
+    # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
+    # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
+    fig = plot(; xlabel = "forecast origin", ylabel = "γ (absolute transmissibility, window-relative)",
+               title = "8j — absolute transmissibility γ over time by model (h=$h; 90% CI)",
+               size = (950, 520), legend = :topright, xrotation = 45)
+    for (ci, lbl) in enumerate(labels4)
+        m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
+        plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
+    end
+    return fig
 end
