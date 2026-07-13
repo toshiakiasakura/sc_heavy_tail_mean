@@ -2,7 +2,77 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
-## RW2 / IWP smoothing of relative susc/inf 2026-07-12 (`joint_model.jl`, `framework.jl`, spec)
+## susc/inf smoothing REMOVED entirely → independent per-bin offsets 2026-07-13 (`joint_model.jl`, `framework.jl`, spec, 10j) (user request)
+
+- **The relative susc/inf age profiles are no longer smoothed at all.** The `A-1` non-reference
+  log-offsets are now **independent per age bin**: `susc = vcat(1, exp.(_softclamp.(sig_s .* z_s, log0.2, log5)))`
+  (likewise `inf`), `z_s`/`z_i ~ filldist(Normal(0,1), A-1)`. This is the pre-`4607021` form (the GP was
+  built on top of exactly this). The end of the GP→RW1→RW2→GP experiment sequence — now **none**.
+- **What was removed** from `model_transmission` (`joint_model.jl`): the shared-length-scale RBF GP block —
+  `log_rho_si`, `ρ_si`, `Ksi`, `Lsi`, and the `Lsi *` mixing (`sig·(Lsi·z)` → `sig·z`). Config
+  (`framework.jl`): dropped `susc_inf_gp_len_prior` (its only consumer `log_rho_si` is gone) and
+  **renamed** `susc_inf_gp_sd_prior` → `susc_inf_sd_prior` (the marginal-SD prior `N⁺(0.1,0.05²)` for
+  `sig_s`/`sig_i` survives, still SEPARATE per profile).
+- **KEPT (method-agnostic):** the soft-clamp `[log0.2,log5]` on the offset (NGM safety bound, not
+  smoothing), the reference-bin pinning `susc[1]=inf[1]=1`, and `sig_s`/`sig_i`/`z_s`/`z_i`. Because the
+  GP kernel had **unit diagonal**, removing it leaves the per-bin marginal SD unchanged (`=sig`) — the
+  `[0.80,1.25]`/`[0.2,5]` calibration holds; the profile is just **rougher** (neighbours no longer pulled
+  together). `sigma_inf` (obs-noise SD) is untouched — not a smoothing latent.
+- **Downstream unchanged, nothing breaks:** `model_transmission` still returns
+  `(; susc, inf, F, gamma_sar, sigma_inf)` and `fit_stage2_pooled` still stores the `N×A` susc/inf draws,
+  so `load_transmission_draws` (8j_viz), 10j `make_susc_inf_fig`, and 9j `plot_ratio(tr.susc/tr.inf)` all
+  keep working (rougher profiles). No viz ever read the smoothing latents. `plot_lengthscales` (9j) is the
+  **contact-degree** GP (ρ_diag/ρ_gap/ρ_time), unrelated — untouched.
+- **Cache: `-sm` token DROPPED** in `contacts_label` → `temporal-gsar-cut-sc` / `pooled-gsar-cut-sc`
+  (tag must reflect the parameter space; keeping a "smoothing" marker on unsmoothed fits would be a
+  footgun). The 256 existing Stage-1 chains (`8j_s1_*_…-sc-sm_*`) are susc/inf-independent, so they were
+  **renamed** `-sc-sm`→`-sc` on disk and reused as-is (no refit) — mirrors the `-sm`-ADD precedent in
+  reverse (`for f in 8j_s1_*-sc-sm_*.jld2; do mv "$f" "${f/-sc-sm_/-sc_}"; done`). **Zero** Stage-2
+  `8j_s2_*` files existed, so nothing to delete; re-run `prefit_stage2!` (8j) to regenerate under `-sc`.
+
+## susc/inf smoothing REVERTED RW2/IWP → shared-length-scale RBF GP 2026-07-12 (`joint_model.jl`, `framework.jl`, spec, 10j)
+
+- **Undo of the RW1/RW2 experiment below (user request).** The relative susc/inf age profiles are again
+  smoothed by a **shared-length-scale squared-exponential (RBF) GP** — the commit-`4607021` form. ONE
+  length-scale `log_rho_si ~ Normal(log1.5, 0.5²)` (soft-clamp `[log0.5, log6]`) is **shared** by susc
+  and inf; the marginal scales `sig_s`, `sig_i ~ N⁺(cfg.susc_inf_gp_sd_prior…)` are **separate**. The
+  offset is `susc/inf = vcat(1, exp.(_softclamp.(sig·(Lsi·z), log0.2, log5)))`, `Lsi = chol(K(ρ_si)+1e-4·I)`,
+  `K_{mn}=exp(-(m-n)²/2ρ_si²)`. `K` has **unit diagonal** ⇒ per-bin marginal SD = `sig` (the kernel only
+  correlates neighbours, doesn't inflate spread).
+- **Marginal SD TIGHTENED vs the GP era: `susc_inf_gp_sd_prior = (0.1, 0.05)`** (GP-era was `N⁺(0.2,0.1²)`),
+  carrying over the recent "susc/inf age variation is empirically small" intent. `sig≈0.1` ⇒ typical
+  susc/inf ∈ [0.80,1.25] at ±2 SD; neighbour corr ≈0.8 at ρ_si≈1.5 ⇒ adjacent-bin ratio ≈1.15× (≪2×).
+- **GP is STATIONARY** (marginal SD constant across age) — the key contrast with RW1/RW2, whose variance
+  *grew* with distance from the reference bin. So the oldest "70+" bin is **no looser in level** than
+  near-reference bins; the RW far-field diffuseness (its 95% level band `[0.37,2.7]`) is gone.
+- **What was removed:** the `_iwp_offsets` helper; the `age_mid` 5th arg of `model_transmission` (back to
+  `model_transmission(Cstar_weeks, wd, w, cfg)`) and its `age_mid = cis_age_midpoints()` line in
+  `fit_stage2_pooled`; the `susc_inf_rw_sd_prior` config field (→ `susc_inf_gp_len_prior` +
+  `susc_inf_gp_sd_prior`). Raw Stage-2 latents changed (`tau_*`/`v0_*`/2×(A-1) `z_*` → `log_rho_si` +
+  `sig_*` + (A-1) `z_*`), but `model_transmission` still returns `(; susc, inf, F, gamma_sar, sigma_inf)`,
+  so `generated_quantities`/viz (10j `make_susc_inf_fig`, `load_transmission_draws`) are untouched.
+- **KEEP (method-agnostic):** the **1e-4 jitter** on `Lsi` (not 1e-6 — `K` is near rank-1 at the upper
+  ρ_si clamp and the Stage-2 Pathfinder is not try/caught, so a `PosDefException` aborts the whole fit;
+  mirrors the `Kt` temporal kernel in `model_degree`); the `_softclamp` Inf-safe nested form.
+- **Cache:** tag `…-sc-sm` **unchanged** (mechanism-agnostic marker). The existing `8j_s2_*_-sc-sm_*`
+  pooled chains are RW2-smoothed ⇒ **stale**; they were **deleted** so Stage 2 re-fits under the GP.
+  `8j_s1_*` (smoothing-independent) are reused as-is. Re-run the 8j Stage-2 prefit.
+
+## γ_SAR prior WIDENED 2026-07-12 (`framework.jl`, `joint_model.jl`, spec)
+
+- **`gamma_sar_prior` went from the data-calibrated `(log0.33, 0.56)` to the weakly-informative
+  `(log0.27, 1.05)`** so the prior *widely covers* γ_SAR∈[0.05,1.5] (user request). Log-SD ≈doubles
+  (0.56→1.05); 90% γ_SAR band widens ≈[0.13,0.83] → [0.048,1.52] (γ span ~6× → ~30×). Centre log(0.27)
+  is the **geometric mean of [0.05,1.5]** (≈ the old calibrated 0.33), so both endpoints sit just inside
+  the central 90% (≈±1.6σ). The old 18-chain calibration now only informs the centre; the data dominate.
+- **Softclamp `[log0.02, log5]` is UNCHANGED** and still correct: it sits at ≈−2.5σ/+2.8σ (tails
+  ≈0.7%/0.3%), i.e. outside the widened 90% band, so it contains the prior without distorting the
+  covered range. Don't tighten it to "match" the old prior.
+- **Only the config default value changed** — no field rename, no `-gsar`/`-sc`/`-cut` cache-tag bump, no
+  Stage-1 (`8j_s1_*`) impact (γ_SAR is a Stage-2 latent). Existing Stage-2 `8j_s2_*` chains predate the
+  new prior, so **re-fit** to see its effect. `load_transmission_draws` / softclamp reads are untouched.
+
+## RW2 / IWP smoothing of relative susc/inf 2026-07-12 — ⚠️ SUPERSEDED (reverted to the shared-length-scale RBF GP above; kept for history) (`joint_model.jl`, `framework.jl`, spec)
 
 - **The relative susc/inf age profiles are smoothed by a second-order RANDOM WALK (RW2), i.e. a 2nd-order
   Integrated Wiener Process (IWP) for the irregular age bins — not RW1, not a GP.** (RW2 superseded a
@@ -25,11 +95,21 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   also scales its profile's `v0`. `Δ = diff(age_mid)` are the adjacent age-bin MIDPOINT gaps,
   **normalised to unit mean** (`Δn = Δ ./ (sum(Δ)/(A-1))`) so `τ` ≈ typical per-step innovation SD.
 - **RW2 far-field is MUCH more diffuse than RW1** (doubly integrated): equal-gap approx
-  `Var(o_2)=τ²/2` (SD≈0.14, near-reference VERY tight, `susc_2∈[0.75,1.33]`) but `Var(o_A)≈78·τ²`
-  (SD≈1.77 at τ=0.2 — the oldest bin's *level* is near-uninformed a priori, spanning the full clamp
-  `[0.2,5]`, though its *shape* stays smooth). Intended (curvature-penalised, level-diffuse). The
+  `Var(o_2)=τ²/2` (SD≈0.035, near-reference VERY tight, `susc_2∈[0.96,1.04]`) but `Var(o_A)≈78·τ²`
+  (SD≈0.44 at τ=0.05 — the oldest bin's *level* is the least-informed, 95% band ≈`[0.37,2.7]`, though its
+  *shape* stays smooth). Intended (curvature-penalised, level-diffuse). The
   `_softclamp(o, log0.2, log5)` binds increasingly at the oldest bins and still hard-bounds
   susc/inf ∈ [0.2,5]. **2×2 recursion ⇒ no dense Cholesky ⇒ no PosDef/jitter concern.**
+- **τ prior tightened TWICE (0.2,0.1)→(0.1,0.05)→(0.05,0.025) to bound the ADJACENT-bin ratio ≲2×**
+  (`|Δo|≤log2≈0.693`, 2026-07-12). Watch out: RW2's per-step jump SD is NOT uniform — the slope
+  *accumulates*, so it grows to `≈3τ` at the oldest (widest-gap) bins (worst step, actual midpoints
+  `[6,13,20,29.5,42,59.5,74.5]`). 400k-draw MC of `_iwp_offsets` over the real normalised gaps: the
+  fraction of prior draws with SOME adjacent step >2× fell `≈32%→≈7%→≈0.3%` across the two halvings; at
+  (0.05,0.025) the worst-step increment SD≈0.17 ⇒ ±2SD adjacent ratio `exp(0.34)≈1.4×`. Sizing lever is
+  τ ALONE (v0 and the clamp are secondary). TRADE-OFF of the 2nd halving: the far-field oldest *level* SD
+  (`√78·τ`) drops `≈0.88→0.50` (95% band `[0.37,2.7]`), so it no longer spans the full clamp — older-age
+  structure is now MORE constrained, but still above the data-preferred log-SD ≈0.22–0.28 (see "surfaced,
+  not fixed" below), so not starved; it just accumulates smoothly over 6 steps rather than jumping in one bin.
 - **Midpoints must NOT be fetched inside the model body** — `cis_age_midpoints()` reads a CSV. Compute
   `age_mid = cis_age_midpoints()` ONCE in `fit_stage2_pooled` and pass it as the 5th positional arg of
   `model_transmission(Cstar_weeks, wd, w, cfg, age_mid)`. (User declined adding an `age_mid` field to
@@ -437,3 +517,57 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
 - **Lesson**: `a9a2953` bundled two orthogonal changes (dispersion hierarchy + γ_SAR) in one commit,
   which made this a *surgical partial* revert rather than a `git revert`. Prefer one concern per
   commit so either can be backed out cleanly.
+
+## Loosened γ_SAR prior [0.001,10] — clamp compression + cache-token footguns 2026-07-13 (user request)
+- **User asked to loosen the γ_SAR prior "from 0.001 to 10".** Motivation surfaced from 9j's
+  `plot_gamma`: the negbin|neighbourhood posterior median sat at ~0.021 — **right on the old
+  softclamp lower bound `log0.02`** — with an implausibly *tight* 90% CI (~[0.0202,0.0208]). That
+  narrow-CI-pinned-at-the-bound signature is **softclamp compression**, not genuine certainty: the
+  softplus squashes latent values approaching the bound, so the estimate can't move and its spread
+  collapses. Whenever a posterior parks exactly on a clamp with a suspiciously tiny CI, suspect the
+  clamp, not the data.
+- **Change** (`framework.jl` `gamma_sar_prior`, `joint_model.jl` `model_transmission`, spec §"Update
+  2026-07-12"/§6 prior list): prior `Normal(log0.27,1.05²)` [90% γ∈[0.048,1.52]] → `Normal(log0.1,1.8²)`
+  [90% γ∈[0.0052,1.93]]; softclamp `[log0.02,log5]` → `[log0.001,log10]`. Centre = geometric mean of
+  the requested [0.001,10]; σ=1.8 puts the clamp at ±2.56σ (outside the 90% band), i.e. the codebase
+  idiom "clamp = outer safety bound, weakly-informative prior lives inside it". The old 0.021 estimate
+  now sits at only −0.87σ (≈19th pctile), mid-bulk.
+- **Cache footgun**: the Stage-2 caches are keyed only by `contacts_label(cfg)` (`temporal-gsar-cut-sc-sm`),
+  which does **NOT encode the prior/clamp**, and `prefit_stage2!` skips on bare `isfile(path)`
+  (joint_model.jl ~L600). So editing the prior alone ⇒ the 512 cached `8j_s2_*` chains are silently
+  reused and results don't change. **Must delete `8j_s2_*` and re-run `prefit_stage2!`.** Did NOT bump
+  the token: it is shared with `stage1_path`, so bumping would also orphan the γ_SAR-independent
+  `8j_s1_*` Stage-1 GP fits and force a needless (expensive) Stage-1 refit. Deleting only s2 is the
+  minimal correct action. (Contrast the 2026-07-11 dispersion revert, where a token bump WAS right
+  because the model's saved columns changed.)
+
+## Contact-only relative reproduction number in 9j — new diagnostic 2026-07-13 (user request)
+
+- **What**: added a **contacts-only relative R** figure alongside the "contact & transmission" R in 9j.
+  The two are now separate PNGs (user asked to split them 2026-07-13): full-NGM R →
+  `res/9j_reproduction_number.png`, contacts-only relative R → `res/9j_contact_reproduction_number.png`
+  (was briefly a `layout=(1,2)` composite of both into `9j_reproduction_number.png`).
+  The relative R = `ρ(C*_origin)/ρ(C*_first origin)`, the dominant eigenvalue of the *bare*
+  contact matrix C* alone (drop γ_SAR/susc/inf/antibody), normalised to the first forecast origin so every
+  model passes through 1.0 there. Isolates how contact structure alone drove transmissibility vs a baseline
+  week — the transmission scalings (which are per-origin-fit constants) cancel in the ratio; only C* varies.
+- **Where**: `contact_reproduction_draws` in `8j_viz_utils.jl` (mirrors `reproduction_draws` but takes
+  `max real(eigvals(Cstar_end[m]))` of C* only, no `wd`/`build_ngm`); collector
+  `relative_contact_reproduction_over_time` + cached `_or_load` (cache `9j_relrt_<contacts>_h<h>.jld2`,
+  distinct from the full-R `9j_rt_*`) + `plot_relative_contact_reproduction` in `9j_viz_utils.jl`.
+- **Cheap by design**: the origin-week C* is ALREADY stored per-draw as `pooled.Cstar_end[m]` in every
+  Stage-2 `8j_s2_*` file, so this needs **no Stage-1 reload/refit** — just eigvals of the stored matrices.
+  Uses the `n_post` distinct Stage-1 C* matrices (contact structure is NGM-independent, Stage-1 only),
+  not the pooled Np draws.
+- **Gotcha carried over**: plot the real Date-bearing series BEFORE the `hline!(1.0)` reference, else the
+  numeric axis locks in first and mangles the date ticks (same as `plot_reproduction`). Reference anchor =
+  first forecast origin was the user's explicit choice (vs earliest fit week / per-window re-anchoring).
+- **Observed model-free line 2026-07-13 (user request)**: added ONE extra line to the relative-contact
+  figure = the RAW observed weekly mean-contact matrix's relative R, `ρ(emean_t)/ρ(emean_first origin)`,
+  with NO GP / NO reciprocity / NO fit. `emean` is already computed by `prepare_degree_data` (the observed
+  per-cell mean incl. zeros, `AgePairData.emp_mean[t,i,j]`), so the observed line just eigen-decomposes
+  `emp_mean[end,:,:]` of the SAME horizon-h window (`WeeklyWindow(origin+7h)`, same `cfg.seed`) the Stage-1
+  fit uses — guaranteeing its week/binning matches the model's `Cstar_end`. `observed_contact_reproduction_over_time`
+  (+ cached `_or_load`, cache `9j_obsrt_<contacts>_h<h>.jld2`) in `9j_viz_utils.jl`; overlaid via the new
+  `observed=` kwarg of `plot_relative_contact_reproduction` as a black step (`:steppost`, matching the four
+  fitted step curves; black diamonds set it apart). It's the data-only baseline the fitted C* curves smooth.

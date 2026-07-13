@@ -43,7 +43,7 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gsar-cut-sc-sm",
+                              contacts::AbstractString = "temporal-gsar-cut-sc",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -150,7 +150,7 @@ order, so column `d` pairs with μ's draw `d`).
 - Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
 - NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
 
-Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc-sm"`
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc"`
 chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
 `week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
 regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
@@ -159,7 +159,7 @@ missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE w
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
                                       weighted::Bool,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gsar-cut-sc-sm",
+                                      contacts::AbstractString = "temporal-gsar-cut-sc",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing

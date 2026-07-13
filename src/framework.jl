@@ -96,9 +96,8 @@ Base.@kwdef struct FrameworkConfig
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
-    # --- shared-length-scale RBF GP smoothing of the relative susc/inf age profile (Stage-2 transmission block) ---
-    susc_inf_gp_len_prior::Tuple{Float64,Float64} = (log(1.5), 0.5) # log-ρ_si Normal(μ,σ), age-BIN units; ONE squared-exponential length-scale SHARED by both relative susc & inf offset vectors. Softclamped [log0.5,log6]: ρ_si≈1.5 bins ⇒ neighbour corr≈0.80, 2-apart≈0.41. K has unit diagonal ⇒ per-bin marginal SD unchanged (=sig_s/sig_i), so this only correlates neighbouring bins and preserves the marginal calibration. ρ_si→0 ⇒ iid (rough); ρ_si large ⇒ near-flat shared shape. Reverted 2026-07-12 from the RW1/RW2 experiment back to this stationary GP.
-    susc_inf_gp_sd_prior::Tuple{Float64,Float64} = (0.1, 0.05) # N⁺(mean,sd) marginal-SD prior for the susc/inf GP offset sig·(Lsi·z); used SEPARATELY by sig_s (susc) and sig_i (inf) — two distinct latents, one shared prior form. TIGHTENED 2026-07-12 to N⁺(0.1,0.05²) (from the GP-era N⁺(0.2,0.1²)) carrying over the recent "susc/inf age variation is empirically small" intent: marginal SD ≈0.1 ⇒ typical susc/inf ≈[0.80,1.25] at ±2 SD, adjacent-bin ratio ≈1.15× at ±2 SD (well <2×). The GP is STATIONARY, so this SD holds at ALL bins (far-field oldest bin no looser than near-reference — the RW2 far-field diffuseness is gone). Soft-clamp [log0.2,log5] hard-bounds susc/inf ∈ [0.2,5].
+    # --- independent per-bin marginal SD of the relative susc/inf age profile (Stage-2 transmission block; NO cross-bin smoothing) ---
+    susc_inf_sd_prior::Tuple{Float64,Float64} = (0.1, 0.05) # N⁺(mean,sd) marginal-SD prior for the susc/inf offset sig·z (INDEPENDENT per age bin — the shared-length-scale RBF GP `sig·(Lsi·z)` was removed 2026-07-13, user request); used SEPARATELY by sig_s (susc) and sig_i (inf) — two distinct latents, one shared prior form. N⁺(0.1,0.05²) ⇒ marginal SD ≈0.1 ⇒ typical susc/inf ≈[0.80,1.25] at ±2 SD. Soft-clamp [log0.2,log5] hard-bounds susc/inf ∈ [0.2,5]. (The `susc_inf_gp_len_prior` length-scale field was dropped with the GP.)
 end
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
@@ -113,15 +112,13 @@ feeds the NGM at its raw level and the transmissibility scalar is again the per-
 Pathfinder draw can't blow the NGM up); it changes the Stage-2 posterior, so the pre-`-sc` `8j_s2_*`
 files carry unclamped susc/inf and must not be reused. The `-cut` artefacts (`8j_s1_*`/`8j_s2_*`) are
 structurally disjoint from the single-file `-gnorm` joint chains (`8j_chn_*`, differently-scaled
-`log_gamma`), so nothing reloads the stale ones. The `-sm` suffix (2026-07-12) marks the Stage-2
-**shared-length-scale RBF GP smoothing** of the relative susc/inf profile (a squared-exponential GP
-over the age-bin axis with ONE length-scale ρ_si shared by susc & inf and SEPARATE marginal scales
-sig_s/sig_i) — it changes only the Stage-2 posterior, NOT Stage 1, so the existing `8j_s1_*` chains
-were RENAMED `-sc`→`-sc-sm` on disk (Stage-1 is unchanged, so they are reused as-is, not refit); pre-`-sm`
-`8j_s2_*` pooled files carry differently-smoothed susc/inf and must not be reused. (`-sm` is a
-mechanism-agnostic "smoothing" marker: it covered the earlier RW1/RW2 experiment and now this GP, so the tag is
-unchanged and the renamed Stage-1 chains need no further rename.)"""
-contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc-sm" : "temporal-gsar-cut-sc-sm"
+`log_gamma`), so nothing reloads the stale ones. (The `-sm` suffix, 2026-07-12, formerly marked the
+Stage-2 susc/inf smoothing — first RW1/RW2, then a shared-length-scale RBF GP — and was RETIRED
+2026-07-13 when the smoothing was removed (user request), reverting the tag to `-sc`. Because the
+smoothing lived only in Stage 2, the existing `8j_s1_*` Stage-1 chains were renamed `-sc-sm`→`-sc` on
+disk and reused as-is, not refit; the smoothed `8j_s2_*` pooled files were stale and are regenerated
+under `-sc`.)"""
+contacts_label(cfg::FrameworkConfig) = cfg.constant_contacts ? "pooled-gsar-cut-sc" : "temporal-gsar-cut-sc"
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).

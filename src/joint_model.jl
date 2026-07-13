@@ -293,30 +293,19 @@ end
     # still caps a stray Stage-2 Pathfinder draw that would otherwise send `σ·z` to ±100 → `exp` ~1e8 →
     # supercritical/Inf NGM. Prior mass ⊂ clamp ⇒ real profiles interior and undistorted (mirrors κ/γ_SAR).
     #
-    # SHARED-LENGTH-SCALE RBF GP SMOOTHING (2026-07-12; reverted here from the RW1/RW2 experiment back
-    # to this form): the A-1 non-reference offsets get a squared-exponential GP prior over the age-bin
-    # axis with ONE length-scale ρ_si (age-bin units) SHARED by BOTH susc and inf. The offset becomes
-    # `sig·(Lsi·z)`, Lsi = chol(K(ρ_si)). K has UNIT DIAGONAL ⇒ each bin's marginal SD is unchanged
-    # (= sig), so the [0.67,1.49]/[0.2,5] calibration above is preserved — this only correlates
-    # NEIGHBOURING bins (ρ_si→0 ⇒ iid/rough; ρ_si large ⇒ near-flat shared shape). Only the length-scale
-    # is shared; sig_s/sig_i and z_s/z_i differ between susc and inf. Unlike RW1/RW2, the GP is
-    # STATIONARY — the marginal SD is constant across age, so the far-field oldest bin is no looser than
-    # the near-reference bins (adjacent-bin susc/inf ratio ≈1.15× at ±2 SD, ρ_si≈1.5, well under 2×).
-    log_rho_si ~ Normal(cfg.susc_inf_gp_len_prior[1], cfg.susc_inf_gp_len_prior[2])
-    ρ_si = exp(_softclamp(log_rho_si, log(0.5), log(6.0)))   # age-bin length-scale, soft-bounded
-    Ksi = [exp(-((m - n)^2) / (2 * ρ_si^2)) for m in 1:(A - 1), n in 1:(A - 1)]
-    # jitter 1e-4 (not 1e-6): at the upper clamp K is near rank-1 (few bins, near-flat) and the
-    # Pathfinder fit is NOT try/caught, so a PosDefException would abort the whole Stage-2 fit
-    # (tasks/lessons.md 2026-07-11; mirrors the Kt temporal kernel in model_degree).
-    Lsi = Matrix(cholesky(Symmetric(Ksi) + 1e-4 * I).L)     # DENSE (see model_degree Lp note)
+    # NO CROSS-BIN SMOOTHING (2026-07-13, user request): the A-1 non-reference offsets are INDEPENDENT
+    # per age bin — `sig·z` with z ~ iid Normal(0,1). The shared-length-scale RBF GP (`log_rho_si`,
+    # `Ksi`, `Lsi`, offset `sig·(Lsi·z)`) that previously correlated neighbouring bins was removed; only
+    # the marginal-SD prior `sig_s`/`sig_i` and the soft-clamp remain, so the [0.80,1.25]/[0.2,5]
+    # calibration above is unchanged (the GP had unit diagonal ⇒ dropping it leaves per-bin SD = sig).
+    # See tasks/lessons.md 2026-07-13 (and the GP→RW1→RW2→GP history before it).
+    sig_s ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), independent
+    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.2), log(5.0))))  # susc[1]=1; ∈ [0.2,5.0]
 
-    sig_s ~ truncated(Normal(cfg.susc_inf_gp_sd_prior[1], cfg.susc_inf_gp_sd_prior[2]); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), smoothed by Lsi
-    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* (Lsi * z_s), log(0.2), log(5.0))))  # susc[1]=1; ∈ [0.2,5.0]
-
-    sig_i ~ truncated(Normal(cfg.susc_inf_gp_sd_prior[1], cfg.susc_inf_gp_sd_prior[2]); lower = 0)
+    sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
     z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* (Lsi * z_i), log(0.2), log(5.0))))   # inf[1]=1;  ∈ [0.2,5.0]
+    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.2), log(5.0))))   # inf[1]=1;  ∈ [0.2,5.0]
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)

@@ -27,7 +27,7 @@ Cached Stage-1 GP-chain filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horiz
 ngm token is dropped (Stage 1 is NGM-independent), so both builders of a degree family share it.
 """
 function stage1_chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                           contacts::AbstractString = "temporal-gsar-cut-sc-sm",
+                           contacts::AbstractString = "temporal-gsar-cut-sc",
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, _ = split(lbl, "|")
     joinpath(save_dir, "8j_s1_$(deg)_$(contacts)_$(origin)_h$(h).jld2")
@@ -39,7 +39,7 @@ end
 Cached Stage-2 pooled-result filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horizon `h`.
 """
 function stage2_pooled_path(lbl::AbstractString, origin::Date, h::Integer;
-                            contacts::AbstractString = "temporal-gsar-cut-sc-sm",
+                            contacts::AbstractString = "temporal-gsar-cut-sc",
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
     joinpath(save_dir, "8j_s2_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
@@ -73,7 +73,7 @@ secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **S
 Returns `nothing` when either file is missing/unreadable (skipped origin×combo).
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "temporal-gsar-cut-sc-sm",
+                                 contacts::AbstractString = "temporal-gsar-cut-sc",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     s2p = stage2_pooled_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     s1p = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
