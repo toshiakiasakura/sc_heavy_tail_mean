@@ -282,8 +282,8 @@ end
     # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated),
     # so `z_s`/`z_i` have length A-1. NGM index convention: susc on susceptible row a, inf on
     # infectious column b (Munday Eq 3).
-    log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.27), WIDENED to 90% γ_SAR∈[0.05,1.5]
-    gamma_sar = exp(_softclamp(log_gamma_sar, log(0.02), log(5.0)))         # secondary attack rate, soft-bounded
+    log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.1), LOOSENED to 90% γ_SAR∈[0.0052,1.93]
+    gamma_sar = exp(_softclamp(log_gamma_sar, log(0.001), log(10.0)))       # secondary attack rate, soft-bounded to [0.001,10] (was [0.02,5]; low bound was pinning negbin|neighbourhood ~0.021)
 
     # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
     # is a looser safety bound. Age variation in inherent susceptibility/infectivity is empirically

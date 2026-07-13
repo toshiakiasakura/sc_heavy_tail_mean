@@ -151,3 +151,35 @@ function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win
     end
     return R
 end
+
+"""
+    contact_reproduction_draws(dm, nb, cfg, win; h=1, save_dir) -> Vector{Float64} | nothing
+
+Per-Stage-1-draw **contact-only** reproduction number: the dominant eigenvalue of the origin-week
+contact matrix `C*` ALONE — `ρ(C*) = max real(eigvals(Cstar_end[m]))` — dropping γ_SAR,
+susceptibility, infectivity and antibody entirely (unlike `reproduction_draws`, which diagonalises
+the full NGM). Reloads the cached **Stage-2 pooled** file read-only and uses its stored `Cstar_end`
+(the same origin-week C* the forecast NGM is frozen at), so **no Stage-1 refit/reload** is needed.
+`C*` is nonnegative ⇒ its Perron root is real & positive. Returns the `n_post` distinct Stage-1 C*
+spectral radii (contact structure depends only on Stage 1), or `nothing` if the file is missing.
+Feed to `relative_contact_reproduction_over_time` to normalise against a reference origin.
+"""
+function contact_reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, cfg, win;
+                                    h::Integer = 1,
+                                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    path = stage2_pooled_path(lbl, win.origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    isfile(path) || return nothing
+    pooled = try
+        load(path, "pooled")
+    catch err
+        @warn "could not load pooled result for contact reproduction number" path err
+        return nothing
+    end
+    M = pooled.n_post
+    ρ = Vector{Float64}(undef, M)
+    for m in 1:M
+        ρ[m] = maximum(real(eigvals(pooled.Cstar_end[m])))   # Perron root of the bare C*
+    end
+    return ρ
+end

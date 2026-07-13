@@ -426,6 +426,115 @@ function plot_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
     return fig
 end
 
+# ── Relative contact reproduction number: ρ(C*) / ρ(C*_ref), contacts only ────────────
+"""
+    relative_contact_reproduction_over_time(combos, labels4, wins, cfg; grid, h, save_dir, verbose)
+        -> Dict(label => (; med, lo, hi))
+
+For each forecast origin and model, the median and 90% band of the **relative contact reproduction
+number** `ρ(C*_origin) / ρ(C*_ref)`, where `ρ(C*)` is the dominant eigenvalue of the origin-week
+contact matrix alone (`contact_reproduction_draws` — no γ_SAR/susc/inf/antibody) and the reference is
+the **first forecast origin** (`wins[1]`). Each origin's per-draw ρ is divided by the reference
+origin's *median* ρ (the reference window is the fixed anchor), so every model's curve passes through
+1.0 at the first origin. Contact-only ⇒ isolates how contact structure alone drove transmissibility
+relative to the baseline week. Reads the Stage-2 pooled files directly — read-only, no re-fit.
+"""
+function relative_contact_reproduction_over_time(combos, labels4, wins, cfg;
+                                                 grid = cis_age_grid(),
+                                                 h::Integer = 1,
+                                                 save_dir::AbstractString = "../dt_intermediate",
+                                                 verbose::Bool = true)
+    nO = length(wins)
+    # pass 1: raw per-draw spectral radii ρ(C*) per origin per label (nothing where a file is missing)
+    raw_rho = Dict(l => Vector{Union{Nothing,Vector{Float64}}}(nothing, nO) for l in labels4)
+    t0 = time()
+    for (oi, win_o) in enumerate(wins)
+        for ((dm, nb), lbl) in zip(combos, labels4)
+            ρ = contact_reproduction_draws(dm, nb, cfg, win_o; h = h, save_dir = save_dir)
+            ρ === nothing && continue
+            raw_rho[lbl][oi] = ρ
+        end
+        verbose && (oi % 5 == 0 || oi == nO) &&
+            println("  contact R(t) origin $oi/$nO (", win_o.origin, ")  elapsed ",
+                    round(Int, time() - t0), "s")
+    end
+    # pass 2: per label, anchor to the first origin with finite data, then normalise
+    store = Dict(l => (med = fill(NaN, nO), lo = fill(NaN, nO), hi = fill(NaN, nO)) for l in labels4)
+    for lbl in labels4
+        ref = NaN
+        for oi in 1:nO
+            r = raw_rho[lbl][oi]
+            if r !== nothing && isfinite(median(r)) && median(r) > 0
+                ref = median(r)
+                break
+            end
+        end
+        isfinite(ref) || continue
+        for oi in 1:nO
+            r = raw_rho[lbl][oi]
+            r === nothing && continue
+            rel = r ./ ref
+            store[lbl].med[oi] = median(rel)
+            store[lbl].lo[oi]  = quantile(rel, 0.05)
+            store[lbl].hi[oi]  = quantile(rel, 0.95)
+        end
+    end
+    return store
+end
+
+"""
+    relative_contact_reproduction_over_time_or_load(combos, labels4, wins, cfg; grid, h, save_dir,
+                                                    cache_path, rebuild, verbose) -> store
+
+Cached wrapper around `relative_contact_reproduction_over_time`, caching its `store` to
+`dt_intermediate/9j_relrt_<contacts>_h<h>.jld2` with the same origins/labels self-invalidation as
+`reproduction_over_time_or_load` (distinct filename ⇒ no clash with the `9j_rt_*` full-R cache).
+"""
+function relative_contact_reproduction_over_time_or_load(combos, labels4, wins, cfg;
+        grid = cis_age_grid(), h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
+        cache_path::AbstractString = joinpath(save_dir, "9j_relrt_$(contacts_label(cfg))_h$(h).jld2"),
+        rebuild::Bool = false, verbose::Bool = true)
+    origins = [w.origin for w in wins]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        if c["origins"] == origins && c["labels"] == labels4
+            println("contact R(t): loaded cache ", cache_path)
+            return c["store"]
+        end
+        @warn "contact R(t) cache stale (origins/labels changed) — rebuilding" cache_path
+    end
+    store = relative_contact_reproduction_over_time(combos, labels4, wins, cfg;
+                                                    grid = grid, h = h, save_dir = save_dir, verbose = verbose)
+    jldsave(cache_path; store, origins, labels = labels4, h)
+    return store
+end
+
+"""
+    plot_relative_contact_reproduction(store, labels4, model_cols, origins; h) -> Plot
+
+Relative contact reproduction number over time — `ρ(C*)/ρ(C*_ref)` (contacts only, reference = first
+origin). Same step-function/90%-ribbon layout and x-axis as `plot_reproduction`, so the two panels
+line up side by side; the anchor is a dashed line at 1.0. No national-R overlay and no fixed `ylims`
+(a contacts-only ratio is not comparable to the observed absolute R).
+"""
+function plot_relative_contact_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
+    x = week_mid.(origins .+ Day(7 * h))   # same contact-week x as plot_reproduction, so panels align
+    fig = plot(; xlabel = "contact week (origin + $(h) wk)",
+               ylabel = "relative contact R  (ρ(C*) / ρ(C*_ref))",
+               title = "9j — relative contact reproduction number (contacts only; ref = first origin; 90% CI)",
+               size = (950, 520), legend = :topleft, xrotation = 45)
+    # Real Date-bearing series FIRST (establish the date axis), then the reference hline — same
+    # date-tick gotcha as plot_reproduction.
+    for (ci, lbl) in enumerate(labels4)
+        s = store[lbl]
+        plot!(fig, x, s.med; color = model_cols[ci], lw = 1.8, linetype = :steppost,
+              marker = :circle, ms = 2, ribbon = (s.med .- s.lo, s.hi .- s.med),
+              fillalpha = 0.12, label = lbl)
+    end
+    hline!(fig, [1.0]; color = :gray, ls = :dash, label = "reference (first origin)")
+    return fig
+end
+
 # ══ 8j-style diagnostic figures (reproduced in 9j) ═════════════════════════════════════
 # WIS skill, forecast fans and fitted transmission structure — same titles / `res/8j_*.png`
 # output names as the 8j notebook, moved here so the 9j cells are one-line `save_show` calls.
