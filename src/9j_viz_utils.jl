@@ -510,14 +510,85 @@ function relative_contact_reproduction_over_time_or_load(combos, labels4, wins, 
 end
 
 """
-    plot_relative_contact_reproduction(store, labels4, model_cols, origins; h) -> Plot
+    observed_contact_reproduction_over_time(wins, cfg; grid, raw, h, setting, verbose) -> Vector{Float64}
+
+Model-free companion to `relative_contact_reproduction_over_time`: the **observed** relative contact
+reproduction number per origin, `ρ(Ê_t)/ρ(Ê_ref)`, where `Ê_t` is the RAW empirical mean-contact matrix
+(`AgePairData.emp_mean` — the observed mean number of contacts bin `i` reports with bin `j`, incl. zeros)
+for the contact week `origin+h`, taken **directly from the survey data with no GP / no reciprocity
+balancing / no model fit at all**. Uses the same horizon-`h` window (`WeeklyWindow(origin+7h)`) and
+seed the Stage-1 fit uses, so its week/binning matches the model's `Cstar_end` exactly. `ρ` is the
+dominant (Perron) eigenvalue of the nonnegative matrix; the series is anchored to the first origin with
+finite, positive `ρ` (=1.0 there), like the model lines. One number per origin (no band — it is a point
+estimate from the data). Pass `raw = load_raw_contact_inputs()` to reuse the single CoMix read.
+"""
+function observed_contact_reproduction_over_time(wins, cfg;
+        grid = cis_age_grid(), raw, h::Integer = 1, setting::Symbol = :all,
+        verbose::Bool = true)
+    nO = length(wins)
+    ρ  = fill(NaN, nO)
+    t0 = time()
+    for (oi, win_o) in enumerate(wins)
+        win_h = WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit,
+                             smax = cfg.smax, horizons = cfg.horizons)
+        apd = prepare_degree_data(win_h, cfg; grid = grid, setting = setting,
+                                  df_part_raw = raw.df_part, craw_raw = raw.craw)
+        E = apd.emp_mean[end, :, :]              # observed mean-contact matrix at week origin+h
+        ρ[oi] = maximum(real(eigvals(E)))        # Perron root of the raw observed contact matrix
+        verbose && (oi % 5 == 0 || oi == nO) &&
+            println("  obs contact R(t) origin $oi/$nO (", win_o.origin, ")  elapsed ",
+                    round(Int, time() - t0), "s")
+    end
+    ref = NaN
+    for oi in 1:nO
+        if isfinite(ρ[oi]) && ρ[oi] > 0
+            ref = ρ[oi]; break
+        end
+    end
+    return isfinite(ref) ? ρ ./ ref : ρ
+end
+
+"""
+    observed_contact_reproduction_over_time_or_load(wins, cfg; grid, raw, h, setting, save_dir,
+                                                    cache_path, rebuild, verbose) -> Vector{Float64}
+
+Cached wrapper around `observed_contact_reproduction_over_time`, caching the observed relative-R series
+to `dt_intermediate/9j_obsrt_<contacts>_h<h>.jld2` (distinct filename ⇒ no clash with `9j_rt_*` /
+`9j_relrt_*`). Self-invalidates when `origins` change; `rebuild=true` forces a fresh compute.
+"""
+function observed_contact_reproduction_over_time_or_load(wins, cfg;
+        grid = cis_age_grid(), raw, h::Integer = 1, setting::Symbol = :all,
+        save_dir::AbstractString = "../dt_intermediate",
+        cache_path::AbstractString = joinpath(save_dir, "9j_obsrt_$(contacts_label(cfg))_h$(h).jld2"),
+        rebuild::Bool = false, verbose::Bool = true)
+    origins = [w.origin for w in wins]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        if c["origins"] == origins
+            println("obs contact R(t): loaded cache ", cache_path)
+            return c["rel"]
+        end
+        @warn "obs contact R(t) cache stale (origins changed) — rebuilding" cache_path
+    end
+    rel = observed_contact_reproduction_over_time(wins, cfg; grid = grid, raw = raw,
+                                                  h = h, setting = setting, verbose = verbose)
+    jldsave(cache_path; rel, origins, h)
+    return rel
+end
+
+"""
+    plot_relative_contact_reproduction(store, labels4, model_cols, origins; h, observed) -> Plot
 
 Relative contact reproduction number over time — `ρ(C*)/ρ(C*_ref)` (contacts only, reference = first
-origin). Same step-function/90%-ribbon layout and x-axis as `plot_reproduction`, so the two panels
-line up side by side; the anchor is a dashed line at 1.0. No national-R overlay and no fixed `ylims`
-(a contacts-only ratio is not comparable to the observed absolute R).
+origin). Same step-function/90%-ribbon layout and x-axis as `plot_reproduction`; the anchor is a dashed
+line at 1.0. No national-R overlay and no fixed `ylims` (a contacts-only ratio is not comparable to the
+observed absolute R). Pass `observed` (from `observed_contact_reproduction_over_time`) to overlay a
+single model-free line built from the RAW weekly observed mean-contact matrices (`emean`, no GP / no
+model estimate) — same first-origin anchor, drawn as a black step (matching the model curves, black
+diamonds to set it apart).
 """
-function plot_relative_contact_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
+function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
+                                            h::Integer = 1, observed = nothing)
     x = week_mid.(origins .+ Day(7 * h))   # same contact-week x as plot_reproduction, so panels align
     fig = plot(; xlabel = "contact week (origin + $(h) wk)",
                ylabel = "relative contact R  (ρ(C*) / ρ(C*_ref))",
@@ -530,6 +601,12 @@ function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
         plot!(fig, x, s.med; color = model_cols[ci], lw = 1.8, linetype = :steppost,
               marker = :circle, ms = 2, ribbon = (s.med .- s.lo, s.hi .- s.med),
               fillalpha = 0.12, label = lbl)
+    end
+    if observed !== nothing
+        # model-free observed weekly means, as a step (matching the model curves); black diamonds
+        # keep it distinguishable from the four coloured fitted C* steps.
+        plot!(fig, x, observed; color = :black, lw = 2.2, ls = :solid, linetype = :steppost,
+              marker = :diamond, ms = 3, label = "observed weekly means (raw)")
     end
     hline!(fig, [1.0]; color = :gray, ls = :dash, label = "reference (first origin)")
     return fig
