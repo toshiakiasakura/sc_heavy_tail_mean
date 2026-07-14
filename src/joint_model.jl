@@ -286,26 +286,28 @@ end
     gamma_sar = exp(_softclamp(log_gamma_sar, log(0.001), log(10.0)))       # secondary attack rate, soft-bounded to [0.001,10] (was [0.02,5]; low bound was pinning negbin|neighbourhood ~0.021)
 
     # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
-    # is a looser safety bound. Age variation in inherent susceptibility/infectivity is empirically
-    # small, so the offset scale `sig ~ N⁺(0.1, 0.05²)` (marginal SD ≈ 0.1 ⇒ ±2 SD ≈ ±0.2 in log ⇒
-    # TYPICAL susc/inf ≈ [0.80, 1.25]). The log-offset soft-clamp [log 0.2, log 5] ≈ [−1.61, +1.61] ⇒
-    # HARD-bounds susc/inf ∈ [0.2, 5.0]: wide enough that realistic profiles never touch it, but it
-    # still caps a stray Stage-2 Pathfinder draw that would otherwise send `σ·z` to ±100 → `exp` ~1e8 →
-    # supercritical/Inf NGM. Prior mass ⊂ clamp ⇒ real profiles interior and undistorted (mirrors κ/γ_SAR).
+    # is a looser safety bound. The offset scale `sig ~ N⁺(0.5, 0.25²)` (LOOSENED 2026-07-13 from
+    # N⁺(0.1,0.05²), user request; marginal SD ≈ 0.5 ⇒ ±2 SD ≈ ±1.0 in log ⇒ TYPICAL susc/inf ≈
+    # [0.37, 2.7]) — wide enough to admit real age variation in inherent susceptibility/infectivity.
+    # The log-offset soft-clamp [log 0.05, log 20] ≈ [−3.0, +3.0] ⇒ HARD-bounds susc/inf ∈ [0.05, 20]
+    # (LOOSENED 2026-07-13 from [log 0.2, log 5], user request — matching the wider prior, and now
+    # re-aligned with the `-sc` cache-token docstring): the prior's ±2 SD is well interior (clamp at
+    # ~±6 SD), so realistic profiles stay off it, but it still caps a stray Stage-2 Pathfinder draw
+    # that would otherwise send `σ·z` to ±100 → `exp` ~1e8 → supercritical/Inf NGM (mirrors κ/γ_SAR).
     #
     # NO CROSS-BIN SMOOTHING (2026-07-13, user request): the A-1 non-reference offsets are INDEPENDENT
     # per age bin — `sig·z` with z ~ iid Normal(0,1). The shared-length-scale RBF GP (`log_rho_si`,
     # `Ksi`, `Lsi`, offset `sig·(Lsi·z)`) that previously correlated neighbouring bins was removed; only
-    # the marginal-SD prior `sig_s`/`sig_i` and the soft-clamp remain, so the [0.80,1.25]/[0.2,5]
-    # calibration above is unchanged (the GP had unit diagonal ⇒ dropping it leaves per-bin SD = sig).
+    # the marginal-SD prior `sig_s`/`sig_i` and the soft-clamp remain, so the [0.37,2.7]/[0.05,20]
+    # calibration above is per-bin (the GP had unit diagonal ⇒ dropping it leaves per-bin SD = sig).
     # See tasks/lessons.md 2026-07-13 (and the GP→RW1→RW2→GP history before it).
     sig_s ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
     z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), independent
-    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.2), log(5.0))))  # susc[1]=1; ∈ [0.2,5.0]
+    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0))))  # susc[1]=1; ∈ [0.05,20]
 
     sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
     z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.2), log(5.0))))   # inf[1]=1;  ∈ [0.2,5.0]
+    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0))))   # inf[1]=1;  ∈ [0.05,20]
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
