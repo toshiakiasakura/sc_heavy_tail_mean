@@ -424,10 +424,10 @@ $$
 \begin{aligned}
 \log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.33,\, 0.56^2), &&
 \gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.02,\log 5)),\\
-\sigma_s &\sim \mathcal N^+(0.1, 0.05^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
-\text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.2, \log 5))\big),\\
-\sigma_i &\sim \mathcal N^+(0.1, 0.05^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
-\text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.2, \log 5))\big),\\
+\sigma_s &\sim \mathcal N^+(0.5, 0.25^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
+\text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
+\sigma_i &\sim \mathcal N^+(0.5, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
+\text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
 F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2). & & &
 \end{aligned}
 $$
@@ -438,18 +438,20 @@ directly and is comparable across origins. The prior is calibrated by reading 18
 `temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$ had median
 $0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$, 90% $\gamma_{\mathrm{SAR}}\in[0.13,0.83]$,
 interior to the softclamp $[\log 0.02,\log 5]$. Age variation in inherent susceptibility/infectivity
-is empirically small, so the offset **prior** is tight while the **soft-clamp** is a looser safety
-bound: the offset scale $\sigma_{s,i}\sim\mathcal N^+(0.1,0.05^2)$ (marginal SD $\approx0.1$ ⟹ $\pm2$
-SD $\approx\pm0.2$ in log ⟹ TYPICAL $\text{susc},\text{inf}\in[0.80,1.25]$), and each non-reference
-log-offset $\sigma\,z$ is soft-clamped to $[\log 0.2,\log 5]\approx[-1.61,1.61]$, **hard-bounding**
-$\text{susc},\text{inf}\in[0.2,5.0]$ — wide enough that realistic profiles never touch it, but still
-capping a stray Pathfinder draw's supercritical NGM at the source. Prior mass $\subset$ clamp ⟹
-profiles interior and undistorted. The $A-1$ non-reference offsets are **independent per age bin**
+admits genuine age variation, and the **soft-clamp** is a looser safety bound: the offset scale
+$\sigma_{s,i}\sim\mathcal N^+(0.5,0.25^2)$ (**loosened 2026-07-13 from $\mathcal N^+(0.1,0.05^2)$**;
+marginal SD $\approx0.5$ ⟹ $\pm2$ SD $\approx\pm1.0$ in log ⟹ TYPICAL
+$\text{susc},\text{inf}\in[0.37,2.7]$), and each non-reference
+log-offset $\sigma\,z$ is soft-clamped to $[\log 0.05,\log 20]\approx[-3,3]$ (**also loosened
+2026-07-13 from $[\log 0.2,\log 5]$**), **hard-bounding** $\text{susc},\text{inf}\in[0.05,20]$ — wide
+enough that realistic profiles never touch it (the prior's $\pm2$ SD sits at $\pm1$, clamp at
+$\sim\pm6$ SD), but still capping a stray Pathfinder draw's supercritical NGM at the source. Prior
+mass $\subset$ clamp ⟹ profiles interior and undistorted. The $A-1$ non-reference offsets are **independent per age bin**
 (offset $\sigma\,z$, $z\sim\mathcal N(0,1)^{A-1}$ iid) — **no cross-bin smoothing**. (A
 shared-length-scale squared-exponential GP over the age-bin index, $\sigma\,L_{si}z$, previously
 correlated neighbouring bins; it was **removed 2026-07-13** (user request), along with the length-scale
 latent $\rho_{si}$. Because that kernel had unit diagonal, dropping it leaves each bin's marginal SD
-$=\sigma_{s,i}$ unchanged, so the $[0.80,1.25]$ band and $[0.2,5]$ clamp are preserved — the age
+$=\sigma_{s,i}$ unchanged, so the $[0.37,2.7]$ band and $[0.05,20]$ clamp are preserved — the age
 profile is simply rougher. See the GP→RW1→RW2→GP→none history in `tasks/lessons.md`.)
 Stage 2 returns the generated quantities
 $(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}})$; Stage 1 returns the raw
@@ -638,10 +640,10 @@ the seams at which they would be relaxed:
   baseline-"2-10" form), replacing the old confounded $\mu_s,\mu_i$ level pair; the block is fit as
   **Stage 2** of the cut (§6.0), conditioning on Stage-1 contact draws. The relative offsets are
   **independent per age bin** — offset $\sigma\,z$, $z\sim\mathcal N(0,1)^{A-1}$ iid, with **separately
-  estimated** marginal scales $\sigma_s,\sigma_i\sim\mathcal N^+(0.1,0.05^2)$ — with **no cross-bin
+  estimated** marginal scales $\sigma_s,\sigma_i\sim\mathcal N^+(0.5,0.25^2)$ — with **no cross-bin
   smoothing** (the shared-length-scale squared-exponential GP $\sigma\,L_{si}z$ was removed 2026-07-13,
   user request; ending the GP→RW1→RW2→GP→none sequence), and each log-offset is soft-clamped to
-  $[\log 0.2,\log 5]$ **hard-bounding** susc/inf to $[0.2,5.0]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
+  $[\log 0.05,\log 20]$ **hard-bounding** susc/inf to $[0.05,20]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
   $\Gamma(2,2)T[0,1]$), and infection observation error uses an independence approximation across the week
   and across ages.
 - **Hurdle zero probability** in the weighted path is taken empirically ($p^0$), not fitted.
