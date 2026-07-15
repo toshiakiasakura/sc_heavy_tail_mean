@@ -14,8 +14,8 @@
 # Reference model = `unweighted-negbin|mean` (the "no-interaction" analog); WIS on the LOG
 # scale is the headline (robust — the neighbourhood-NGM natural-scale WIS blows up).
 #
-# Depends on the forecasting framework (`forecast_utils.jl`) and the read-only chain helpers
-# in `8j_viz_utils.jl` (`reproduction_draws`, `chain_path`, …), included below.
+# Depends on the forecasting framework (`forecast_utils.jl`) and the read-only two-stage helpers
+# in `8j_viz_utils.jl` (`reproduction_draws`, `load_transmission_draws`, …), included below.
 
 include("8j_viz_utils.jl")
 
@@ -78,7 +78,7 @@ _relwis(wis, hz, ref_by_h) = wis ./ [get(ref_by_h, h, NaN) for h in hz]
 
 # ── Forecast assembly + on-disk cache ─────────────────────────────────────────────────
 """
-    assemble_or_load_forecasts(wins, combos, cfg; grid, raw, use_nuts, save_dir,
+    assemble_or_load_forecasts(wins, combos, cfg; grid, raw, save_dir,
                                cache_path, rebuild) -> (; qall, fc_store, crps, skipped)
 
 Reload the cached 8j chains for every `origin × combo` and assemble the forecast products
@@ -86,16 +86,15 @@ used downstream: `qall` (long quantile table for WIS scoring), `fc_store`
 (`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `crps`
 (per-origin native CRPS cross-check) and `skipped` (origin×combo pairs whose reload threw).
 
-This loop (`iterated_forecast` → `fit_or_load_chain` → `generated_quantities`, per origin ×
-combo) is the notebook's dominant cost, yet fully determined by the cached chains — so the
-result is **cached to `cache_path`** (JLD2) and reused. The cache stores `origins`/`labels`
+This loop (`two_stage_forecast` → `fit_or_load_stage2` → pooled draws, per origin × combo) is the
+notebook's dominant cost, yet fully determined by the cached Stage-1 chains + Stage-2 pooled files —
+so the result is **cached to `cache_path`** (JLD2) and reused. The cache stores `origins`/`labels`
 alongside the products and is treated as **stale** (rebuilt) if either changed; `rebuild=true`
-forces a fresh reload. Missing chains fall through to `iterated_forecast`'s own re-fit — run
-8j first so the chains exist.
+forces a fresh reload. Missing artefacts fall through to `two_stage_forecast`'s own re-fit — run
+8j first so the Stage-1/Stage-2 files exist.
 """
 function assemble_or_load_forecasts(wins, combos, cfg;
                                     grid = cis_age_grid(), raw,
-                                    use_nuts::Bool = false,
                                     save_dir::AbstractString = "../dt_intermediate",
                                     cache_path::AbstractString =
                                         joinpath(save_dir, "9j_assembly_$(contacts_label(cfg)).jld2"),
@@ -129,9 +128,9 @@ function assemble_or_load_forecasts(wins, combos, cfg;
         for (dm, nb) in combos
             lbl = string(degree_label(dm), "|", ngm_label(nb))
             try   # keep the multi-origin run alive if a single origin×combo reload is pathological
-                fc = iterated_forecast(dm, nb, wd_o, cfg, win_o;
-                                       grid = grid, setting = :all, use_nuts = use_nuts,
-                                       save_dir = save_dir, apd_by_h = apd_o)
+                fc = two_stage_forecast(dm, nb, wd_o, cfg, win_o;
+                                        grid = grid, setting = :all,
+                                        save_dir = save_dir, apd_by_h = apd_o)
                 fc_store[(win_o.origin, lbl)] = fc
                 push!(qtabs, to_quantile_long(fc, truth_o, lbl, win_o, cfg, grid.LAB))
                 push!(crps_rows, (origin = win_o.origin, model = lbl, mean_crps = mean_crps(fc, truth_o)))
@@ -330,15 +329,10 @@ function reproduction_over_time(combos, labels4, wins, cfg;
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o  = load_window_data(win_o; grid = grid)
-        # horizon-h contact window ends at origin+h (contacts observed h wks ahead), matching how
-        # the (origin, h) chain was fit — so generated_quantities' Cstar[end] is coherent.
-        apd_o = prepare_degree_data(
-                    WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
-                                 horizons = cfg.horizons),
-                    cfg; grid = grid, setting = :all,
-                    df_part_raw = raw.df_part, craw_raw = raw.craw)
+        # R reads the Stage-2 pooled file directly (Cstar_end = contacts at origin+h, antibody at
+        # origin) — no degree-data rebuild needed under the two-stage cut.
         for ((dm, nb), lbl) in zip(combos, labels4)
-            R = reproduction_draws(dm, nb, apd_o, wd_o, cfg, win_o; h = h, save_dir = save_dir)
+            R = reproduction_draws(dm, nb, wd_o, cfg, win_o; h = h, save_dir = save_dir)
             R === nothing && continue
             store[lbl].med[oi] = median(R)
             store[lbl].lo[oi]  = quantile(R, 0.05)
@@ -429,6 +423,220 @@ function plot_reproduction(store, labels4, model_cols, origins; h::Integer = 1)
               fillalpha = 0.12, label = lbl)
     end
     hline!(fig, [1.0]; color = :gray, ls = :dash, label = "R = 1")  # threshold, after dates set
+    return fig
+end
+
+# ── Relative contact reproduction number: ρ(C*) / ρ(C*_ref), contacts only ────────────
+"""
+    relative_contact_reproduction_over_time(combos, labels4, wins, cfg; grid, h, save_dir, verbose)
+        -> Dict(label => (; med, lo, hi))
+
+For each forecast origin and model, the median and 90% band of the **relative contact reproduction
+number** `ρ(C*_origin) / ρ(C*_ref)`, where `ρ(C*)` is the dominant eigenvalue of the origin-week
+contact matrix alone (`contact_reproduction_draws` — no γ_SAR/susc/inf/antibody) and the reference is
+the **first forecast origin** (`wins[1]`). Each origin's per-draw ρ is divided by the reference
+origin's *median* ρ (the reference window is the fixed anchor), so every model's curve passes through
+1.0 at the first origin. Contact-only ⇒ isolates how contact structure alone drove transmissibility
+relative to the baseline week. Reads the Stage-2 pooled files directly — read-only, no re-fit.
+"""
+function relative_contact_reproduction_over_time(combos, labels4, wins, cfg;
+                                                 grid = cis_age_grid(),
+                                                 h::Integer = 1,
+                                                 save_dir::AbstractString = "../dt_intermediate",
+                                                 verbose::Bool = true)
+    nO = length(wins)
+    # pass 1: raw per-draw spectral radii ρ(C*) per origin per label (nothing where a file is missing)
+    raw_rho = Dict(l => Vector{Union{Nothing,Vector{Float64}}}(nothing, nO) for l in labels4)
+    t0 = time()
+    for (oi, win_o) in enumerate(wins)
+        for ((dm, nb), lbl) in zip(combos, labels4)
+            ρ = contact_reproduction_draws(dm, nb, cfg, win_o; h = h, save_dir = save_dir)
+            ρ === nothing && continue
+            raw_rho[lbl][oi] = ρ
+        end
+        verbose && (oi % 5 == 0 || oi == nO) &&
+            println("  contact R(t) origin $oi/$nO (", win_o.origin, ")  elapsed ",
+                    round(Int, time() - t0), "s")
+    end
+    # pass 2: per label, anchor to the first origin with finite data, then normalise
+    store = Dict(l => (med = fill(NaN, nO), lo = fill(NaN, nO), hi = fill(NaN, nO)) for l in labels4)
+    for lbl in labels4
+        ref = NaN
+        for oi in 1:nO
+            r = raw_rho[lbl][oi]
+            if r !== nothing && isfinite(median(r)) && median(r) > 0
+                ref = median(r)
+                break
+            end
+        end
+        isfinite(ref) || continue
+        for oi in 1:nO
+            r = raw_rho[lbl][oi]
+            r === nothing && continue
+            rel = r ./ ref
+            store[lbl].med[oi] = median(rel)
+            store[lbl].lo[oi]  = quantile(rel, 0.05)
+            store[lbl].hi[oi]  = quantile(rel, 0.95)
+        end
+    end
+    return store
+end
+
+"""
+    relative_contact_reproduction_over_time_or_load(combos, labels4, wins, cfg; grid, h, save_dir,
+                                                    cache_path, rebuild, verbose) -> store
+
+Cached wrapper around `relative_contact_reproduction_over_time`, caching its `store` to
+`dt_intermediate/9j_relrt_<contacts>_h<h>.jld2` with the same origins/labels self-invalidation as
+`reproduction_over_time_or_load` (distinct filename ⇒ no clash with the `9j_rt_*` full-R cache).
+"""
+function relative_contact_reproduction_over_time_or_load(combos, labels4, wins, cfg;
+        grid = cis_age_grid(), h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
+        cache_path::AbstractString = joinpath(save_dir, "9j_relrt_$(contacts_label(cfg))_h$(h).jld2"),
+        rebuild::Bool = false, verbose::Bool = true)
+    origins = [w.origin for w in wins]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        if c["origins"] == origins && c["labels"] == labels4
+            println("contact R(t): loaded cache ", cache_path)
+            return c["store"]
+        end
+        @warn "contact R(t) cache stale (origins/labels changed) — rebuilding" cache_path
+    end
+    store = relative_contact_reproduction_over_time(combos, labels4, wins, cfg;
+                                                    grid = grid, h = h, save_dir = save_dir, verbose = verbose)
+    jldsave(cache_path; store, origins, labels = labels4, h)
+    return store
+end
+
+"""
+    observed_contact_reproduction_over_time(wins, cfg; grid, raw, h, setting, verbose) -> Vector{Float64}
+
+Model-free companion to `relative_contact_reproduction_over_time`: the **observed** relative contact
+reproduction number per origin, `ρ(Ê_t)/ρ(Ê_ref)`, where `Ê_t` is the RAW empirical mean-contact matrix
+(`AgePairData.emp_mean` — the observed mean number of contacts bin `i` reports with bin `j`, incl. zeros)
+for the contact week `origin+h`, taken **directly from the survey data with no GP / no reciprocity
+balancing / no model fit at all**. Uses the same horizon-`h` window (`WeeklyWindow(origin+7h)`) and
+seed the Stage-1 fit uses, so its week/binning matches the model's `Cstar_end` exactly. `ρ` is the
+dominant (Perron) eigenvalue of the nonnegative matrix; the series is anchored to the first origin with
+finite, positive `ρ` (=1.0 there), like the model lines. One number per origin (no band — it is a point
+estimate from the data). Pass `raw = load_raw_contact_inputs()` to reuse the single CoMix read.
+"""
+function observed_contact_reproduction_over_time(wins, cfg;
+        grid = cis_age_grid(), raw, h::Integer = 1, setting::Symbol = :all,
+        verbose::Bool = true)
+    nO = length(wins)
+    ρ  = fill(NaN, nO)
+    t0 = time()
+    for (oi, win_o) in enumerate(wins)
+        win_h = WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit,
+                             smax = cfg.smax, horizons = cfg.horizons)
+        apd = prepare_degree_data(win_h, cfg; grid = grid, setting = setting,
+                                  df_part_raw = raw.df_part, craw_raw = raw.craw)
+        E = apd.emp_mean[end, :, :]              # observed mean-contact matrix at week origin+h
+        ρ[oi] = maximum(real(eigvals(E)))        # Perron root of the raw observed contact matrix
+        verbose && (oi % 5 == 0 || oi == nO) &&
+            println("  obs contact R(t) origin $oi/$nO (", win_o.origin, ")  elapsed ",
+                    round(Int, time() - t0), "s")
+    end
+    ref = NaN
+    for oi in 1:nO
+        if isfinite(ρ[oi]) && ρ[oi] > 0
+            ref = ρ[oi]; break
+        end
+    end
+    return isfinite(ref) ? ρ ./ ref : ρ
+end
+
+"""
+    observed_contact_reproduction_over_time_or_load(wins, cfg; grid, raw, h, setting, save_dir,
+                                                    cache_path, rebuild, verbose) -> Vector{Float64}
+
+Cached wrapper around `observed_contact_reproduction_over_time`, caching the observed relative-R series
+to `dt_intermediate/9j_obsrt_<contacts>_h<h>.jld2` (distinct filename ⇒ no clash with `9j_rt_*` /
+`9j_relrt_*`). Self-invalidates when `origins` change; `rebuild=true` forces a fresh compute.
+"""
+function observed_contact_reproduction_over_time_or_load(wins, cfg;
+        grid = cis_age_grid(), raw, h::Integer = 1, setting::Symbol = :all,
+        save_dir::AbstractString = "../dt_intermediate",
+        cache_path::AbstractString = joinpath(save_dir, "9j_obsrt_$(contacts_label(cfg))_h$(h).jld2"),
+        rebuild::Bool = false, verbose::Bool = true)
+    origins = [w.origin for w in wins]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        if c["origins"] == origins
+            println("obs contact R(t): loaded cache ", cache_path)
+            return c["rel"]
+        end
+        @warn "obs contact R(t) cache stale (origins changed) — rebuilding" cache_path
+    end
+    rel = observed_contact_reproduction_over_time(wins, cfg; grid = grid, raw = raw,
+                                                  h = h, setting = setting, verbose = verbose)
+    jldsave(cache_path; rel, origins, h)
+    return rel
+end
+
+"""
+    plot_relative_contact_reproduction(store, labels4, model_cols, origins; h, observed) -> Plot
+
+Relative contact reproduction number over time — `ρ(C*)/ρ(C*_ref)` (contacts only, reference = first
+origin). Same step-function/90%-ribbon layout and x-axis as `plot_reproduction`; the anchor is a dashed
+line at 1.0, and the left axis has no fixed `ylims`. Pass `observed` (from
+`observed_contact_reproduction_over_time`) to overlay a single model-free line built from the RAW weekly
+observed mean-contact matrices (`emean`, no GP / no model estimate) — same first-origin anchor, drawn as
+a black step (matching the model curves, black diamonds to set it apart).
+
+`national=true` overlays the inc2prev national R (`national_R`, England) on the **same, shared** axis,
+absolute and unrescaled. The two are **not commensurable** and sharing an axis does not make them so: the
+steps are a dimensionless ratio to the baseline contact week, the red curve is an absolute R. Both happen
+to sit near 1, which is exactly the trap — the single 1.0 line is the baseline week for the steps *and*
+the epidemic threshold for the red curve at once (its label says both). Read the SHAPES against each
+other (does contact-driven transmissibility turn when R turns?); the vertical gap between them means
+nothing. Sharing the axis also squeezes R's ~0.75–1.35 range against the steps' far wider swing — the
+price of one frame, and why `national=false` (a twin axis is the other way out, but it invites reading a
+scaling artifact as agreement; a shared axis at least leaves the conflation visible).
+"""
+function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
+                                            h::Integer = 1, observed = nothing,
+                                            national::Bool = true,
+                                            region::AbstractString = "England")
+    x = week_mid.(origins .+ Day(7 * h))   # same contact-week x as plot_reproduction, so panels align
+    fig = plot(; xlabel = "contact week (origin + $(h) wk)",
+               # Keep the shared-axis label SHORT: rotated 90° it is measured against the axis
+               # HEIGHT, and anything much past the original's ~39 chars clips off the top.
+               ylabel = national ? "ρ(C*)/ρ(C*_ref)  &  R  — MIXED UNITS" :
+                                   "relative contact R  (ρ(C*) / ρ(C*_ref))",
+               title = "9j — relative contact reproduction number (contacts only; ref = first origin; 90% CI)",
+               size = (950, 520), legend = :topleft, xrotation = 45)
+    # Real Date-bearing series FIRST (establish the date axis), then the reference hline — same
+    # date-tick gotcha as plot_reproduction.
+    for (ci, lbl) in enumerate(labels4)
+        s = store[lbl]
+        plot!(fig, x, s.med; color = model_cols[ci], lw = 1.8, linetype = :steppost,
+              marker = :circle, ms = 2, ribbon = (s.med .- s.lo, s.hi .- s.med),
+              fillalpha = 0.12, label = lbl)
+    end
+    if observed !== nothing
+        # model-free observed weekly means, as a step (matching the model curves); black diamonds
+        # keep it distinguishable from the four coloured fitted C* steps.
+        plot!(fig, x, observed; color = :black, lw = 2.2, ls = :solid, linetype = :steppost,
+              marker = :diamond, ms = 3, label = "observed weekly means (raw)")
+    end
+    # Shared axis, absolute and unrescaled — see the docstring: the units are mixed on purpose.
+    # Daily (not :steppost) and unmarked, so the smooth red curve reads as the external reference it
+    # is rather than as a fifth step function.
+    natR = national ? national_R(; region = region, d0 = first(x), d1 = last(x)) : nothing
+    drew_nat = natR !== nothing && !isempty(natR.date)
+    if drew_nat
+        plot!(fig, natR.date, natR.med; color = :firebrick, lw = 2,
+              ribbon = (natR.med .- natR.lo, natR.hi .- natR.med), fillalpha = 0.10,
+              label = "inc2prev national R ($(region)) — ABSOLUTE, different quantity")
+    end
+    # ONE line at 1.0 doing two jobs once the axis is shared: baseline week for the steps, epidemic
+    # threshold for the red curve. Spell both out — the coincidence is the figure's main trap.
+    hline!(fig, [1.0]; color = :gray, ls = :dash,
+           label = drew_nat ? "1.0 — baseline week (steps) & R = 1 (inc2prev)" :
+                              "reference (first origin)")
     return fig
 end
 
@@ -527,9 +735,13 @@ end
 Forecast vs observed at `n` evenly-spaced origins. Each panel: one observed series (the
 fit-week history ++ the realized target weeks) overlaid with the four configs' total-infection
 forecast fans (median + 90% band). Reloads window/truth data for the selected origins.
+
+The tile grid and figure size are DERIVED from the panel count (`pick_origins` clamps it to
+`min(n, length(wins))`), so `n` is a free knob: a hard-coded `layout` throws
+`When doing layout, n (…) < n_override (…)` the moment `n` exceeds it.
 """
 function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
-                              grid = cis_age_grid(), n::Integer = 9)
+                              grid = cis_age_grid(), n::Integer = 15)
     origins = [w.origin for w in wins]
     sel = pick_origins(origins; n = n)
     qs_lo, qs_hi = 0.05, 0.95
@@ -552,46 +764,65 @@ function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
         for (ci, lbl) in enumerate(labels4)
             haskey(fc_store, (origin, lbl)) || continue      # skipped origin×combo → gap
             tot = dropdims(sum(fc_store[(origin, lbl)]; dims = 1); dims = 1)   # H × draws
-            med = [median(tot[h, :]) for h in 1:H]
-            lo  = [quantile(tot[h, :], qs_lo) for h in 1:H]
-            hi  = [quantile(tot[h, :], qs_hi) for h in 1:H]
+            med = [_fmed(tot[h, :]) for h in 1:H]                              # finite-robust (fan may be ±Inf)
+            lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+            hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
             plot!(p, x_fore, med; color = model_cols[ci], lw = 1.6,
                   ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = (pi == 1 ? lbl : ""))
         end
         push!(panels, p)
     end
-    return plot(panels...; layout = (3, 3), size = (1300, 1000),
+    # Tile grid from the panel count: floor(√)-cols / ceil-rows favours a tall grid
+    # (9 → 3×3, 12 → 4×3, 15 → 5×3). 430×330 per cell keeps 9 at the former 1300×1000 figure.
+    np   = length(panels)
+    ncol = max(1, floor(Int, sqrt(np)))
+    nrow = ceil(Int, np / ncol)
+    return plot(panels...; layout = (nrow, ncol), size = (430 * ncol, 330 * nrow),
                 plot_title = "8j — total-infection forecast (four ways) vs observed, by origin (90% band)",
                 plot_titlefontsize = 11)
 end
 
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
-    collect_transmission_structure(labels4, origins; grid, h) -> (; susc, inf, rho, gamma)
+    collect_transmission_structure(labels4, origins; grid, h)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
-cached `h`-chains: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
-(≡ 1 by construction); `rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2
-ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the
-scalar absolute-transmissibility level γ (window-relative). `susc`/`inf` stores are
-`Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`, `gamma` of `nO × 1`;
-missing chains leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
+two-stage artefacts: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
+(≡ 1 by construction); `susc_bin`/`inf_bin` are the same quantity at full per-age-bin
+resolution — every CIS bin against that same pop-weighted 2-15 baseline, so the super-group
+series are pop-weighted averages of these (`plot_ratio` vs `plot_ratio_bins`). Note this is a
+DIFFERENT denominator from the stored draws' own reference (bin 1 "2-10" ≡ 1, the model's
+identification, which 10j's `make_susc_inf_fig` plots against). `rho` holds the three GP
+length-scales (col 1 ρ_diag total-age, col 2 ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks —
+`NaN` for pooled chains); `gamma` holds the per-contact secondary attack rate γ_SAR. Stores are
+`Dict(label => (med, lo, hi))` of `nO × 2` matrices for `susc`/`inf`, `nO × grid.N` for the
+`*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing artefacts leave `NaN` gaps.
+Reuses `load_transmission_draws` + `aggregate_supergroups`.
 """
 function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
     nO = length(origins)
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
     susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
+    susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
         d === nothing && continue
-        for (V, dst) in ((d.susc, susc_store), (d.inf, inf_store))
+        for (V, dst, dstb) in ((d.susc, susc_store, susc_bin_store),
+                               (d.inf,  inf_store,  inf_bin_store))
             sg = aggregate_supergroups(V, grid.POP)      # ndraws × 3 (2-15, 16-49, >50)
             r  = sg[:, 2:3] ./ sg[:, 1]                  # ratios vs 2-15
             for g in 1:2
                 dst[lbl].med[oi, g] = median(r[:, g])
                 dst[lbl].lo[oi, g]  = quantile(r[:, g], 0.05)
                 dst[lbl].hi[oi, g]  = quantile(r[:, g], 0.95)
+            end
+            rb = V ./ sg[:, 1]                           # ndraws × A — each bin vs its own draw's 2-15
+            for a in 1:grid.N
+                dstb[lbl].med[oi, a] = median(rb[:, a])
+                dstb[lbl].lo[oi, a]  = quantile(rb[:, a], 0.05)
+                dstb[lbl].hi[oi, a]  = quantile(rb[:, a], 0.95)
             end
         end
         for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.rho_time))  # ρ_diag,ρ_gap,ρ_time → cols 1,2,3
@@ -600,12 +831,13 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
             rho_store[lbl].hi[oi, g]  = quantile(rv, 0.95)
         end
-        γ = d.γ                                          # scalar-per-draw (not per-age) → no super-groups
+        γ = d.gamma_sar                                  # scalar-per-draw (not per-age) → no super-groups
         gamma_store[lbl].med[oi, 1] = median(γ)
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
     end
-    return (; susc = susc_store, inf = inf_store, rho = rho_store, gamma = gamma_store)
+    return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
+              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store)
 end
 
 """
@@ -629,6 +861,35 @@ function plot_ratio(store, labels4, origins, ttl::AbstractString)
             m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
             plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, label = gnames[g],
                   ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
+        end
+        push!(ps, p)
+    end
+    return plot(ps...; layout = (2, 2), size = (1150, 780), plot_title = ttl, plot_titlefontsize = 11)
+end
+
+"""
+    plot_ratio_bins(store, labels4, origins, ttl; grid) -> Plot
+
+2×2 facet (one panel per config) of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
+`collect_transmission_structure`) — the age-resolved refinement of `plot_ratio`, sharing its
+2-15 baseline so the two figures read against the same 1.0 reference. Median lines only: seven
+overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure.
+"""
+function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = cis_age_grid())
+    cols = palette(:viridis, grid.N)     # age is ordinal → perceptually ordered palette
+    ps = Plots.Plot[]
+    for (k, lbl) in enumerate(labels4)
+        p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
+                 ylabel = "ratio to 2-15", legend = (k == 1 ? :topright : false),
+                 legendfontsize = 5, background_color_legend = RGBA(1, 1, 1, 0.7),
+                 xrotation = 45)
+        # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
+        plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
+        for a in 1:grid.N
+            # markerstrokewidth = 0: the default black 1px stroke swamps a 1.5px marker and hides
+            # the age colour — including in the legend swatches, which is what identifies the lines.
+            plot!(p, origins, store[lbl].med[:, a]; color = cols[a], lw = 1.5,
+                  marker = :circle, ms = 1.5, markerstrokewidth = 0, label = grid.LAB[a])
         end
         push!(ps, p)
     end
@@ -667,21 +928,20 @@ end
 """
     plot_gamma(store, labels4, model_cols, origins; h) -> Plot
 
-Absolute-transmissibility γ over the forecast origins, one line per model config (median + 90%
-ribbon) in a single panel — γ is a scalar-per-draw (one value per model×origin), so unlike
-`plot_ratio` there are no per-age super-groups to facet. `store` is the `gamma` field of
+Per-contact secondary attack rate γ_SAR over the forecast origins, one line per model config
+(median + 90% ribbon) in a single panel — γ_SAR is a scalar-per-draw (one value per model×origin),
+so unlike `plot_ratio` there are no per-age super-groups to facet. `store` is the `gamma` field of
 `collect_transmission_structure` (`Dict(label => (med, lo, hi))` of `nO × 1` matrices).
 
-NOTE: γ is **window-relative** — each window normalises `C*` to unit fit-window mean intensity,
-so γ carries the absolute NGM level *for that window* and its cross-origin level is partly a
-normalisation artefact. Read it as a within-origin level, not a clean temporal trend. γ has no
-natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
+Under the two-stage cut, C* is NOT normalised, so γ_SAR is the per-contact secondary attack rate
+(it reproduces the reference cell N_11 = susc₁·inf₁ directly) and IS comparable across origins.
+γ_SAR has no natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
 """
 function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
-    fig = plot(; xlabel = "forecast origin", ylabel = "γ (absolute transmissibility, window-relative)",
-               title = "8j — absolute transmissibility γ over time by model (h=$h; 90% CI)",
+    fig = plot(; xlabel = "forecast origin", ylabel = "γ_SAR (per-contact secondary attack rate)",
+               title = "8j — secondary attack rate γ_SAR over time by model (h=$h; 90% CI)",
                size = (950, 520), legend = :topright, xrotation = 45)
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]

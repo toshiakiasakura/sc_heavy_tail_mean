@@ -64,6 +64,40 @@ function create_week_df(df_part::DataFrame; start_date::Date = Date(2021, 7, 1),
     return create_chunk_df(df_filt; chunk_days = 7, anchor_date = inc2prev_week_anchor())
 end
 
+"""
+    inc2prev_week_start(d) / inc2prev_week_mid(d)
+
+Snap a date onto the inc2prev-aligned 7-day week grid (Sunday-start, anchored at
+`inc2prev_week_anchor()` = 2021-03-21). `inc2prev_week_start` returns the Sunday
+of the week (the canonical week key that `framework.jl::week_start` /
+`infection_data.jl` bucket inc2prev estimates onto); `inc2prev_week_mid` returns
+the Wednesday label (`week_start + 3`, matching `framework.jl::week_mid`).
+"""
+inc2prev_week_start(d::Date) = (a = inc2prev_week_anchor(); a + Day(fld((d - a).value, 7) * 7))
+inc2prev_week_start(::Missing) = missing
+inc2prev_week_mid(d) = inc2prev_week_start(d) + Day(3)
+inc2prev_week_mid(::Missing) = missing
+
+"""
+    add_inc2prev_week_chunks!(df, df_part)
+
+Annotate the contact table `df` and participant table `df_part` (as returned by
+`read_comix_uk_raw_contacts_and_part`) with inc2prev-aligned 7-day week columns
+`:chunk_start` (Sunday), `:chunk_end` (Saturday) and `:mid_date` (Wednesday label,
+coinciding 1:1 with the inc2prev / framework week grid). Each row's chunk is a
+pure function of its own `:date`, so both tables share identical week labels
+without a join. Downstream `create_df_dds_chunk` / `create_df_dds_chunk_by_settings`
+key off `:mid_date`. Mutates and returns `(df, df_part)`.
+"""
+function add_inc2prev_week_chunks!(df::DataFrame, df_part::DataFrame)
+    for d in (df, df_part)
+        d[!, :chunk_start] = inc2prev_week_start.(d.date)
+        d[!, :chunk_end]   = d.chunk_start .+ Day(6)
+        d[!, :mid_date]    = d.chunk_start .+ Day(3)
+    end
+    return (df, df_part)
+end
+
 function assign_chunk(date, df_chunk)
     df_tmp = @subset(df_chunk, :chunk_start .<= date .<= :chunk_end)
     if nrow(df_tmp) == 0

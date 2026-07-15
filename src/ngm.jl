@@ -1,13 +1,13 @@
 # ngm.jl — build the next-generation matrix from the age-pair contact-degree
 # distribution. The NGM *builder* is the second swap axis (deterministic dispatch).
 #
-#   N_ab(t) = γ · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
+#   N_ab(t) = γ_SAR · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
 #   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
-# γ is the single absolute-transmissibility scalar; susc/inf are RELATIVE, normalised to reference
-# bin 1 ("2-10") = 1. C* is normalised inside `model_joint` to unit fit-window mean contact
-# intensity (`C* → C*/S̄`), so its absolute LEVEL is carried by γ and the NGM sees only C*'s temporal
-# change — decoupling γ from the contact scale (γ ≈ susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*), no longer a per-contact
-# SAR). See joint_model.jl and tasks/lessons.md.
+# γ_SAR is the per-contact secondary attack rate; susc/inf are RELATIVE, normalised to reference
+# bin 1 ("2-10") = 1. C* is NOT normalised (the -gnorm `C* → C*/S̄` decoupling was reverted
+# 2026-07-12, inst/4_cut_Bayes.md), so C* feeds the NGM at its raw (mean/neighbourhood-degree) level
+# and γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. See joint_model.jl
+# and tasks/lessons.md.
 #
 # C*_ab = per-capita effective contacts from bin a to bin b (mean or excess degree).
 # There is NO post-hoc reciprocity symmetrisation: reciprocity is carried entirely by
@@ -52,21 +52,21 @@ function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatri
 end
 
 """
-    build_ngm(Cstar, susc, inf, F, A_col; γ=1.0)
+    build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)
 
 7×7 next-generation matrix for one week from a precomputed `C*`:
-`N_ab = γ · full_susceptibility_a · C*_ab · inf_b`. `γ` is the absolute transmissibility scalar
-(susc/inf relative to reference bin 1); `γ=1` recovers the pre-reparam form.
+`N_ab = γ_SAR · full_susceptibility_a · C*_ab · inf_b`. `gamma_sar` is the per-contact secondary
+attack rate (susc/inf relative to reference bin 1); `gamma_sar=1` recovers the pre-reparam form.
 """
 function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector; γ::Real = 1.0)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
     fs = full_susceptibility(susc, F, A_col)
-    return γ .* ((fs .* Cstar) .* inf')
+    return gamma_sar .* ((fs .* Cstar) .* inf')
 end
 
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
                    G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector; γ::Real = 1.0)
-    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col; γ = γ)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
+    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col; gamma_sar = gamma_sar)
 end

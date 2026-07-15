@@ -1,11 +1,11 @@
 # 10j_viz_utils.jl — read-only helper for the 10j single-time-point diagnostics.
 #
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
-# cached joint-model chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
+# cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
 # (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
-# log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_joint`
-# (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `chain_path`) to be included first.
+# log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
+# (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
 # forecast_utils.jl.
 
@@ -43,9 +43,9 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gnorm",
+                              contacts::AbstractString = "temporal-gsar-cut-sc",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
         load(path, "result")
@@ -150,7 +150,7 @@ order, so column `d` pairs with μ's draw `d`).
 - Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
 - NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
 
-Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gnorm"`
+Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc"`
 chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
 `week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
 regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
@@ -159,9 +159,9 @@ missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE w
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
                                       weighted::Bool,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gnorm",
+                                      contacts::AbstractString = "temporal-gsar-cut-sc",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
         load(path, "result")
@@ -201,7 +201,7 @@ end
 # Figure builders for the 10j diagnostics notebook (moved out of the notebook so
 # the notebook keeps only config + data prep + calls + display). All read-only:
 # they reload cached joint-model chains and never re-fit. Requires the full
-# forecast preamble (forecast_utils.jl) plus 8j_viz_utils.jl (chain_path).
+# forecast preamble (forecast_utils.jl) plus 8j_viz_utils.jl (stage1_chain_path / stage2_pooled_path).
 #
 # Most origin-week helpers take a small context bundle assembled once in the
 # notebook:  oc = (; apd, t_o, t_o_est, origin, grid, cfg)
@@ -234,37 +234,51 @@ function _observed_cell_mean(apd, t::Integer, i::Integer, j::Integer, weighted::
 end
 
 """
-    fit_window_infection_draws(dm, nb, apd_o, wd, cfg, origin; h=1, use_nuts=false, save_dir)
+    fit_window_infection_draws(dm, nb, apd_o, wd, cfg, origin; h=1, save_dir)
         -> A × n_fit × draws  |  nothing
 
-In-sample expected (fitted) infections over the fit window, from a model's horizon-`h` chain:
-the MEAN of the joint model's Normal infection likelihood (joint_model.jl:288-295). Per draw,
-`pred_t = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:,t]; γ=q.γ) · Σ_s w[s]·wd.I_mean[:,t-s]`
+In-sample expected (fitted) infections over the fit window, from the two-stage artefacts of the
+horizon-`h` fit: the MEAN of Stage 2's Normal infection likelihood (`model_transmission`). Per
+pooled draw `d` (from Stage-1 draw `m = post_index[d]`),
+`pred_t = build_ngm(Cstar_m[t], susc[d], inf[d], F[d], wd.antibody[:,t]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
 using OBSERVED lags ⇒ one-step-ahead fitted mean (NOT the self-iterated forecast). Columns
-`(smax+1):Tn` == the window's fit weeks. Reloads the cached chain (NO re-fit); mirrors
-`reproduction_draws`. `apd_o[h]` is the h-window degree data (matches the cached chain). Returns
-`nothing` when the chain file is missing/unloadable.
+`(smax+1):Tn` == the window's fit weeks. The per-week `Cstar_m` is rebuilt from the Stage-1 chain
+(`stage1_moment_draws` → `contact_star(nb, …)`), in the SAME draw order the pooling used, so
+`post_index` aligns. `apd_o[h]` is the h-window degree data (matches the cached Stage-1 chain).
+Read-only (NO re-fit). Returns `nothing` when either artefact is missing/unloadable.
 """
 function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
                                     apd_o, wd, cfg, origin::Date;
-                                    h::Int = 1, use_nuts::Bool = false,
+                                    h::Int = 1,
                                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    path = chain_path(lbl, origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
-    isfile(path) || (@warn "no chain for fit-window fit" lbl; return nothing)
+    lbl = string(degree_label(dm), "|", ngm_label(nb))
+    tag = contacts_label(cfg)
+    s1p = stage1_chain_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
+    s2p = stage2_pooled_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
+    (isfile(s1p) && isfile(s2p)) || (@warn "no two-stage artefacts for fit-window fit" lbl; return nothing)
     w_gi = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     ds   = build_degree_stats(dm, apd_o[h], cfg)              # h-window degree stats (matches cached chain)
-    fl = try
-        fit_or_load_chain(path, dm, nb, ds, wd, cfg, w_gi; use_nuts = use_nuts)  # reload + rebuild model
+    local md, pooled
+    try
+        s1chn  = load(s1p, "result")
+        md     = stage1_moment_draws(dm, ds, wd.pop, cfg, s1chn; n_post = cfg.n_stage1_post)
+        pooled = load(s2p, "pooled")
     catch err
-        @warn "could not load chain for fit-window fit" lbl err; return nothing
+        @warn "could not load two-stage artefacts for fit-window fit" lbl err; return nothing
     end
-    gq = [q for q in vec(generated_quantities(fl.model, fl.chn)) if q !== nothing]
     A = wd.A; Tn = length(wd.weeks); fitcols = (cfg.smax + 1):Tn
-    out = Array{Float64}(undef, A, length(fitcols), length(gq))
-    for (d, q) in enumerate(gq), (c, t) in enumerate(fitcols)
-        N = build_ngm(q.Cstar[t], q.susc, q.inf, q.F, wd.antibody[:, t]; γ = q.γ)
-        out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+    # per-Stage-1-draw per-week C* (nb applied) — reused across that draw's pooled infection draws.
+    Cstar_by_m = [[contact_star(nb, md[m].K1[t], md[m].K2[t], md[m].G[t]) for t in 1:Tn]
+                  for m in eachindex(md)]
+    Np = length(pooled.gamma_sar)
+    out = Array{Float64}(undef, A, length(fitcols), Np)
+    for d in 1:Np
+        m = pooled.post_index[d]
+        for (c, t) in enumerate(fitcols)
+            N = build_ngm(Cstar_by_m[m][t], pooled.susc[d, :], pooled.inf[d, :],
+                          pooled.F[d], wd.antibody[:, t]; gamma_sar = pooled.gamma_sar[d])
+            out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+        end
     end
     return out
 end
@@ -643,29 +657,39 @@ end
 
 """
     make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols, origin;
-                         fit_h=1, qs_lo=0.05, qs_hi=0.95, res_dir="../res") -> Plots.Plot
+                         fit_h=1, qs_lo=0.05, qs_hi=0.95, age_idx=nothing, age_desc="all ages",
+                         file_tag="", res_dir="../res") -> Plots.Plot
 
 §1 — total-infection forecast point + 90% CI for the four models at one origin, overlaid on
 observed (all ages). Solid + ○ + ribbon = self-iterated forecast (`fc_store[lbl]`, H×draws over
 the forecast weeks); dashed + ◇ + ribbon = in-sample fitted mean (`fit_store[lbl]`, A×n_fit×draws
 over the fit weeks, from the horizon-`fit_h` chain — `fit_window_infection_draws(...; h=fit_h)`).
 Both age-summed; the origin week is marked with a vertical rule. Saves to
-`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h>.png`.
+`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h><file_tag>.png`.
+
+`age_idx` restricts the ages summed into the reported total (default `nothing` ⇒ all `A` bins);
+pass e.g. the non-70+ bins to report the 2–69 total only. NOTE: this excludes 70+ only from the
+*reported sum*, not from the coupled NGM dynamics — the cached forecast draws already propagate all
+ages, so this is a report-side subset, not a 6-bin re-fit. `age_desc` labels the axis/title and
+`file_tag` is appended to the PNG name so a subset figure never overwrites the all-ages one.
 """
 function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
                               origin::Date; fit_h::Integer = 1, qs_lo = 0.05, qs_hi = 0.95,
-                              res_dir::AbstractString = "../res")
-    H = length(cfg.horizons)
+                              age_idx = nothing, age_desc::AbstractString = "all ages",
+                              file_tag::AbstractString = "", res_dir::AbstractString = "../res")
+    H  = length(cfg.horizons)
+    A  = size(wd.I_mean, 1)
+    ai = age_idx === nothing ? (1:A) : age_idx          # age bins summed into the reported total
     x_hist = week_mid.(win.fit_weeks)
-    y_hist = vec(sum(wd.I_mean[:, (cfg.smax + 1):end]; dims = 1))    # history (all ages)
+    y_hist = vec(sum(wd.I_mean[ai, (cfg.smax + 1):end]; dims = 1))   # history (included ages)
     x_fore = week_mid.(win.forecast_weeks)
-    y_fore = [sum(truth[:, h]) for h in 1:H]                         # realised targets (all ages)
+    y_fore = [sum(truth[ai, h]) for h in 1:H]                        # realised targets (included ages)
 
-    fig = plot(; title = "10j — total infections vs observed: in-sample fit (h$(fit_h), dashed) + " *
-                         "forecast (solid), origin $(origin) (90%)",
+    fig = plot(; title = "10j — total infections ($(age_desc)) vs observed: in-sample fit " *
+                         "(h$(fit_h), dashed) + forecast (solid), origin $(origin) (90%)",
                titlefontsize = 8, xrotation = 45, legend = :topleft, size = (950, 540),
                left_margin = 8Plots.mm, bottom_margin = 14Plots.mm,   # room for y-label & rotated dates
-               xlabel = "week (Wed mid-date)", ylabel = "weekly infections (all ages)")
+               xlabel = "week (Wed mid-date)", ylabel = "weekly infections ($(age_desc))")
     plot!(fig, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
           color = :black, lw = 2, marker = :circle, ms = 3, label = "observed")
     vline!(fig, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
@@ -673,10 +697,10 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     # self-iterated forecast fans (solid + ○) over the forecast weeks (right of the origin line).
     for (ci, lbl) in enumerate(labels4)
         haskey(fc_store, lbl) || continue
-        tot = dropdims(sum(fc_store[lbl]; dims = 1); dims = 1)       # H × draws (age-summed)
-        med = [median(tot[h, :])          for h in 1:H]
-        lo  = [quantile(tot[h, :], qs_lo) for h in 1:H]
-        hi  = [quantile(tot[h, :], qs_hi) for h in 1:H]
+        tot = dropdims(sum(fc_store[lbl][ai, :, :]; dims = 1); dims = 1)   # H × draws (over included ages)
+        med = [_fmed(tot[h, :])     for h in 1:H]                    # finite-robust (fan may be ±Inf)
+        lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+        hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
         plot!(fig, x_fore, med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
               ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = lbl)
     end
@@ -684,15 +708,150 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
     # visually separate from the solid+○ forecast.
     for (ci, lbl) in enumerate(labels4)
         haskey(fit_store, lbl) || continue
-        tot = dropdims(sum(fit_store[lbl]; dims = 1); dims = 1)      # n_fit × draws (age-summed)
-        med = [median(tot[t, :])          for t in 1:length(x_hist)]
-        lo  = [quantile(tot[t, :], qs_lo) for t in 1:length(x_hist)]
-        hi  = [quantile(tot[t, :], qs_hi) for t in 1:length(x_hist)]
+        tot = dropdims(sum(fit_store[lbl][ai, :, :]; dims = 1); dims = 1)  # n_fit × draws (over included ages)
+        med = [_fmed(tot[t, :])     for t in 1:length(x_hist)]       # finite-robust (fit may be huge)
+        lo  = [_fq(tot[t, :], qs_lo) for t in 1:length(x_hist)]
+        hi  = [_fq(tot[t, :], qs_hi) for t in 1:length(x_hist)]
         plot!(fig, x_hist, med; color = model_cols[ci], lw = 1.6, ls = :dash, marker = :diamond,
               ms = 3, ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = "")
     end
     plot!(fig, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash, marker = :diamond, ms = 3,
           label = "in-sample fit (h$(fit_h)), 90%")   # proxy: dashed ⇒ fitted; colour ⇒ model
-    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h).png"))
+    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h)$(file_tag).png"))
+    return fig
+end
+
+"""
+    forecast_ci_age_panel(a, fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols;
+                          fit_h=1, qs_lo=0.05, qs_hi=0.95, ttl="", showleg=false) -> Plots.Plot
+
+One §1b panel: the §1 forecast-CI content (`make_forecast_ci_fig`) restricted to a SINGLE age bin
+`a` — observed weekly infections (fit-week history ++ realised targets), per-model self-iterated
+forecast (solid + ○ + 90% band, right of the origin) and per-model in-sample fitted mean
+(dashed + ◇ + 90% band, left of the origin). Same colours/styling as §1; `showleg` toggles the
+per-model legend (only the first panel carries it, to avoid clutter across the grid).
+"""
+function forecast_ci_age_panel(a::Integer, fc_store, fit_store, win, wd, truth, cfg, labels4,
+                               model_cols; fit_h::Integer = 1, qs_lo = 0.05, qs_hi = 0.95,
+                               ttl::AbstractString = "", showleg::Bool = false)
+    H      = length(cfg.horizons)
+    x_hist = week_mid.(win.fit_weeks)
+    y_hist = vec(wd.I_mean[a, (cfg.smax + 1):end])        # single-age history
+    x_fore = week_mid.(win.forecast_weeks)
+    y_fore = [truth[a, h] for h in 1:H]                   # single-age realised targets
+
+    pnl = plot(; title = ttl, titlefontsize = 8, xrotation = 45,
+               legend = (showleg ? :topleft : false), legendfontsize = 5,
+               xlabel = "week (Wed mid-date)", ylabel = "weekly infections")
+    plot!(pnl, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
+          color = :black, lw = 2, marker = :circle, ms = 2, label = "observed")
+    vline!(pnl, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
+
+    # self-iterated forecast fans (solid + ○) over the forecast weeks (right of the origin line).
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fc_store, lbl) || continue
+        tot = fc_store[lbl][a, :, :]                      # H × draws (single age)
+        med = [_fmed(tot[h, :])      for h in 1:H]        # finite-robust (fan may be ±Inf)
+        lo  = [_fq(tot[h, :], qs_lo) for h in 1:H]
+        hi  = [_fq(tot[h, :], qs_hi) for h in 1:H]
+        plot!(pnl, x_fore, med; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = lbl)
+    end
+    # in-sample fitted mean (dashed + ◇) over the fit weeks (left of the origin line).
+    for (ci, lbl) in enumerate(labels4)
+        haskey(fit_store, lbl) || continue
+        tot = fit_store[lbl][a, :, :]                     # n_fit × draws (single age)
+        med = [_fmed(tot[t, :])      for t in 1:length(x_hist)]
+        lo  = [_fq(tot[t, :], qs_lo) for t in 1:length(x_hist)]
+        hi  = [_fq(tot[t, :], qs_hi) for t in 1:length(x_hist)]
+        plot!(pnl, x_hist, med; color = model_cols[ci], lw = 1.6, ls = :dash, marker = :diamond,
+              ms = 2, ribbon = (med .- lo, hi .- med), fillalpha = 0.10, label = "")
+    end
+    showleg && plot!(pnl, [first(x_hist)], [NaN]; color = :gray, lw = 1.6, ls = :dash,
+                     marker = :diamond, ms = 3, label = "in-sample fit (h$(fit_h)), 90%")
+    return pnl
+end
+
+"""
+    make_forecast_ci_by_age_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
+                                origin, grid; fit_h=1, qs_lo=0.05, qs_hi=0.95, file_tag="_byage",
+                                res_dir="../res") -> Plots.Plot
+
+§1b — the §1 forecast-CI diagnostic broken out PER AGE GROUP: one panel per CIS age bin (7 panels
+in a 2×4 grid, 8th cell blank), each the single-age analogue of `make_forecast_ci_fig` (observed
+++ per-model self-iterated forecast solid+○+90% and in-sample fitted mean dashed+◇+90%). Free y per
+panel (age magnitudes differ widely); colours/styling match §1; only the first panel carries the
+per-model legend. Under the two-stage cut the cached draws propagate all 7 ages through the coupled
+NGM, so each panel is that age's slice of the joint 7-age forecast. Saves to
+`res_dir/10j_forecast_ci_<origin>_fit-h<fit_h><file_tag>.png`.
+"""
+function make_forecast_ci_by_age_fig(fc_store, fit_store, win, wd, truth, cfg, labels4, model_cols,
+                                     origin::Date, grid; fit_h::Integer = 1, qs_lo = 0.05,
+                                     qs_hi = 0.95, file_tag::AbstractString = "_byage",
+                                     res_dir::AbstractString = "../res")
+    A = grid.N
+    panels = [forecast_ci_age_panel(a, fc_store, fit_store, win, wd, truth, cfg, labels4,
+                                    model_cols; fit_h = fit_h, qs_lo = qs_lo, qs_hi = qs_hi,
+                                    ttl = "age $(grid.LAB[a])", showleg = (a == 1))
+              for a in 1:A]
+    push!(panels, plot(; framestyle = :none))            # blank cell fills the 2×4 grid (A=7)
+    fig = plot(panels...; layout = (2, 4), size = (1550, 760),
+               left_margin = 6Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "10j — weekly infections BY AGE GROUP vs observed: in-sample fit " *
+                            "(h$(fit_h), dashed) + forecast (solid), origin $(origin) (90%)",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_forecast_ci_$(origin)_fit-h$(fit_h)$(file_tag).png"))
+    return fig
+end
+
+"""
+    make_susc_inf_fig(combos, labels4, model_cols, origin, cfg, grid; h=1, res_dir="../res")
+        -> Plots.Plot
+
+§5 — age-specific RELATIVE susceptibility and infectivity (reference bin 1 "2-10" fixed = 1) for the
+four models at one forecast origin. Reloads each model's Stage-2 pooled draws
+(`load_transmission_draws`, 8j_viz_utils.jl) — `susc`/`inf` are `N×A` pooled draws relative to the
+reference bin — and plots the per-age-group median + 90% band. Two panels (susceptibility |
+infectivity); x = age group, one coloured line per model (colours consistent with §1–§4 via
+`labels4`/`model_cols`). Under the two-stage cut susc/inf are fit in Stage 2 conditioning on that
+model's `C*`, so — unlike the NGM-independent μ — they genuinely differ across all four combos.
+Finite-robust quantiles (`_fmed`/`_fq`) because the pooled draws are heavy-tailed. Read-only
+(no re-fit). Saved to `res/10j_susc_inf_<origin>.png`. Missing artefacts are skipped (their line
+is dropped) with a warning.
+"""
+function make_susc_inf_fig(combos, labels4, model_cols, origin::Date, cfg, grid;
+                           h::Integer = 1, res_dir::AbstractString = "../res")
+    A   = grid.N
+    tag = contacts_label(cfg)
+    xs  = 1:A
+
+    mk(sym, ttl, showleg) = begin
+        pnl = plot(; title = ttl, titlefontsize = 9,
+                   xticks = (xs, grid.LAB), xrotation = 45,
+                   xlabel = "age group", ylabel = "relative $(sym == :susc ? "susceptibility" : "infectivity")",
+                   legend = (showleg ? :topleft : false), legendfontsize = 6)
+        hline!(pnl, [1.0]; color = :gray, ls = :dash, lw = 1, label = "")   # reference bin = 1
+        for (ci, (dm, nb)) in enumerate(combos)
+            lbl = string(degree_label(dm), "|", ngm_label(nb))
+            td  = load_transmission_draws(lbl, origin, h; contacts = tag)
+            td === nothing && (@warn "no Stage-2 pooled artefact for susc/inf" lbl origin; continue)
+            V   = sym == :susc ? td.susc : td.inf          # N × A pooled draws
+            med = [_fmed(view(V, :, a))        for a in 1:A]
+            lo  = [_fq(view(V, :, a), 0.05)    for a in 1:A]
+            hi  = [_fq(view(V, :, a), 0.95)    for a in 1:A]
+            plot!(pnl, xs, med; ribbon = (med .- lo, hi .- med), color = model_cols[ci], lw = 2,
+                  marker = :circle, ms = 3, fillalpha = 0.08, label = labels4[ci])
+        end
+        pnl
+    end
+
+    fig = plot(mk(:susc, "Relative susceptibility", true),
+               mk(:inf,  "Relative infectivity",    false);
+               layout = (1, 2), size = (1150, 500),
+               left_margin = 9Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "10j — relative age-specific susceptibility & infectivity " *
+                            "(ref bin \"$(grid.LAB[1])\" = 1), median + 90%, origin $(origin) (h$(h))",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_susc_inf_$(origin).png"))
     return fig
 end

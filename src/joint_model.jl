@@ -1,10 +1,17 @@
-# joint_model.jl — the joint Turing model (contact-degree likelihood + infection
-# likelihood in one model) and the Pathfinder→NUTS fit + posterior forecast.
+# joint_model.jl — the TWO-STAGE (cut) forecast model + Pathfinder→NUTS fits + pooled forecast.
 #
-# Composability: one @model serves all four (degree model × NGM builder) combos —
-# `dm::ContactDegreeModel` selects the degree likelihood + latent shape/dispersion,
-# `nb::NGMBuilder` selects the NGM contact functional (deterministic dispatch). Both
-# are fixed model arguments, so the parameter space is well-defined per fit.
+# The former single joint @model (contact-degree likelihood + infection likelihood together) was
+# split into a CUT inference (inst/4_cut_Bayes.md):
+#   • Stage 1 `model_degree`      — the contact-degree GP alone (NGM-independent; returns per-week
+#                                    raw moments ⟨k⟩,⟨k²⟩,g). Fit once per (degree × origin × horizon).
+#   • Stage 2 `model_transmission`— the infection/renewal block alone, conditioning on a FIXED C*
+#                                    built from ONE Stage-1 draw. Re-fit for each of `n_stage1_post`
+#                                    (=100) Stage-1 draws, keeping `n_stage2_draws` (=100) each; the
+#                                    100×100 = 10_000 pooled draws are the infection predictive → WIS.
+# Composability is preserved: `dm::ContactDegreeModel` selects the degree likelihood/dispersion in
+# Stage 1; `nb::NGMBuilder` selects the NGM contact functional applied to the Stage-1 moments before
+# Stage 2 (deterministic dispatch). The C*-normalisation (`C*→C*/S̄`) was REVERTED, so C* feeds the
+# NGM at its raw level and the transmissibility scalar is again the per-contact SAR `gamma_sar`.
 
 block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 
@@ -52,7 +59,7 @@ Two contact regimes (`cfg.constant_contacts`):
 - **pooled** (`true`): collapse the per-week cells to one pooled cell per `(i,j)`; the
   returned `dd_count`/`pos_weight`/`p0`/`n` are `A×A`.
 - **per-week** (`false`): keep the raw `[t,i,j]` weekly arrays so the model can fit an
-  independent age-pair GP per week (`model_joint`'s per-week branch).
+  independent age-pair GP per week (`model_degree`'s per-week branch).
 
 `log_emp` (hence the GP prior-centre `c0`) is always the **pooled** grand mean, so the
 prior is identical across regimes.
@@ -98,10 +105,15 @@ function _weibull_moments(μW, κ, p0)                                          
     return ((1 - p0) * μW, (1 - p0) * μW^2 * (1 + cvw2), 1 - p0)              # ⟨k⟩, ⟨k²⟩, g
 end
 
-@model function model_joint(dm::ContactDegreeModel, nb::NGMBuilder,
-                            ds, wd::WindowData, w, cfg::FrameworkConfig)
-    A = wd.A
-    Tn = length(wd.weeks)
+# ======================================================================================
+# Stage 1 — contact-degree GP (NGM-INDEPENDENT). Returns per-week raw moments (⟨k⟩,⟨k²⟩,g),
+# so ONE Stage-1 fit serves both NGM builders (the builder is applied downstream via
+# `contact_star`). No S̄ normalisation, no transmission block — those live in Stage 2.
+# `pop` is the per-bin population (for the reciprocity offset); `ds` = build_degree_stats output.
+# ======================================================================================
+@model function model_degree(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig)
+    A = ds.A
+    Tn = length(ds.weeks)
 
     # ---- reciprocity-structural, GP-smoothed contact mean (inst/1e) ----
     # 28 unordered age pairs (a≤b) carry one symmetric log-rate r; reciprocity is exact
@@ -122,7 +134,7 @@ end
     # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
     # latent level c/c0 to O(1) (absolute log(pop)≈15.6 otherwise forces c≈−15.6 and, at the
     # old clamp, the degenerate μ≡403 saturation; see tasks/lessons.md).
-    logpop = log.(wd.pop ./ wd.pop[1])
+    logpop = log.(pop ./ pop[1])
     log_rho_diag ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # total-age direction
     log_rho_gap  ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # age-gap direction
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
@@ -180,9 +192,11 @@ end
         return ll
     end
 
-    # ---- contact-degree likelihood → per-week C* (Cstar_weeks[t]) ----
+    # ---- contact-degree likelihood → per-week raw moments (K1=⟨k⟩, K2=⟨k²⟩, G=g) ----
+    # Returned per week so the NGM builder can be applied downstream (Stage 2); Stage 1 is
+    # NGM-independent. In the pooled regime the Tn entries alias one moment set.
     if cfg.constant_contacts
-        # pooled: one latent field, one C* reused for every renewal week.
+        # pooled: one latent field, one moment set reused for every renewal week.
         c ~ Normal(c0, 3.0)
         z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
         if is_weighted(dm)
@@ -196,8 +210,8 @@ end
         ETp = eltype(μ)
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, vec(disp))   # 2×2 → block-linear 4
-        Cstar1 = contact_star(nb, K1, K2, G)
-        Cstar_weeks = [Cstar1 for _ in 1:Tn]
+        K1w = [K1 for _ in 1:Tn]; K2w = [K2 for _ in 1:Tn]; Gw = [G for _ in 1:Tn]
+        return (; K1 = K1w, K2 = K2w, G = Gw)
     else
         # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over
         # weeks by a temporal RBF over week indices 1:Tn, sharing one length-scale ρ_time
@@ -237,56 +251,71 @@ end
         # already carries η; don't re-apply it below.
         Fld = η .* (Lp * z * Lt')                          # P×Tn
         ETp = promote_type(typeof(c), eltype(Fld))
-        Cstar_weeks = Vector{Matrix{ETp}}(undef, Tn)
-        K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
+        K1w = Vector{Matrix{ETp}}(undef, Tn)               # per-week raw moments (NGM applied downstream)
+        K2w = Vector{Matrix{ETp}}(undef, Tn)
+        Gw  = Vector{Matrix{ETp}}(undef, Tn)
         ll = zero(ETp)
         for t in 1:Tn
+            K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
             μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
             ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
-            Cstar_weeks[t] = contact_star(nb, K1, K2, G)
+            K1w[t] = K1; K2w[t] = K2; Gw[t] = G           # fresh matrices per week (not reused buffers)
         end
         Turing.@addlogprob! ll
+        return (; K1 = K1w, K2 = K2w, G = Gw)
     end
+end
 
-    # ---- normalize C* by the fitting-window mean contact intensity (decouple γ) ----
-    # S̄ = fit-window-averaged, population-weighted mean effective contacts per person. Homogeneous
-    # degree-1 in C*, so the renewal likelihood becomes scale-invariant in C* — the absolute contact
-    # LEVEL moves into γ and the NGM sees only temporal change in contacts. The degree likelihood
-    # (raw μ) is unaffected; reconstruct_mu_draws / the 10j heatmap read raw μ, also unaffected.
-    wpop    = wd.pop ./ sum(wd.pop)
-    fitcols = (cfg.smax + 1):Tn                       # the n_fit infection-likelihood weeks
-    S̄ = mean(sum(wpop[a] * Cstar_weeks[t][a, b] for a in 1:A, b in 1:A) for t in fitcols)
-    S̄ = max(S̄, 1e-8)                                 # guard fully-empty windows
-    Cstar_weeks = [C ./ S̄ for C in Cstar_weeks]       # normalized C* reused by infection loop + return
+# ======================================================================================
+# Stage 2 — infection / renewal block, conditioning on a FIXED per-week C* trajectory.
+# `Cstar_weeks` is one Stage-1 draw's moments run through `contact_star(nb, …)` (length Tn,
+# positionally aligned to `wd`). Samples the transmission latents and the renewal likelihood;
+# C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
+# secondary attack rate and reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly.
+# ======================================================================================
+@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig)
+    A = wd.A
+    Tn = length(wd.weeks)
 
-    # ---- transmission latents: absolute γ + relative susc/inf (analysis-plan reparam) ----
-    # ONE absolute-transmissibility scalar γ carries the NGM level; inherent susceptibility &
-    # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated).
-    # This removes the old μ_s/μ_i level pair (confounded with each other and with C*'s scale — only
-    # their sum was identified). With C* now normalised to unit fit-window mean intensity (above),
-    # γ ≈ susc₁·inf₁·S̄ ≈ Rt/ρ(C̃*) is data-identified and decoupled from the contact scale (no longer
-    # a per-contact SAR; it is window-relative, so not comparable across origins). The old per-bin
-    # `susc=exp(μ_s+σ_s z_s)` became `susc=vcat(1, exp(σ_s z_s[2:A]))` (bin-1 reference), so `z_s`/`z_i`
-    # shrink from length A to A-1. NGM index convention unchanged (susc on susceptible row a, inf on
-    # infectious column b; Munday Eq 3).
-    log_gamma ~ Normal(cfg.gamma_prior[1], cfg.gamma_prior[2])  # centre log(0.8), calibrated (tasks/lessons.md)
-    γ = exp(_softclamp(log_gamma, log(0.02), log(5.0)))         # absolute transmissibility, soft-bounded
+    # ---- transmission latents: per-contact SAR γ_SAR + relative susc/inf (analysis-plan form) ----
+    # γ_SAR (per-contact secondary attack rate) carries the NGM level; inherent susceptibility &
+    # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated),
+    # so `z_s`/`z_i` have length A-1. NGM index convention: susc on susceptible row a, inf on
+    # infectious column b (Munday Eq 3).
+    log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.1), LOOSENED to 90% γ_SAR∈[0.0052,1.93]
+    gamma_sar = exp(_softclamp(log_gamma_sar, log(0.001), log(10.0)))       # secondary attack rate, soft-bounded to [0.001,10] (was [0.02,5]; low bound was pinning negbin|neighbourhood ~0.021)
 
-    sig_s ~ truncated(Normal(0.1, 0.02); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A)
-    susc = vcat(one(sig_s), exp.(sig_s .* z_s))            # susc[1] = 1 (relative inherent susceptibility)
+    # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
+    # is a looser safety bound. The offset scale `sig ~ N⁺(0.5, 0.25²)` (LOOSENED 2026-07-13 from
+    # N⁺(0.1,0.05²), user request; marginal SD ≈ 0.5 ⇒ ±2 SD ≈ ±1.0 in log ⇒ TYPICAL susc/inf ≈
+    # [0.37, 2.7]) — wide enough to admit real age variation in inherent susceptibility/infectivity.
+    # The log-offset soft-clamp [log 0.05, log 20] ≈ [−3.0, +3.0] ⇒ HARD-bounds susc/inf ∈ [0.05, 20]
+    # (LOOSENED 2026-07-13 from [log 0.2, log 5], user request — matching the wider prior, and now
+    # re-aligned with the `-sc` cache-token docstring): the prior's ±2 SD is well interior (clamp at
+    # ~±6 SD), so realistic profiles stay off it, but it still caps a stray Stage-2 Pathfinder draw
+    # that would otherwise send `σ·z` to ±100 → `exp` ~1e8 → supercritical/Inf NGM (mirrors κ/γ_SAR).
+    #
+    # NO CROSS-BIN SMOOTHING (2026-07-13, user request): the A-1 non-reference offsets are INDEPENDENT
+    # per age bin — `sig·z` with z ~ iid Normal(0,1). The shared-length-scale RBF GP (`log_rho_si`,
+    # `Ksi`, `Lsi`, offset `sig·(Lsi·z)`) that previously correlated neighbouring bins was removed; only
+    # the marginal-SD prior `sig_s`/`sig_i` and the soft-clamp remain, so the [0.37,2.7]/[0.05,20]
+    # calibration above is per-bin (the GP had unit diagonal ⇒ dropping it leaves per-bin SD = sig).
+    # See tasks/lessons.md 2026-07-13 (and the GP→RW1→RW2→GP history before it).
+    sig_s ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), independent
+    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0))))  # susc[1]=1; ∈ [0.05,20]
 
-    sig_i ~ truncated(Normal(0.1, 0.02); lower = 0)
+    sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
     z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(sig_i .* z_i))             # inf[1] = 1 (relative infectivity)
+    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0))))   # inf[1]=1;  ∈ [0.05,20]
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
-    # (antibody and — now — contacts vary by week; C*_t is Cstar_weeks[t].)
+    # (antibody and contacts vary by week; C*_t is the fixed Cstar_weeks[t].)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; γ = γ)
+        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -294,38 +323,44 @@ end
         end
     end
 
-    return (; susc, inf, F, γ, sigma_inf, Cstar = Cstar_weeks)
+    return (; susc, inf, F, gamma_sar, sigma_inf)
 end
 
-"""
-    fit_joint(dm, nb, ds, wd, cfg; n_sample=250, use_nuts=true, ndraws_pf=200)
+# --------------------------------------------------------------------------------------
+# Cache filenames. Stage-1 chains carry NO ngm token (NGM-independent ⇒ one fit serves both
+# builders); Stage-2 pooled results carry both degree and ngm.
+# --------------------------------------------------------------------------------------
+stage1_path(dm::ContactDegreeModel, origin::Date, h::Integer; contacts::AbstractString,
+            save_dir::AbstractString) =
+    joinpath(save_dir, "8j_s1_$(degree_label(dm))_$(contacts)_$(origin)_h$(h).jld2")
 
-Pathfinder init → (optionally) NUTS. Returns `(; chn, model, w, pf)`. If `use_nuts`
-is false or NUTS fails, the Pathfinder approximate-posterior draws are returned as
-`chn` (they carry the same parameter names).
+stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
+            contacts::AbstractString, save_dir::AbstractString) =
+    joinpath(save_dir, "8j_s2_$(degree_label(dm))_$(ngm_label(nb))_$(contacts)_$(origin)_h$(h).jld2")
+
 """
-function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
-                   cfg::FrameworkConfig; n_sample::Int = 250, use_nuts::Bool = true,
-                   ndraws_pf::Int = 200, adtype = AutoReverseDiff(), rng = nothing)
-    # `rng === nothing` keeps the original single-thread behaviour (seed the global RNG);
-    # a supplied RNG (an isolated per-fit stream) makes the fit **thread-safe** for the
-    # parallel pre-fit — no shared global-RNG mutation (see `prefit_chains!`).
-    # `adtype` (default ReverseDiff — the clamp-free model is ReverseDiff-compatible) is
-    # threaded into BOTH Pathfinder and NUTS; `nothing` restores each backend's own default.
+    fit_stage1(dm, ds, pop, cfg; use_nuts=cfg.stage1_use_nuts, ndraws_pf, n_sample=250)
+
+Stage-1 (contact-degree GP) fit: Pathfinder init → (optionally) NUTS on `model_degree`.
+Returns `(; chn, model, pf)`. `chn` is the Pathfinder approximate posterior (default) or the
+NUTS chain; both carry the same GP parameter names. `ndraws_pf`/`n_sample` are kept ≥
+`cfg.n_stage1_post` so there are always enough draws to impute into Stage 2.
+"""
+function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
+                    use_nuts::Bool = cfg.stage1_use_nuts,
+                    ndraws_pf::Int = max(200, cfg.n_stage1_post),
+                    n_sample::Int = max(250, cfg.n_stage1_post),
+                    adtype = AutoReverseDiff(), rng = nothing)
     if rng === nothing
         Random.seed!(cfg.seed)
         rng = Random.default_rng()
     end
-    w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
-    model = model_joint(dm, nb, ds, wd, w, cfg)
-
+    model = model_degree(dm, ds, pop, cfg)
     pf = adtype === nothing ? pathfinder(model; ndraws = ndraws_pf, rng = rng) :
                               pathfinder(model; ndraws = ndraws_pf, rng = rng, adtype = adtype)
     if !use_nuts
-        return (; chn = pf.draws_transformed, model, w, pf)
+        return (; chn = pf.draws_transformed, model, pf)
     end
-
-    # init NUTS from the Pathfinder posterior mean
     pnames = names(pf.draws_transformed, :parameters)
     means  = [mean(pf.draws_transformed[:, p, :]) for p in pnames]
     init   = DynamicPPL.InitFromParams(NamedTuple(zip(pnames, means)))
@@ -334,61 +369,115 @@ function fit_joint(dm::ContactDegreeModel, nb::NGMBuilder, ds, wd::WindowData,
     try
         chn = sample(rng, model, sampler, n_sample; initial_params = init, progress = false)
     catch err
-        @warn "NUTS failed; falling back to Pathfinder draws" err
+        @warn "Stage-1 NUTS failed; falling back to Pathfinder draws" err
         chn = pf.draws_transformed
     end
-    return (; chn, model, w, pf)
+    return (; chn, model, pf)
 end
 
 """
-    posterior_forecast(model, chn, wd, cfg, w; ndraws)
+    fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
-Posterior-predictive `A × H × ndraws` forecast. Per draw: freeze the NGM at the
-origin week (last week; antibody held at origin), iterate the renewal `H` weeks
-(reference stan:309-314), and add observation noise `σ = sigma_inf·pred`.
+Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
+(`jldsave(path; result=chn)`). Idempotent skip ⇒ resumable prefit.
 """
-function posterior_forecast(model, chn, wd::WindowData, cfg::FrameworkConfig, w;
-                            ndraws::Int = cfg.n_forecast_draws)
-    gq = generated_quantities(model, chn)
-    gq = vec(gq)
-    keep = min(ndraws, length(gq))
+function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, pop,
+                            cfg::FrameworkConfig; adtype = AutoReverseDiff(), rng = nothing)
+    isfile(path) && return (; chn = load(path, "result"))
+    res = fit_stage1(dm, ds, pop, cfg; use_nuts = cfg.stage1_use_nuts, adtype = adtype, rng = rng)
+    jldsave(path; result = res.chn)
+    return (; chn = res.chn)
+end
+
+"""
+    stage1_moment_draws(dm, ds, pop, cfg, s1_chn; n_post=cfg.n_stage1_post) -> Vector
+
+Subsample `n_post` Stage-1 posterior draws and return their per-week raw moments via
+`generated_quantities(model_degree(dm, ds, pop, cfg), s1_chn)`. Each element is a
+`(; K1, K2, G)` of length-`Tn` `Vector{Matrix}` — NGM-independent, ready for
+`contact_star(nb, …)` downstream. Draws are subsampled on an even grid (deterministic).
+"""
+function stage1_moment_draws(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig, s1_chn;
+                             n_post::Int = cfg.n_stage1_post)
+    model = model_degree(dm, ds, pop, cfg)
+    gq = vec(generated_quantities(model, s1_chn))
+    gq = [q for q in gq if q !== nothing]
+    isempty(gq) && error("stage1_moment_draws: no usable Stage-1 draws")
+    keep = min(n_post, length(gq))
     idx = round.(Int, range(1, length(gq); length = keep))
-    A = wd.A; H = length(cfg.horizons); Tn = length(wd.weeks)
-    seed_cols = (Tn - cfg.smax + 1):Tn                 # last smax weeks of history
-    rng = MersenneTwister(cfg.seed)
-    out = Array{Float64}(undef, A, H, keep)
-    for (d, k) in enumerate(idx)
-        q = gq[k]
-        N_origin = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, Tn]; γ = q.γ)  # origin-week C*
-        mean_path = forecast_forward(N_origin, wd.I_mean[:, seed_cols], w, H)
-        for a in 1:A, h in 1:H
-            σ = max(q.sigma_inf * mean_path[a, h], 1e-6)
-            out[a, h, d] = mean_path[a, h] + σ * randn(rng)
+    return [gq[k] for k in idx]
+end
+
+"""
+    fit_stage2_pooled(nb, moment_draws, wd, cfg; n_draw=cfg.n_stage2_draws, base_seed, max_concurrent)
+
+Cut-inference Stage 2: for EACH of the `M = length(moment_draws)` imputed Stage-1 draws, form
+the fixed per-week `C*` (via `contact_star(nb, …)`), Pathfinder-fit `model_transmission`, and keep
+`n_draw` infection draws. Pool the `M × n_draw` (= 100×100 = 10_000) draws. Returns a NamedTuple
+`(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post, n_draw)` where the first
+five are the pooled per-draw infection parameters (`susc`/`inf` are `N×A`), `post_index[d]` is the
+Stage-1 draw `d` came from, and `Cstar_end[m]` is Stage-1 draw `m`'s origin-week (`[end]`) `C*` — the
+matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphore(max_concurrent)`
+(each with its own deterministic RNG `base_seed + m`), writing disjoint preallocated slots.
+"""
+function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::FrameworkConfig;
+                           n_draw::Int = cfg.n_stage2_draws, adtype = AutoReverseDiff(),
+                           base_seed::Int = cfg.seed, max_concurrent::Int = 1)
+    A = wd.A; Tn = length(wd.weeks)
+    w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
+    M = length(moment_draws)
+    Cstar_end = Vector{Matrix{Float64}}(undef, M)
+    per_m = Vector{Any}(undef, M)
+    fit_m(m) = begin
+        md = moment_draws[m]
+        Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tn]
+        Cstar_end[m] = Cstar_m[end]
+        model = model_transmission(Cstar_m, wd, w, cfg)
+        rng = Random.Xoshiro(base_seed + m)
+        pf = adtype === nothing ? pathfinder(model; ndraws = n_draw, rng = rng) :
+                                  pathfinder(model; ndraws = n_draw, rng = rng, adtype = adtype)
+        gq = vec(generated_quantities(model, pf.draws_transformed))
+        nd = min(n_draw, length(gq))
+        gs = Vector{Float64}(undef, nd); Fv = Vector{Float64}(undef, nd); sg = Vector{Float64}(undef, nd)
+        su = Matrix{Float64}(undef, nd, A); infm = Matrix{Float64}(undef, nd, A)
+        for d in 1:nd
+            q = gq[d]
+            gs[d] = q.gamma_sar; Fv[d] = q.F; sg[d] = q.sigma_inf
+            su[d, :] = q.susc; infm[d, :] = q.inf
+        end
+        per_m[m] = (; gamma_sar = gs, susc = su, inf = infm, F = Fv, sigma_inf = sg)
+    end
+
+    if max_concurrent <= 1 || M <= 1
+        for m in 1:M; fit_m(m); end
+    else
+        K = clamp(max_concurrent, 1, Threads.nthreads())
+        old_blas = LinearAlgebra.BLAS.get_num_threads()
+        LinearAlgebra.BLAS.set_num_threads(1)
+        try
+            fit_m(1)                                       # warm compile before fan-out
+            sem = Base.Semaphore(K)
+            @sync for m in 2:M
+                Threads.@spawn begin
+                    Base.acquire(sem)
+                    try fit_m(m) finally Base.release(sem) end
+                end
+            end
+        finally
+            LinearAlgebra.BLAS.set_num_threads(old_blas)
         end
     end
-    return out
+
+    gamma_sar  = reduce(vcat, (per_m[m].gamma_sar  for m in 1:M))
+    F          = reduce(vcat, (per_m[m].F          for m in 1:M))
+    sigma_inf  = reduce(vcat, (per_m[m].sigma_inf  for m in 1:M))
+    susc       = reduce(vcat, (per_m[m].susc       for m in 1:M))
+    inf        = reduce(vcat, (per_m[m].inf        for m in 1:M))
+    post_index = reduce(vcat, (fill(m, length(per_m[m].gamma_sar)) for m in 1:M))
+    return (; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post = M, n_draw = n_draw)
 end
 
-"""
-    fit_or_load_chain(path, dm, nb, ds, wd, cfg, w; use_nuts)
-
-Return `(; chn, model)` for one joint fit, reloading a saved chain when `path`
-exists (idempotent skip, cf. `bnb_utils.jl`). The model is always rebuilt (cheap,
-deterministic) so `generated_quantities(model, chn)` works after a reload.
-"""
-function fit_or_load_chain(path::AbstractString, dm::ContactDegreeModel,
-                           nb::NGMBuilder, ds, wd::WindowData, cfg::FrameworkConfig, w;
-                           use_nuts::Bool = false, adtype = AutoReverseDiff(), rng = nothing)
-    model = model_joint(dm, nb, ds, wd, w, cfg)
-    if isfile(path)
-        return (; chn = load(path, "result"), model)
-    end
-    res = fit_joint(dm, nb, ds, wd, cfg; use_nuts = use_nuts, adtype = adtype, rng = rng)
-    jldsave(path; result = res.chn)
-    return (; chn = res.chn, model)
-end
-
-# ---- parallel pre-fitting of the (origin × combo × horizon) chains --------------------
+# ---- parallel pre-fitting of the (origin × combo × horizon) two-stage artefacts -------
 # Fits are mutually independent (each is one Pathfinder run on its own data), so we fan
 # them out over Julia threads with a concurrency cap chosen to balance CPU and memory.
 # Threading (not Distributed) keeps memory low — one process, shared compiled code — which
@@ -419,273 +508,218 @@ function fit_concurrency(; mem_per_fit_gib::Real = 1.0, reserve_gib::Real = 4.0)
 end
 
 """
-    prefit_chains!(combos, wins, wds, cfg, apd_by_h_all; grid, setting=:all,
-                   use_nuts=false, save_dir, max_concurrent=fit_concurrency())
+    prefit_stage1!(dms, wins, cfg; data_provider, save_dir, max_concurrent, adtype)
 
-Fit every **missing** `(origin × combo × horizon)` joint chain in parallel (bounded to
-`max_concurrent` concurrent fits) and save each to `save_dir/8j_chn_<…>.jld2`; cached
-chains are skipped. Thread-safe by construction: each fit gets its own RNG and model, each
-writes a distinct file, and BLAS is pinned to one thread during the parallel region to
-avoid CPU oversubscription. One spec is fit sequentially first to warm the model/AD
-compilation before fan-out. Afterwards `iterated_forecast` just reloads the cached chains.
-
-`combos` is a vector of `(dm, nb)`; `wins`/`wds` are the per-origin windows and
-`WindowData`; `apd_by_h_all[oi][hi]` is the pre-built `AgePairData` for origin `oi`,
-horizon `hi`. Returns `(; requested, fitted, failed, concurrency)`.
+Fit every MISSING Stage-1 chain (`8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2`) for the distinct
+degree models `dms` × origins `wins` × horizons. Origins are processed sequentially (bounded
+memory: one origin's data held at a time via `data_provider(oi, win) → (wd0, apd_by_h)`); within an
+origin the (degree × horizon) fits fan out under `Semaphore(max_concurrent)`. Each fit gets its own
+RNG and writes a distinct file, and BLAS is pinned to one thread during the parallel region. Cached
+chains are skipped ⇒ resumable. Returns `(; fitted, failed, skipped, concurrency)`.
 """
-function prefit_chains!(combos, wins, wds, cfg::FrameworkConfig, apd_by_h_all;
-                        grid = cis_age_grid(), setting::Symbol = :all,
-                        use_nuts::Bool = false, adtype = AutoReverseDiff(),
+function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        max_concurrent::Int = fit_concurrency())
+                        max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
     mkpath(save_dir)
-    specs = NamedTuple[]
-    for (oi, win_o) in enumerate(wins), (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
-        path = joinpath(save_dir,
-            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win_o.origin)_h$(h).jld2")
-        isfile(path) || push!(specs, (; dm, nb, oi, hi, h, win_o, path))
-    end
-    total = length(combos) * length(wins) * length(cfg.horizons)
-    isempty(specs) && return (; requested = 0, fitted = 0, failed = 0, concurrency = 0)
-
-    K = clamp(max_concurrent, 1, Threads.nthreads())
-    @info "prefit_chains!: fitting $(length(specs))/$total chains; concurrency=$K " *
-          "(threads=$(Threads.nthreads()), cores=$(Sys.CPU_THREADS), " *
-          "mem_avail=$(round(_mem_available_gib(); digits=1)) GiB)"
-
-    fitted = Threads.Atomic{Int}(0)
-    failed = Threads.Atomic{Int}(0)
-    do_fit(s) = begin
-        try
-            ds_h = build_degree_stats(s.dm, apd_by_h_all[s.oi][s.hi], cfg)
-            res  = fit_joint(s.dm, s.nb, ds_h, wds[s.oi], cfg; use_nuts = use_nuts,
-                             adtype = adtype, rng = Random.Xoshiro(cfg.seed))
-            jldsave(s.path; result = res.chn)
-            Threads.atomic_add!(fitted, 1)
-        catch err
-            Threads.atomic_add!(failed, 1)
-            @warn "prefit fit failed" origin=s.win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
-        end
-    end
-
+    K   = clamp(max_concurrent, 1, Threads.nthreads())
+    tag = contacts_label(cfg)
+    fitted  = Threads.Atomic{Int}(0)
+    failed  = Threads.Atomic{Int}(0)
+    skipped = Threads.Atomic{Int}(0)
+    warmed  = Ref(false)
     old_blas = LinearAlgebra.BLAS.get_num_threads()
-    LinearAlgebra.BLAS.set_num_threads(1)                 # avoid threads × BLAS oversubscription
+    LinearAlgebra.BLAS.set_num_threads(1)
     try
-        do_fit(specs[1])                                  # warm compilation before fan-out
-        if length(specs) > 1
+        for (oi, win_o) in enumerate(wins)
+            specs = NamedTuple[]
+            for dm in dms, (hi, h) in enumerate(cfg.horizons)
+                path = stage1_path(dm, win_o.origin, h; contacts = tag, save_dir = save_dir)
+                isfile(path) ? Threads.atomic_add!(skipped, 1) : push!(specs, (; dm, hi, h, path))
+            end
+            isempty(specs) && continue
+            wd0, apd_by_h = data_provider(oi, win_o)
+            do_fit(s) = begin
+                try
+                    ds_h = build_degree_stats(s.dm, apd_by_h[s.hi], cfg)
+                    fit_or_load_stage1(s.path, s.dm, ds_h, wd0.pop, cfg;
+                                       adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+                    Threads.atomic_add!(fitted, 1)
+                catch err
+                    Threads.atomic_add!(failed, 1)
+                    @warn "stage1 fit failed" origin=win_o.origin degree=degree_label(s.dm) h=s.h exception=(err, catch_backtrace())
+                end
+            end
+            rest = specs
+            if !warmed[]
+                do_fit(specs[1]); warmed[] = true; rest = @view specs[2:end]   # warm compile before fan-out
+            end
             sem = Base.Semaphore(K)
-            @sync for s in @view specs[2:end]
+            @sync for s in rest
                 Threads.@spawn begin
                     Base.acquire(sem)
-                    try
-                        do_fit(s)
-                    finally
-                        Base.release(sem)
-                    end
+                    try do_fit(s) finally Base.release(sem) end
                 end
             end
         end
     finally
         LinearAlgebra.BLAS.set_num_threads(old_blas)
     end
-    return (; requested = length(specs), fitted = fitted[], failed = failed[], concurrency = K)
+    @info "prefit_stage1!: $(fitted[]) fitted, $(skipped[]) skipped, $(failed[]) failed (concurrency=$K)"
+    return (; fitted = fitted[], failed = failed[], skipped = skipped[], concurrency = K)
 end
 
 """
-    prefit_chains_streaming!(combos, wins, cfg; data_provider, grid, setting=:all,
-                             use_nuts=false, adtype, save_dir, max_concurrent, prefetch_ahead=0)
+    prefit_stage2!(combos, wins, cfg; data_provider, save_dir, max_concurrent, adtype)
 
-Global-pool variant of [`prefit_chains!`](@ref): fit every **missing**
-`(origin × combo × horizon)` joint chain under **one** `Semaphore(max_concurrent)` that stays
-saturated **across origin boundaries** (no per-origin barrier / drain tail / per-origin warmup),
-so a freed fit slot is immediately taken by the next origin's chains. Each origin's data
-`(wd, apd)` is produced **lazily** by `data_provider(oi, win)` — a single ascending producer that
-runs at most `prefetch_ahead` origins ahead of the fitting frontier and frees an origin's data as
-soon as its last chain completes (bounded memory). Cached chains are skipped, so runs stay
-resumable, and results are **byte-identical** to `prefit_chains!` (same seeds, filenames, order-
-independent per-chain inputs).
-
-`data_provider(oi, win)` must return `(wd_o::WindowData, apd_o::Vector{AgePairData})` (one
-`AgePairData` per horizon), reusing the shared read-only CoMix/inc2prev reads. `prefetch_ahead=0`
-auto-sizes to `max(2, cld(K, combos·horizons) + 1)` — enough origins to keep `K` slots busy.
-Returns `(; requested, fitted, failed, concurrency)`.
+Fit every MISSING Stage-2 pooled result (`8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`) for
+combos × origins × horizons. Requires the matching Stage-1 chain (run `prefit_stage1!` first; a
+missing one is fit on demand). Origins are processed sequentially; within an origin the (combo ×
+horizon) cells run sequentially, each `fit_stage2_pooled` fanning out its `n_stage1_post` per-draw
+fits under `Semaphore(max_concurrent)`. Cached pooled files are skipped ⇒ resumable.
 """
-function prefit_chains_streaming!(combos, wins, cfg::FrameworkConfig; data_provider,
-                                  grid = cis_age_grid(), setting::Symbol = :all,
-                                  use_nuts::Bool = false, adtype = AutoReverseDiff(),
-                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                                  max_concurrent::Int = fit_concurrency(),
-                                  prefetch_ahead::Int = 0)
+function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
+                        save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                        max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
     mkpath(save_dir)
-    specs = NamedTuple[]                                  # global spec list; skip cached ⇒ resumable
-    for (oi, win_o) in enumerate(wins), (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
-        path = joinpath(save_dir,
-            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win_o.origin)_h$(h).jld2")
-        isfile(path) || push!(specs, (; dm, nb, oi, hi, h, win_o, path))
-    end
-    total = length(combos) * length(wins) * length(cfg.horizons)
-    isempty(specs) && return (; requested = 0, fitted = 0, failed = 0, concurrency = 0)
-
-    K     = clamp(max_concurrent, 1, Threads.nthreads())
-    nper  = length(combos) * length(cfg.horizons)
-    ahead = prefetch_ahead > 0 ? prefetch_ahead : max(2, cld(K, nper) + 1)   # origins to keep K busy
-    @info "prefit_chains_streaming!: fitting $(length(specs))/$total chains; concurrency=$K, " *
-          "prefetch_ahead=$ahead (threads=$(Threads.nthreads()), cores=$(Sys.CPU_THREADS), " *
-          "mem_avail=$(round(_mem_available_gib(); digits=1)) GiB)"
-
-    # --- lazy per-origin data: single ascending producer, permit-bounded look-ahead, free-on-done
-    origins   = unique(s.oi for s in specs)               # ascending (specs built in oi order)
-    nO        = length(origins)
-    remaining = Dict(oi => Threads.Atomic{Int}(count(s -> s.oi == oi, specs)) for oi in origins)
-    data      = Dict{Int,Any}()
-    datalock  = ReentrantLock()
-    dcond     = Threads.Condition(datalock)
-    permit    = Base.Semaphore(ahead)                     # bounds retained origin data
-    sem       = Base.Semaphore(K)                         # bounds concurrent fits (global)
-
-    get_data(oi)    = lock(datalock) do
-        while !haskey(data, oi); wait(dcond); end
-        data[oi]
-    end
-    free_origin(oi) = (lock(datalock) do; delete!(data, oi); end; Base.release(permit))
-
-    producer = Threads.@spawn begin
-        try
-            for oi in origins
-                Base.acquire(permit)                      # blocks until an earlier origin frees a slot
-                d = try
-                    (; ok = true, val = data_provider(oi, wins[oi]))
-                catch e
-                    (; ok = false, val = e)
-                end
-                lock(datalock) do; data[oi] = d; notify(dcond); end
-            end
-        catch err
-            lock(datalock) do                             # unblock every waiter so the fanout can drain
-                for oi in origins
-                    haskey(data, oi) || (data[oi] = (; ok = false, val = err))
-                end
-                notify(dcond)
-            end
-            rethrow()
+    K   = clamp(max_concurrent, 1, Threads.nthreads())
+    tag = contacts_label(cfg)
+    fitted = 0; failed = 0; skipped = 0
+    for (oi, win_o) in enumerate(wins)
+        todo = NamedTuple[]
+        for (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
+            path = stage2_path(dm, nb, win_o.origin, h; contacts = tag, save_dir = save_dir)
+            isfile(path) ? (skipped += 1) : push!(todo, (; dm, nb, hi, h, path))
         end
-    end
-
-    fitted = Threads.Atomic{Int}(0)
-    failed = Threads.Atomic{Int}(0)
-    done_o = Threads.Atomic{Int}(0)
-    fit_one(s, val) = begin
-        wd_o, apd_o = val
-        ds_h = build_degree_stats(s.dm, apd_o[s.hi], cfg)
-        res  = fit_joint(s.dm, s.nb, ds_h, wd_o, cfg; use_nuts = use_nuts,
-                         adtype = adtype, rng = Random.Xoshiro(cfg.seed))   # isolated RNG ⇒ deterministic
-        jldsave(s.path; result = res.chn)
-    end
-    run_spec(s, gated) = begin
-        d = get_data(s.oi)                                # ← WAIT FOR DATA *BEFORE* the fit slot
-        try
-            if d.ok
-                gated && Base.acquire(sem)
-                try
-                    fit_one(s, d.val)
-                    Threads.atomic_add!(fitted, 1)
-                finally
-                    gated && Base.release(sem)
-                end
-            else
-                Threads.atomic_add!(failed, 1)
-                @warn "prefit data prep failed" origin=s.win_o.origin exception=d.val
-            end
-        catch err
-            Threads.atomic_add!(failed, 1)
-            @warn "prefit fit failed" origin=s.win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
-        finally
-            if Threads.atomic_sub!(remaining[s.oi], 1) == 1   # ALWAYS decrement (frees origin + permit)
-                free_origin(s.oi)
-                n = Threads.atomic_add!(done_o, 1) + 1
-                (n % 5 == 0 || n == nO) &&
-                    @info "streaming prefit: $n/$nO origins done ($(fitted[]) fitted, $(failed[]) failed)"
+        isempty(todo) && continue
+        wd0, apd_by_h = data_provider(oi, win_o)
+        for s in todo
+            try
+                ds_h = build_degree_stats(s.dm, apd_by_h[s.hi], cfg)
+                s1p  = stage1_path(s.dm, win_o.origin, s.h; contacts = tag, save_dir = save_dir)
+                s1   = fit_or_load_stage1(s1p, s.dm, ds_h, wd0.pop, cfg;
+                                          adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+                md   = stage1_moment_draws(s.dm, ds_h, wd0.pop, cfg, s1.chn; n_post = cfg.n_stage1_post)
+                pooled = fit_stage2_pooled(s.nb, md, wd0, cfg; adtype = adtype,
+                                           base_seed = cfg.seed + 1000 * s.h, max_concurrent = K)
+                jldsave(s.path; pooled)
+                fitted += 1
+            catch err
+                failed += 1
+                @warn "stage2 fit failed" origin=win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
             end
         end
+        @info "prefit_stage2!: origin $(win_o.origin) done ($fitted fitted, $failed failed)"
     end
-
-    old_blas = LinearAlgebra.BLAS.get_num_threads()
-    LinearAlgebra.BLAS.set_num_threads(1)                 # avoid threads × BLAS oversubscription
-    try
-        run_spec(specs[1], false)                         # ONE global warmup (compile model/AD)
-        if length(specs) > 1
-            @sync for s in @view specs[2:end]
-                Threads.@spawn run_spec(s, true)
-            end
-        end
-    finally
-        LinearAlgebra.BLAS.set_num_threads(old_blas)
-    end
-    wait(producer)                                        # surface any unexpected producer error
-    return (; requested = length(specs), fitted = fitted[], failed = failed[], concurrency = K)
+    return (; fitted, failed, skipped, concurrency = K)
 end
 
 """
-    iterated_forecast(dm, nb, wd0, cfg, win0; grid, setting, use_nuts, save_dir,
-                      ndraws, apd_by_h)
+    prefit_two_stage!(combos, wins, cfg; data_provider, save_dir, max_concurrent, adtype)
 
-Contact-updated iterated `A × H × K` forecast (spec inst/1d, points 2–3). Infections
-and antibody are **frozen at the baseline** `win0.origin` (t₀); for each horizon
-`h = 1..H` the contact/degree window slides to end at `t₀+h`, the joint model is
-re-fit (or a saved chain reloaded), the NGM is refreshed, and one renewal step is
-taken. The forecast for week `t₀+h` uses the observed history up to t₀ plus the
-**mean** forecasts of the intervening weeks as renewal lags (per-draw coherence
-across independent re-fits is undefined). One MCMC chain is saved per horizon under
-`save_dir` as `8j_chn_<degree>_<ngm>_<origin>_h<h>.jld2`.
-
-`apd_by_h` (optional) is a length-`H` vector of pre-built `AgePairData` for the
-shifted windows — pass it to reuse the age-pair binning across the four combos.
+Convenience driver: `prefit_stage1!` (for the distinct degree models in `combos`) then
+`prefit_stage2!`. Returns `(; stage1, stage2)`.
 """
-function iterated_forecast(dm::ContactDegreeModel, nb::NGMBuilder, wd0::WindowData,
-                           cfg::FrameworkConfig, win0::WeeklyWindow;
-                           grid = cis_age_grid(), setting::Symbol = :all,
-                           use_nuts::Bool = false, adtype = AutoReverseDiff(),
+function prefit_two_stage!(combos, wins, cfg::FrameworkConfig; data_provider,
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                           ndraws::Int = cfg.n_forecast_draws, apd_by_h = nothing)
+                           max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
+    dms = unique(first.(combos))
+    s1 = prefit_stage1!(dms, wins, cfg; data_provider = data_provider, save_dir = save_dir,
+                        max_concurrent = max_concurrent, adtype = adtype)
+    s2 = prefit_stage2!(combos, wins, cfg; data_provider = data_provider, save_dir = save_dir,
+                        max_concurrent = max_concurrent, adtype = adtype)
+    return (; stage1 = s1, stage2 = s2)
+end
+
+"""
+    fit_or_load_stage2(dm, nb, wd0, cfg, win0, h; apd_h=nothing, grid, setting, save_dir, adtype)
+
+Return the Stage-2 pooled NamedTuple for `(dm, nb, origin, h)`, reloading the cached `8j_s2_*` file
+if present, else building it end-to-end: Stage-1 (load/fit on the horizon-`h` contact window ending
+at `origin+h`) → `n_stage1_post` moment draws → `fit_stage2_pooled` → save. `apd_h` is the pre-built
+`AgePairData` for that horizon window (built on demand if `nothing`).
+"""
+function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow,
+                            h::Integer; apd_h = nothing, grid = cis_age_grid(),
+                            setting::Symbol = :all,
+                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                            adtype = AutoReverseDiff())
+    tag = contacts_label(cfg)
+    s2p = stage2_path(dm, nb, win0.origin, h; contacts = tag, save_dir = save_dir)
+    isfile(s2p) && return load(s2p, "pooled")
+    if apd_h === nothing
+        win_h = WeeklyWindow(win0.origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
+                             horizons = cfg.horizons)
+        apd_h = prepare_degree_data(win_h, cfg; grid = grid, setting = setting)
+    end
+    ds_h = build_degree_stats(dm, apd_h, cfg)
+    s1p  = stage1_path(dm, win0.origin, h; contacts = tag, save_dir = save_dir)
+    s1   = fit_or_load_stage1(s1p, dm, ds_h, wd0.pop, cfg; adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+    md   = stage1_moment_draws(dm, ds_h, wd0.pop, cfg, s1.chn; n_post = cfg.n_stage1_post)
+    pooled = fit_stage2_pooled(nb, md, wd0, cfg; adtype = adtype, base_seed = cfg.seed + 1000 * h)
+    jldsave(s2p; pooled)
+    return pooled
+end
+
+"""
+    two_stage_forecast(dm, nb, wd0, cfg, win0; apd_by_h=nothing, grid, setting, save_dir, adtype)
+
+Pooled `A × H × N` forecast (N = n_stage1_post·n_stage2_draws = 10_000). Infections and antibody are
+frozen at the baseline `win0.origin` (t₀); for each horizon `h` the Stage-2 pooled draws for
+`(dm, nb, origin, h)` are reloaded (or built), and per pooled draw `d` (from Stage-1 draw
+`m = post_index[d]`) the NGM `N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], antibody_t₀;
+gamma_sar=gamma_sar[d])` takes one renewal step against the history (observed lags up to t₀ plus the
+intervening horizons' MEAN forecasts — per-draw coherence across horizons is undefined, mirroring the
+former `iterated_forecast`). `apd_by_h[hi]` (optional) is the pre-built horizon-window `AgePairData`.
+"""
+function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow;
+                            apd_by_h = nothing, grid = cis_age_grid(), setting::Symbol = :all,
+                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                            adtype = AutoReverseDiff())
     A = wd0.A; H = length(cfg.horizons)
     w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     mkpath(save_dir)
     hist = collect(float.(wd0.I_mean))                 # A × Tn0, last col = origin (t₀)
-    cols = Vector{Matrix{Float64}}(undef, H)           # per-horizon A × keep draws
+    cols = Vector{Matrix{Float64}}(undef, H)
     for (hi, h) in enumerate(cfg.horizons)
-        # contact/degree window ending at t₀ + h weeks (sliding; infections stay at t₀)
-        origin_h = win0.origin + Day(7 * h)
-        win_h = WeeklyWindow(origin_h; n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons)
-        apd_h = apd_by_h === nothing ?
-            prepare_degree_data(win_h, cfg; grid = grid, setting = setting) : apd_by_h[hi]
-        ds_h = build_degree_stats(dm, apd_h, cfg)
-        path = joinpath(save_dir,
-            "8j_chn_$(degree_label(dm))_$(ngm_label(nb))_$(contacts_label(cfg))_$(win0.origin)_h$(h).jld2")
-        fl = fit_or_load_chain(path, dm, nb, ds_h, wd0, cfg, w; use_nuts = use_nuts, adtype = adtype)
-
-        gq = vec(generated_quantities(fl.model, fl.chn))
-        keep = min(ndraws, length(gq))
-        idx = round.(Int, range(1, length(gq); length = keep))
+        apd_h  = apd_by_h === nothing ? nothing : apd_by_h[hi]
+        pooled = fit_or_load_stage2(dm, nb, wd0, cfg, win0, h; apd_h = apd_h, grid = grid,
+                                    setting = setting, save_dir = save_dir, adtype = adtype)
+        Np  = length(pooled.gamma_sar)
         rng = MersenneTwister(cfg.seed + h)
-        draws_h = Array{Float64}(undef, A, keep)
-        step_mean = zeros(A)
-        for (d, k) in enumerate(idx)
-            q = gq[k]
-            N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd0.antibody[:, end]; γ = q.γ)   # origin-week C* (t₀+h); antibody frozen at t₀
-            acc = zeros(A)
-            for s in 1:cfg.smax
-                acc .+= w[s] .* hist[:, end - s + 1]
-            end
+        acc = zeros(A)                                 # renewal-weighted history (fixed within horizon)
+        for s in 1:cfg.smax
+            acc .+= w[s] .* hist[:, end - s + 1]
+        end
+        draws_h = Array{Float64}(undef, A, Np)
+        preds   = Array{Float64}(undef, A, Np)         # deterministic renewal mean per draw
+        for d in 1:Np
+            m = pooled.post_index[d]
+            N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
+                          pooled.F[d], wd0.antibody[:, end]; gamma_sar = pooled.gamma_sar[d])
             pred = N * acc
             for a in 1:A
-                σ = max(q.sigma_inf * pred[a], 1e-6)
-                draws_h[a, d] = pred[a] + σ * randn(rng)
+                p = pred[a]
+                preds[a, d] = p
+                if isfinite(p)
+                    σ = max(pooled.sigma_inf[d] * p, 1e-6)
+                    draws_h[a, d] = p + σ * randn(rng)
+                else
+                    draws_h[a, d] = p                  # keep ±Inf; never fabricate NaN (Inf + Inf·randn)
+                end
             end
-            step_mean .+= pred
         end
-        step_mean ./= keep
         cols[hi] = draws_h
-        hist = hcat(hist, step_mean)                   # deterministic lag for the next horizon
+        # ROBUST lag plug for the next horizon: median over FINITE draws per age. The pooled
+        # predictive is heavy-tailed — a few pathological Pathfinder draws give an astronomically
+        # supercritical N — and a MEAN plug lets one outlier poison the shared iteration for ALL
+        # draws → mass Inf/NaN blow-up. The median ignores those outliers so the iteration stays
+        # finite; individual pathological draws still blow up in their own fan column (handled by
+        # the finite-robust quantiles downstream).
+        step_plug = [begin
+                         f = filter(isfinite, @view preds[a, :])
+                         isempty(f) ? 0.0 : median(f)
+                     end for a in 1:A]
+        hist = hcat(hist, step_plug)                   # robust deterministic lag for the next horizon
     end
     K = minimum(size(c, 2) for c in cols)              # align draw count across horizons
     out = Array{Float64}(undef, A, H, K)

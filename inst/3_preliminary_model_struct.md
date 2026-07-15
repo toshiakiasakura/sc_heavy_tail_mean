@@ -28,10 +28,12 @@ each fixed once per fit and dispatched deterministically:
 | **2. NGM builder** | `NGMBuilder` | `MeanNGM`, `NeighbourhoodDegreeNGM` | How the per-capita effective contact $C^0$ is formed from the degree distribution's moments |
 
 The Cartesian product of the two axes gives the **"four ways"** — a $2\times2$ grid of model
-variants — that the preliminary analysis fits and scores side by side. A single joint Turing model
-(`model_joint`) serves all four combinations: the contact-degree likelihood and the infection
-likelihood live in the same probabilistic program, and the two axes enter only as fixed model
-arguments, so the parameter space is well defined per fit.
+variants — that the preliminary analysis fits and scores side by side. As of 2026-07-12
+(inst/4_cut_Bayes.md) the fit is a **two-stage cut inference** (§6.0): the contact-degree likelihood
+(`model_degree`, Stage 1) and the infection likelihood (`model_transmission`, Stage 2) are **separate**
+probabilistic programs, with Stage 2 conditioning on Stage-1 draws and no feedback the other way.
+Stage 1 is NGM-independent (Axis 2 enters only downstream), so one Stage-1 fit per degree model serves
+both builders; the two axes remain fixed arguments so each stage's parameter space is well defined.
 
 Notationally we use $A$ age groups indexed $a,b,i,j \in \{1,\dots,A\}$, with $i$ (or $a$) the
 **participant / contactor / susceptible** group and $j$ (or $b$) the **contactee / infectious**
@@ -149,8 +151,9 @@ N_{ab}(t) \;=\; \gamma_{\mathrm{SAR}}\;\cdot\;\underbrace{\text{susc}_a\big(1 + 
 \;\cdot\; C^\ast_{ab} \;\cdot\; \text{inf}_b ,
 $$
 
-with $\gamma_{\mathrm{SAR}}$ the single **absolute transmissibility** scalar (analysis-plan reparam;
-it alone carries the NGM level), $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
+with $\gamma_{\mathrm{SAR}}$ the **per-contact secondary attack rate** (analysis-plan reparam; it
+carries the NGM level, and because $C^\ast$ is **not** normalised it reproduces the reference cell
+$N_{11}=\text{susc}_1\cdot\text{inf}_1=\gamma_{\mathrm{SAR}}$), $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
 and $\text{inf}_b$ the **relative** infectivity of group $b$ — both normalised so the reference bin $1$
 ("2-10") is $1$ ($\text{susc}_1=\text{inf}_1=1$; bins $2..A$ estimated) — and $F \in (0,1)$ a **leaky**
 antibody-protection factor scaling
@@ -158,21 +161,22 @@ susceptibility by the group's antibody prevalence $A_a(t)$ (at $F=1$ antibodies 
 protection; smaller $F$ gives stronger protection). $C^\ast_{ab}$ is the per-capita effective
 contact matrix produced by the NGM builder (§5.1).
 
-> **Update 2026-07-11 (C\* normalisation + γ rename).** To decouple the transmissibility scalar from
-> the contact-matrix scale (they were posterior-correlated — raising $R_t$ could be met by raising the
-> scalar *or* the whole $C^\ast$), $C^\ast_t$ is now **normalised inside `model_joint`** by a single
-> window-constant $\bar S$ = the fit-window-averaged, population-weighted mean contact intensity
-> ($\bar S = \operatorname{mean}_{t\in\text{fit}}\sum_{a,b} w_a\,C^\ast_{ab}(t)$, $w=\text{pop}/\!\sum\text{pop}$):
-> $C^\ast_t \leftarrow C^\ast_t/\bar S$. Because $\bar S$ is homogeneous degree-1 in $C^\ast$, the
-> renewal likelihood becomes **scale-invariant in $C^\ast$** — the absolute contact level moves into the
-> transmissibility scalar and $C^\ast$ feeds the NGM only its *temporal change*. The scalar is
-> **renamed** $\gamma_{\mathrm{SAR}}\to\gamma$ (`log_gamma_sar`→`log_gamma`, `gamma_sar`→`γ`): it is no
-> longer a per-contact SAR but the absolute NGM level $\gamma = \text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S
-> \approx R_t/\rho(\tilde C^\ast)$, **window-relative** (not comparable across origins). Everything
-> downstream flows through `build_ngm → N`, which depends only on the product $\gamma\,C^\ast$, so $R_t$,
-> forecasts and WIS are unchanged — only the level *decomposition* is cleaned up. (This departs from the
-> docx's literal per-contact-SAR anchoring; "docx wins" is overridden here by the decoupling requirement,
-> as it was for reciprocity balancing.) See §6 for the recalibrated prior and `tasks/lessons.md`.
+> **Update 2026-07-12 (two-stage cut + γ_SAR revert, inst/4_cut_Bayes.md).** The `-gnorm`
+> $C^\ast\!\to\!C^\ast/\bar S$ normalisation (added 2026-07-11 to decouple the transmissibility scalar
+> from the contact scale) was **reverted**: $C^\ast$ is **not** normalised, so it feeds the NGM at its
+> raw level and $\gamma_{\mathrm{SAR}}$ is again the **per-contact secondary attack rate** — it
+> reproduces $N_{11}=\text{susc}_1\text{inf}_1$ directly and IS comparable across origins
+> (`gamma_sar` / `log_gamma_sar`, `build_ngm(…; gamma_sar=…)`, prior $\mathrm{Normal}(\log 0.1, 1.8^2)$
+> — **loosened 2026-07-13** to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$. The earlier $\mathrm{Normal}(\log0.27,1.05^2)$
+> [90% $\gamma_{\mathrm{SAR}}\!\in\![0.048,1.52]$] together with the softclamp lower bound $\log0.02$ was **pinning
+> the low-$\gamma$ configs**: the negbin$|$neighbourhood posterior median (~0.021) sat on the $\log0.02$ clamp with an
+> implausibly tight CI (clamp compression). New centre $\log 0.1$ = geometric mean of $[0.001,10]$, log-SD $1.8$
+> ⇒ 90% $\gamma_{\mathrm{SAR}}\!\in\![0.0052,1.93]$; the softclamp is widened to $[\log0.001,\log10]$, now at ≈±2.56σ
+> (outside the band, tails ≈0.5% each), so it contains the prior and no longer biases the low tail. This invalidates
+> cached `8j_s2_*` chains — regenerate them; `8j_s1_*` are $\gamma_{\mathrm{SAR}}$-independent and unaffected.)
+> Concurrently the single joint fit was split into a **two-stage cut inference** (see §6.0 below): the
+> $C^\ast$–$\gamma$ posterior correlation that motivated normalisation is now moot because $\gamma_{\mathrm{SAR}}$
+> and the contact structure are estimated in *separate* stages. See `tasks/lessons.md`.
 
 ### 3.3 Renewal recursion and forecast
 
@@ -356,10 +360,23 @@ parameters, so it is computed once per week and reused across the renewal recurs
 
 ---
 
-## 6. The joint model
+## 6. The model (two-stage cut)
 
-`model_joint(dm, nb, ds, wd, w, cfg)` is one Turing `@model` combining the contact-degree
-likelihood and the infection likelihood.
+### 6.0 Two-stage cut inference (inst/4_cut_Bayes.md)
+
+The former single joint `@model` was split into a **two-stage cut inference**. **Stage 1**
+`model_degree(dm, ds, pop, cfg)` fits the contact-degree GP **alone** — it carries only the contact
+block below and returns the per-week raw moments $(\langle k\rangle_t, \langle k^2\rangle_t, g_t)$, so
+it is **NGM-independent** (one fit serves both builders; the builder is applied downstream via
+`contact_star`). **Stage 2** `model_transmission(\{C^\ast_t\}, wd, w, cfg)` fits the transmission
+block **alone**, conditioning on a *fixed* $\{C^\ast_t\}$ built from one Stage-1 posterior draw.
+
+Stage-1 uncertainty is propagated by a cut Monte Carlo: draw $M=100$ Stage-1 posterior samples; for
+each, form $\{C^\ast_t\}$ and run Stage 2 keeping $D=100$ draws; **pool** the $M\times D = 10{,}000$
+infection draws as the predictive distribution scored by WIS. There is **no feedback** from the
+infection likelihood to the contact GP (the "cut"): $\mu$ is estimated purely from the contact data,
+so it no longer depends on the NGM builder. The two blocks' sampling statements are unchanged from
+the joint model and are given below as the two stages.
 
 **The model estimates contacts per week, temporally smoothed.** A single **separable
 spatio-temporal GP** (§5) governs all $T$ window weeks — sharing the spatial kernel $L_{\text{age}}$,
@@ -397,33 +414,48 @@ $C^\ast_t = $ `contact_star`$(nb, \langle k\rangle_t, \langle k^2\rangle_t, g_t)
 $4\times T$ array), re-drawn each week with no age-pair random effect; it is **not** temporally
 smoothed (unlike the mean field).
 
-*Transmission block (absolute $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf, non-centred):*
-susceptibility and infectivity are **relative** to the reference bin $1$ ("2-10"), fixed to $1$; only the
-$A-1$ non-reference offsets are estimated, and the single absolute-transmissibility scalar
-$\gamma_{\mathrm{SAR}}$ carries the level (it replaces the old confounded $\mu_s,\mu_i$ pair).
+*Stage 2 — transmission block (per-contact $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf,
+non-centred; conditions on the fixed $\{C^\ast_t\}$ of one Stage-1 draw):* susceptibility and
+infectivity are **relative** to the reference bin $1$ ("2-10"), fixed to $1$; only the $A-1$
+non-reference offsets are estimated, and the per-contact secondary attack rate $\gamma_{\mathrm{SAR}}$
+carries the level (it replaces the old confounded $\mu_s,\mu_i$ pair).
 
 $$
 \begin{aligned}
-\log\gamma &\sim \mathcal N(\log 0.8,\, 0.5^2), &&
-\gamma = \exp(\operatorname{softclamp}(\log\gamma,\log 0.02,\log 5)),\\
-\sigma_s &\sim \mathcal N^+(0.1, 0.02^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
-\text{susc} &= \big(1,\ \exp(\sigma_s z_s)\big),\\
-\sigma_i &\sim \mathcal N^+(0.1, 0.02^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
-\text{inf} &= \big(1,\ \exp(\sigma_i z_i)\big),\\
+\log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.33,\, 0.56^2), &&
+\gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.02,\log 5)),\\
+\sigma_s &\sim \mathcal N^+(0.5, 0.25^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
+\text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
+\sigma_i &\sim \mathcal N^+(0.5, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
+\text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
 F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2). & & &
 \end{aligned}
 $$
 
-After the $C^\ast$ normalisation (§3.2 update), $\gamma$ is the absolute NGM level
-$\gamma = \text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S \approx R_t/\rho(\tilde C^\ast)$, which is O(1).
-The prior is **recalibrated** (2026-07-11) by reconstructing new-$\gamma=\text{susc}_1\!\cdot\!\text{inf}_1\cdot\bar S$
-per draw from the pre-normalisation `temporal` chains, over 6 origins × all four (degree × NGM) combos:
-new-$\gamma$ medians $0.69$–$1.20$ (per-combo log-SD $0.12$–$0.34$), geometric-mean centre $0.84$ — so the
-**single** prior $\mathcal N(\log 0.8, 0.5^2)$ serves all four (though $\bar S$ itself spans $\sim\!100\times$
-across builders — neighbourhood-negbin $\bar S\approx173$ — $\text{susc}_1\!\cdot\!\text{inf}_1$ compensates,
-keeping $\gamma$ O(1)). The model returns the generated quantities
-$(\text{susc}, \text{inf}, F, \gamma, \sigma_{\text{inf}}, \{C^\ast_t\})$ with $\{C^\ast_t\}$ on the
-normalised scale.
+With $C^\ast$ **un-normalised** (§3.2 update, 2026-07-12), $\gamma_{\mathrm{SAR}}$ is the per-contact
+secondary attack rate: it reproduces the reference cell $N_{11}=\text{susc}_1\cdot\text{inf}_1$
+directly and is comparable across origins. The prior is calibrated by reading 18 pre-`-gnorm`
+`temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$ had median
+$0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$, 90% $\gamma_{\mathrm{SAR}}\in[0.13,0.83]$,
+interior to the softclamp $[\log 0.02,\log 5]$. Age variation in inherent susceptibility/infectivity
+admits genuine age variation, and the **soft-clamp** is a looser safety bound: the offset scale
+$\sigma_{s,i}\sim\mathcal N^+(0.5,0.25^2)$ (**loosened 2026-07-13 from $\mathcal N^+(0.1,0.05^2)$**;
+marginal SD $\approx0.5$ ⟹ $\pm2$ SD $\approx\pm1.0$ in log ⟹ TYPICAL
+$\text{susc},\text{inf}\in[0.37,2.7]$), and each non-reference
+log-offset $\sigma\,z$ is soft-clamped to $[\log 0.05,\log 20]\approx[-3,3]$ (**also loosened
+2026-07-13 from $[\log 0.2,\log 5]$**), **hard-bounding** $\text{susc},\text{inf}\in[0.05,20]$ — wide
+enough that realistic profiles never touch it (the prior's $\pm2$ SD sits at $\pm1$, clamp at
+$\sim\pm6$ SD), but still capping a stray Pathfinder draw's supercritical NGM at the source. Prior
+mass $\subset$ clamp ⟹ profiles interior and undistorted. The $A-1$ non-reference offsets are **independent per age bin**
+(offset $\sigma\,z$, $z\sim\mathcal N(0,1)^{A-1}$ iid) — **no cross-bin smoothing**. (A
+shared-length-scale squared-exponential GP over the age-bin index, $\sigma\,L_{si}z$, previously
+correlated neighbouring bins; it was **removed 2026-07-13** (user request), along with the length-scale
+latent $\rho_{si}$. Because that kernel had unit diagonal, dropping it leaves each bin's marginal SD
+$=\sigma_{s,i}$ unchanged, so the $[0.37,2.7]$ band and $[0.05,20]$ clamp are preserved — the age
+profile is simply rougher. See the GP→RW1→RW2→GP→none history in `tasks/lessons.md`.)
+Stage 2 returns the generated quantities
+$(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}})$; Stage 1 returns the raw
+moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_t\})$.
 
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
 only as renewal history). For each age $a$,
@@ -435,26 +467,25 @@ I_{a,t} \sim \mathcal N\!\Big(\hat I_a(t),\ \sigma_{a,t}^2\Big),\quad
 $$
 
 i.e. the observation SD combines a multiplicative process-noise term $\sigma_{\text{inf}} I_{a,t}$
-in quadrature with the inc2prev estimate SD $s^{I}_{a,t}$. The model returns the generated
-quantities $(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, \{C^\ast_t\})$ for forecasting.
+in quadrature with the inc2prev estimate SD $s^{I}_{a,t}$. In the cut, the $\{C^\ast_t\}$ here are a
+**fixed** input (one Stage-1 draw run through `contact_star`), not sampled.
 
-**Joint log-likelihood.** Stacking the two `Turing.@addlogprob!` contributions, the joint model
-accumulates
+**The two stages' log-likelihoods (no longer one target).** Under the cut the contact and infection
+terms live in **separate** models:
 
 $$
-\log L \;=\;
-\underbrace{\sum_{t=1}^{T}\ \sum_{i,j=1}^{A} \ell^{(t)}_{ij}}_{\text{contact degree (§4)}}
-\;+\;
-\underbrace{\sum_{t=s_{\max}+1}^{T}\ \sum_{a=1}^{A}
+\log L_{\text{Stage 1}} = \underbrace{\sum_{t=1}^{T}\ \sum_{i,j=1}^{A} \ell^{(t)}_{ij}}_{\text{contact degree (§4)}},
+\qquad
+\log L_{\text{Stage 2}} = \underbrace{\sum_{t=s_{\max}+1}^{T}\ \sum_{a=1}^{A}
 \log \mathcal N\!\big(I_{a,t}\,;\ \hat I_a(t),\ \sigma_{a,t}^2\big)}_{\text{infection renewal}},
 $$
 
 where $\ell^{(t)}_{ij}$ is the §4.1 NegBin (over the count histogram) or §4.2 Weibull-hurdle (over
 the positive duration-weighted degrees) cell log-likelihood, evaluated at the week-$t$ contact mean
-$\mu_{ij,t}$ and its block-pair dispersion $\phi_{\beta(i)\beta(j)}$ / shape
-$\kappa_{\beta(i)\beta(j)}$; the contact term runs over **all** $T$ window weeks while the infection
-term uses only the $t>s_{\max}$ fit weeks. Adding the priors of the two sampling blocks gives the
-log-posterior that Pathfinder/NUTS target (§7).
+$\mu_{ij,t}$ and its block-pair dispersion. Stage 1's contact term runs over **all** $T$ window weeks;
+Stage 2's infection term (conditioning on that stage-1 draw's fixed $\{C^\ast_t\}$) uses only the
+$t>s_{\max}$ fit weeks. Because the two are fit separately, the infection likelihood does **not**
+feed back into the contact GP — this is the "cut" (§6.0).
 
 Every log-scale latent that feeds an exponential ($\log\rho, \log\eta, \log\kappa, \log\phi$, and
 the per-cell rate) is clamped inside the model body so that aggressive optimiser/Pathfinder steps
@@ -462,59 +493,64 @@ cannot underflow (e.g. Weibull scale $\to 0$); the clamps are wide enough that t
 interior and gradients are unaffected.
 
 **Per-horizon window offset (forecasting use).** Although the contact and infection blocks share the
-index $t = 1,\dots,T$, they need not span the same calendar weeks. In forecasting (§8) the joint
-model is re-fit once **per horizon** $h$: the contact-degree block's window is slid forward to end at
-$t_0 + h$, while the infection/renewal block stays anchored at the origin $t_0$ (`wd` is fixed;
-only the degree data `ds` changes with $h$, and each $(dm, nb, t_0, h)$ chain is cached separately as
-`..._h<h>.jld2`). Thus for every horizon the contact term is fit over weeks offset $h$ **ahead** of the
-infection term — the age-pair degree distribution is observed **at** the target week $t_0+h$
-(contemporaneous with it), whereas infections and antibody are frozen at $t_0$. The two windows never
-coincide (even at $h=1$ the contacts lead the infection block by one week).
+index $t = 1,\dots,T$, they need not span the same calendar weeks. In forecasting (§8) both stages are
+re-fit once **per horizon** $h$: Stage 1's contact-degree window is slid forward to end at $t_0 + h$
+(cached as `8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2`, NGM-independent), and Stage 2 conditions on
+that stage's $\{C^\ast_t\}$ against the infection/renewal window anchored at the origin $t_0$ (`wd`
+fixed; the pooled draws cached as `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`). Thus for every
+horizon the contact term is fit over weeks offset $h$ **ahead** of the infection term — the age-pair
+degree distribution is observed **at** the target week $t_0+h$ (contemporaneous with it), whereas
+infections and antibody are frozen at $t_0$. The two windows never coincide (even at $h=1$ the contacts
+lead the infection block by one week).
 
 ---
 
-## 7. Inference
+## 7. Inference (two-stage cut)
 
-`fit_joint` fits one $(dm, nb)$ combination for one window:
+For one $(dm, nb, \text{origin}, h)$:
 
-1. **Pathfinder** (`Pathfinder.pathfinder`) produces a parsimonious variational approximation to the
-   posterior (default 200 draws), used both as the standalone fit when `USE_NUTS = false` and as an
-   initialiser otherwise.
-2. **NUTS** (optional; `USE_NUTS = true`) is then run, initialised from the Pathfinder posterior
-   mean. If NUTS fails it falls back to the Pathfinder draws (which carry the same parameter names).
+1. **Stage 1** — `fit_stage1(dm, ds, pop, cfg)` fits the contact GP by **Pathfinder** (default; or
+   NUTS when `cfg.stage1_use_nuts = true`, initialised from the Pathfinder mean). `stage1_moment_draws`
+   then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments (deterministic even-grid
+   subsample).
+2. **Stage 2** — `fit_stage2_pooled(nb, moment_draws, wd, cfg)` forms $\{C^\ast_t\}$ for each Stage-1
+   draw (via `contact_star`) and Pathfinder-fits `model_transmission` conditioning on it, keeping
+   $D = $ `cfg.n_stage2_draws` $= 100$ draws. The $M\times D = 10{,}000$ pooled draws
+   $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, F, \sigma_{\text{inf}}, \text{post\_index},
+   \{C^\ast_{\text{end}}\})$ are the infection predictive.
 
-The random seed is `cfg.seed = 1236`; a per-fit RNG stream can be supplied to make the parallel
-pre-fit thread-safe. Fits are mutually independent, so `prefit_chains!` fans the
-$(\text{origin} \times \text{combo} \times \text{horizon})$ chains out over Julia threads with a
-CPU- and memory-balanced concurrency cap, pins BLAS to one thread to avoid oversubscription, warms
-compilation on one spec first, and caches each chain to
-`dt_intermediate/8j_chn_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`. Cached chains are skipped, so
-runs are resumable.
+The random seed is `cfg.seed = 1236` (Stage-2 draw $m$ uses `Xoshiro(seed + m)`). Fits are mutually
+independent: `prefit_stage1!` fans the Stage-1 chains out over Julia threads (BLAS pinned, warm-compile
+first), then `prefit_stage2!` runs each Stage-2 cell's 100 per-draw fits under the same concurrency cap;
+origins are processed sequentially (bounded memory). Artefacts cache to
+`dt_intermediate/8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2` (Stage 1) and
+`8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2` (Stage 2); cached files are skipped ⟹ resumable.
 
-**The 8j notebook uses `USE_NUTS = false` — Pathfinder is the operative fitting method.**
+**The 8j notebook uses Pathfinder for both stages (`STAGE1_USE_NUTS = false`); switching Stage 1 to
+NUTS is the intended later refinement.**
 
 ---
 
-## 8. Forecasting: the contact-updated iterate
+## 8. Forecasting: the contact-updated pooled iterate
 
-The notebook forecasts with `iterated_forecast`, the *contact-updated* iterate. For a baseline
-origin $t_0$, the infection and antibody series are **frozen at $t_0$**, while the contact/degree
-window is allowed to slide: for horizon $h$ the degree window ends at $t_0 + h$ weeks, the joint
-model is re-fit (or its cached chain reloaded), and a fresh NGM is formed from that window's
-origin-week $C^\ast$ (with antibody held at $t_0$). A single renewal step is then taken,
+The notebook forecasts with `two_stage_forecast`, the *contact-updated* iterate over the **pooled**
+draws. For a baseline origin $t_0$, the infection and antibody series are **frozen at $t_0$**, while
+the contact/degree window slides: for horizon $h$ the Stage-1 degree window ends at $t_0 + h$ and the
+Stage-2 pooled draws for $(dm, nb, t_0, h)$ are reloaded (or fit). Per pooled draw $d$ (from Stage-1
+draw $m = $ `post_index[d]`) a fresh NGM is formed from that draw's origin-week $C^\ast$
+(`Cstar_end[m]`, antibody held at $t_0$) and its Stage-2 infection parameters, and a single renewal
+step is taken,
 
 $$
 \hat I_a(t_0+h) = \Big[N\, \textstyle\sum_{s=1}^{s_{\max}} w_s\, I(t_0+h-s)\Big]_a,
 $$
 
-and observation noise $\sigma = \max(\sigma_{\text{inf}}\hat I_a, 10^{-6})$ is added per draw. The
+with observation noise $\sigma = \max(\sigma_{\text{inf}}\hat I_a, 10^{-6})$ added per draw. The
 renewal lags use observed infections up to $t_0$ plus the **mean** predictions of the intervening
-weeks (a deterministic mean-plugged lag; per-draw coherence across the independent re-fits is
-undefined). This produces an $A \times H \times K$ array of posterior-predictive draws
-($K = $ `n_forecast_draws` $= 200$).
-
-A simpler `posterior_forecast` also exists — it freezes the NGM at the origin and iterates $H$ weeks
-with `forecast_forward` — but the 8j run uses the contact-updated iterate.
+weeks (a deterministic mean-plugged lag; per-draw coherence across horizons is undefined). This
+produces an $A \times H \times N$ array of posterior-predictive draws, where
+$N = $ `n_stage1_post` $\times$ `n_stage2_draws` $= 10{,}000$ is the pooled predictive — fed
+directly to WIS (the draw axis is pooling-agnostic to `scoring.jl`).
 
 ---
 
@@ -542,30 +578,44 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 
 - **Configuration** (`FrameworkConfig`): $d_{\max}=240$, $w_{\text{group}}=2.5/240$,
   $s_{\max}=4$, `n_fit` $=8$, `horizons` $=1{:}4$, seed $=1236$, generation interval mean/SD
-  $=5/5$ days, `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, `n_forecast_draws` $=200$,
+  $=5/5$ days, `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
+  `n_stage1_post` $=100$ / `n_stage2_draws` $=100$ (⟹ 10 000 pooled), `stage1_use_nuts` $=$ `false`,
   GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log15,0.5^2)$ (shared
   prior for both diagonal length-scales), $\log\eta\sim\mathcal N(0,0.5^2)$,
-  $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks) and
-  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`), **block-linear per-week dispersion**
-  (one $\log\kappa$/$\log\phi$ per child/adult block pair, §4.3), and **per-week temporally-smoothed
-  contact estimation** (one separable spatio-temporal age-pair GP across the window weeks). The
-  chain-cache `contacts_label` is `"temporal-gsar"` — the `-gsar` tag marks block-linear dispersion
-  plus the absolute-transmissibility $\gamma_{\mathrm{SAR}}$ reparam. (The earlier `-hdisp`/`-hn`
-  dispersion random-effect tags were reverted 2026-07-11, so the current `-gsar` caches are disjoint
-  from those and from the pre-$\gamma_{\mathrm{SAR}}$ `"temporal"` chains.)
+  $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks),
+  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
+  $\log\gamma_{\mathrm{SAR}}\sim\mathcal N(\log0.1,1.8^2)$ (`gamma_sar_prior`; loosened 2026-07-13 to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$, 90% $\in[0.0052,1.93]$, softclamp $[\log0.001,\log10]$),
+  **block-linear per-week dispersion** (one $\log\kappa$/$\log\phi$ per child/adult block pair, §4.3),
+  and **per-week temporally-smoothed contact estimation** (one separable spatio-temporal age-pair GP
+  across the window weeks). The chain-cache `contacts_label` is `"temporal-gsar-cut"` — the `-gsar-cut`
+  tag marks the **two-stage cut** split with per-contact $\gamma_{\mathrm{SAR}}$ and **un-normalised**
+  $C^\ast$ (the S̄-normalising `-gnorm` chains, differently-scaled `log_gamma`, are disjoint and left
+  on disk).
 - **Rolling origins.** The forecast origin is rolled weekly over the whole *available period* the
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
   ($2020$-$08$-$02$) plus the 12-week fit/lag lookback, and above by the last CoMix contact week
   minus $\max h$ weeks (the iterate needs contacts out to $t_0 + 4$).
 - **Four ways.** At each origin the four combos
   $\{$`NegBinAgePair`, `HurdleWeibullAgePair`$\} \times \{$`MeanNGM`, `NeighbourhoodDegreeNGM`$\}$
-  are fit and forecast $1$–$4$ weeks ahead. The run is memory-bounded and resumable: per origin only
-  that origin's four degree windows are built (reusing a single raw read of the CoMix tables), its
-  16 chains are pre-fit in parallel, forecasts are assembled, and the degree data discarded.
+  are fit (two-stage) and forecast $1$–$4$ weeks ahead. The run is memory-bounded and resumable: per
+  origin only that origin's four degree windows are built (reusing a single raw read of the CoMix
+  tables), Stage-1 GP chains (8 = 2 degree × 4 horizons) and Stage-2 pooled files (16 = 4 combos × 4
+  horizons) are pre-fit, forecasts are assembled, and the degree data discarded.
 - **Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`) and diagnostic figures: WIS by
   horizon, four-ways WIS bars, WIS over the forecast period, forecast-vs-observed fans by origin,
   and fitted transmission structure (susceptibility/infectivity ratios to a reference group and the
   three GP length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ over time).
+- **Reproduction number** (two separate figures). *(1)* `res/9j_reproduction_number.png` — the
+  "contact & transmission" $R$: the dominant (Perron) eigenvalue $\rho(N)$ of the frozen origin-week
+  NGM, per origin, over the inc2prev national $R$ and the $R=1$ line. *(2)*
+  `res/9j_contact_reproduction_number.png` — the **contacts-only relative** $R$:
+  $\rho(C^\ast_t)/\rho(C^\ast_{t_{\text{first}}})$, the dominant eigenvalue of the bare contact matrix
+  $C^\ast$ alone (no $\gamma_{\text{SAR}}$, susceptibility, infectivity or antibody) normalised to the
+  **first forecast origin** (=1.0), isolating how contact structure alone drove transmissibility
+  relative to the baseline week. Overlaid with one **model-free** line —
+  $\rho(\hat{E}_t)/\rho(\hat{E}_{t_{\text{first}}})$, the same ratio for the RAW empirical weekly
+  mean-contact matrix $\hat{E}_t$ (`AgePairData.emp_mean`, no GP / no reciprocity / no fit) — the data-only
+  baseline the four fitted $C^\ast$ curves smooth.
 
 ---
 
@@ -585,11 +635,15 @@ the seams at which they would be relaxed:
 - **Fixed generation interval** (5-day mean, log-normal) rather than an estimated or
   variant-specific one.
 - **Transmission block** — *partially addressed*: the level is now an explicit, data-identified
-  **absolute transmissibility** $\gamma_{\mathrm{SAR}}$ with susceptibility/infectivity **relative** to the
-  reference bin $1$ (the plan's $\gamma_{\mathrm{SAR}}$ + baseline-"2-10" form), replacing the old
-  confounded $\mu_s,\mu_i$ level pair. *Remaining seams*: the relative-offset scales
-  $\sigma_s,\sigma_i\sim\mathcal N^+(0.1,0.02^2)$ are still tight (fitted profiles want more spread — carried
-  by large $z$ rather than $\sigma$), $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
+  **per-contact secondary attack rate** $\gamma_{\mathrm{SAR}}$ (un-normalised $C^\ast$) with
+  susceptibility/infectivity **relative** to the reference bin $1$ (the plan's $\gamma_{\mathrm{SAR}}$ +
+  baseline-"2-10" form), replacing the old confounded $\mu_s,\mu_i$ level pair; the block is fit as
+  **Stage 2** of the cut (§6.0), conditioning on Stage-1 contact draws. The relative offsets are
+  **independent per age bin** — offset $\sigma\,z$, $z\sim\mathcal N(0,1)^{A-1}$ iid, with **separately
+  estimated** marginal scales $\sigma_s,\sigma_i\sim\mathcal N^+(0.5,0.25^2)$ — with **no cross-bin
+  smoothing** (the shared-length-scale squared-exponential GP $\sigma\,L_{si}z$ was removed 2026-07-13,
+  user request; ending the GP→RW1→RW2→GP→none sequence), and each log-offset is soft-clamped to
+  $[\log 0.05,\log 20]$ **hard-bounding** susc/inf to $[0.05,20]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
   $\Gamma(2,2)T[0,1]$), and infection observation error uses an independence approximation across the week
   and across ages.
 - **Hurdle zero probability** in the weighted path is taken empirically ($p^0$), not fitted.
