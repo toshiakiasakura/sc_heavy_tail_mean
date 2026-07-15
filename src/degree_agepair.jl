@@ -10,8 +10,12 @@
 
 const _ARROW_PATH = joinpath(@__DIR__, "..", "dt_comix_no_public", "contacts_uk.arrow")
 
-# ---- age-interval parsers (verbatim from 7j §2) ----
-_toint7j(s) = (ismissing(s) || s == "NA") ? nothing : tryparse(Int, String(s))
+# ---- age-interval parsers (from 7j §2; robust to Int-typed or String cells) ----
+# `:cnt_age_est_min`/`:cnt_age_est_max` come back from contacts_uk.arrow as
+# `Union{Missing,Int64}`, so handle numeric cells directly — `String(::Int64)` throws.
+_toint7j(s) = ismissing(s) ? nothing :
+              s isa Real   ? round(Int, s) :
+              s == "NA"    ? nothing : tryparse(Int, String(s))
 
 "Parse participant age-group string \"lo-hi\" → (lo,hi); NA/unparseable → (0,120)."
 function parse_age_interval(s)
@@ -50,7 +54,8 @@ end
 
 """
     available_forecast_origins(cfg; grid=cis_age_grid(), craw=nothing,
-                               infection_start=Date(2020,8,2), step_weeks=1)
+                               infection_start=Date(2020,8,2), step_weeks=1,
+                               origin_max=nothing)
 
 Rolling Sunday-start forecast origins the current data support. Lower bound: the
 12-week fit/lag window (`origin−11wk … origin`) must lie within the infection series
@@ -58,17 +63,29 @@ Rolling Sunday-start forecast origins the current data support. Lower bound: the
 iterate needs contact data out to `origin + max horizon` weeks, so the last
 origin is `last_contact_week − max(horizons)`. `craw` is the raw contact table
 (from `load_raw_contact_inputs`); if `nothing` it is read.
+
+`origin_max` caps the last origin at `week_start(origin_max)` (`nothing` = data-derived
+bound only). The data-derived bound alone is **too generous** and callers should cap it:
+CoMix's main panel stops 2022-03-02, but a stray 2022-11-16…2022-11-28 block drags
+`last_contact_week` — and hence `tmax` — out to 2022-10-30, so origins from ~2022-03-06
+roll through a window with no contact data. inc2prev is a second, uncaught limit: its
+`infections`/`gen_dab` end 2022-03-26 and `weekly_infections`/`weekly_antibody`
+(`infection_data.jl`) skip unmatched weeks into pre-zeroed arrays, so later origins are
+silently zero-filled rather than erroring. 8j/9j pass `origin_max=Date(2021,12,31)`
+(⇒ last origin 2021-12-26).
 """
 function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
                                     craw = nothing,
                                     infection_start::Date = Date(2020, 8, 2),
-                                    step_weeks::Int = 1)
+                                    step_weeks::Int = 1,
+                                    origin_max::Union{Nothing,Date} = nothing)
     craw === nothing && (craw = load_raw_contact_inputs().craw)
     cweeks = week_start.(collect(skipmissing(craw.date)))
     last_contact_week = maximum(cweeks)
     lookback = cfg.n_fit - 1 + cfg.smax                         # all_weeks[1] = origin − lookback
     tmin = week_start(infection_start) + Day(7 * lookback)
     tmax = last_contact_week - Day(7 * maximum(cfg.horizons))
+    origin_max !== nothing && (tmax = min(tmax, week_start(origin_max)))
     return collect(tmin:Day(7 * step_weeks):tmax)
 end
 

@@ -5,19 +5,24 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
 ## susc/inf smoothing REMOVED entirely → independent per-bin offsets 2026-07-13 (`joint_model.jl`, `framework.jl`, spec, 10j) (user request)
 
 - **The relative susc/inf age profiles are no longer smoothed at all.** The `A-1` non-reference
-  log-offsets are now **independent per age bin**: `susc = vcat(1, exp.(_softclamp.(sig_s .* z_s, log0.2, log5)))`
+  log-offsets are now **independent per age bin**: `susc = vcat(1, exp.(_softclamp.(sig_s .* z_s, log0.05, log20)))`
   (likewise `inf`), `z_s`/`z_i ~ filldist(Normal(0,1), A-1)`. This is the pre-`4607021` form (the GP was
   built on top of exactly this). The end of the GP→RW1→RW2→GP experiment sequence — now **none**.
 - **What was removed** from `model_transmission` (`joint_model.jl`): the shared-length-scale RBF GP block —
   `log_rho_si`, `ρ_si`, `Ksi`, `Lsi`, and the `Lsi *` mixing (`sig·(Lsi·z)` → `sig·z`). Config
   (`framework.jl`): dropped `susc_inf_gp_len_prior` (its only consumer `log_rho_si` is gone) and
-  **renamed** `susc_inf_gp_sd_prior` → `susc_inf_sd_prior` (the marginal-SD prior `N⁺(0.1,0.05²)` for
-  `sig_s`/`sig_i` survives, still SEPARATE per profile).
-- **KEPT (method-agnostic):** the soft-clamp `[log0.2,log5]` on the offset (NGM safety bound, not
-  smoothing), the reference-bin pinning `susc[1]=inf[1]=1`, and `sig_s`/`sig_i`/`z_s`/`z_i`. Because the
-  GP kernel had **unit diagonal**, removing it leaves the per-bin marginal SD unchanged (`=sig`) — the
-  `[0.80,1.25]`/`[0.2,5]` calibration holds; the profile is just **rougher** (neighbours no longer pulled
-  together). `sigma_inf` (obs-noise SD) is untouched — not a smoothing latent.
+  **renamed** `susc_inf_gp_sd_prior` → `susc_inf_sd_prior` for the marginal-SD prior of `sig_s`/`sig_i`
+  (still SEPARATE per profile).
+- **Prior + clamp LOOSENED (same day, user request)** to allow real age variation in susc/inf:
+  `susc_inf_sd_prior` **`N⁺(0.1,0.05²)` → `N⁺(0.5,0.25²)`** (marginal SD ≈0.5 ⇒ ±2 SD ⇒ typical
+  susc/inf ∈ `[0.37,2.7]`, was `[0.80,1.25]`), and the soft-clamp **`[log0.2,log5]` → `[log0.05,log20]`**
+  (≈`[-3,3]`; hard-bounds susc/inf ∈ `[0.05,20]`, was `[0.2,5]`). The clamp now sits at ~±6 SD (prior ±2
+  SD well interior) and **re-aligns with the `-sc` cache-token docstring**, which already described the
+  clamp as `≈[0.05,20]` (the `-sc` marker still holds — a clamp still exists, just wider).
+- **KEPT (method-agnostic):** the soft-clamp itself (NGM safety bound, not smoothing), the reference-bin
+  pinning `susc[1]=inf[1]=1`, and `sig_s`/`sig_i`/`z_s`/`z_i`. Because the GP kernel had **unit diagonal**,
+  removing it leaves the per-bin marginal SD unchanged (`=sig`) — the calibration holds; the profile is
+  just **rougher** (neighbours no longer pulled together). `sigma_inf` (obs-noise SD) is untouched.
 - **Downstream unchanged, nothing breaks:** `model_transmission` still returns
   `(; susc, inf, F, gamma_sar, sigma_inf)` and `fit_stage2_pooled` still stores the `N×A` susc/inf draws,
   so `load_transmission_draws` (8j_viz), 10j `make_susc_inf_fig`, and 9j `plot_ratio(tr.susc/tr.inf)` all
@@ -571,3 +576,78 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   (+ cached `_or_load`, cache `9j_obsrt_<contacts>_h<h>.jld2`) in `9j_viz_utils.jl`; overlaid via the new
   `observed=` kwarg of `plot_relative_contact_reproduction` as a black step (`:steppost`, matching the four
   fitted step curves; black diamonds set it apart). It's the data-only baseline the fitted C* curves smooth.
+
+## Fitting period capped at end-2021 — and why the data-derived origin bound lies 2026-07-15 (user request)
+
+- **What**: `available_forecast_origins` (`degree_agepair.jl`) gained an `origin_max::Union{Nothing,Date}=nothing`
+  kwarg (`tmax = min(tmax, week_start(origin_max))`); 8j and 9j both pass `FIT_END = Date(2021,12,31)` from their
+  setup cells ⇒ **63 origins, 2020-10-18 … 2021-12-26** (was 107, … 2022-10-30). User's choice: the cap bounds the
+  **origin**, not the target — the last window's h=1..4 targets legitimately run to 2022-01-23.
+- **Why the uncapped bound is wrong** (the real gotcha): `tmax = last_contact_week − max(horizons)` trusts
+  `maximum(craw.date)`, but **CoMix-UK has a hole**. The main panel stops **2022-03-02**; an isolated block runs
+  **2022-11-16 … 2022-11-28** and *that block alone* drags `last_contact_week` from 2022-01-30 out to 2022-10-30.
+  Origins ~2022-03-06 onward therefore roll through windows with **no contact data at all**. Don't read
+  `extrema(craw.date)` as "the panel runs to here" — check monthly row counts.
+- **Second, uncaught limit**: inc2prev `infections`/`gen_dab` end **2022-03-26**. `weekly_infections`/
+  `weekly_antibody` (`infection_data.jl`) `continue` on unmatched weeks into **pre-zeroed** arrays, so origins past
+  that are **silently zero-filled** — no error, just fake zero-infection windows. Nothing bounds origins by the
+  infection series' *end*; only `infection_start` bounds the start.
+- **No refit needed**: `8j_s1_*`/`8j_s2_*` are keyed by origin *in the filename*, so a cap only drops origins —
+  the 63 kept fits stay valid (verified 504/504 Stage-1, 1008/1008 Stage-2 present). The four `9j_*` caches store
+  their `origins` vector and self-invalidate on mismatch; `contacts_label(cfg)` does not (and should not) encode
+  the range.
+- **`period_summary` mislabels the tail** (pre-existing, `9j_viz_utils.jl`): `PERIODS` ends **2021-11-24**, and the
+  `missing` bucket prints as `"(pre-Lockdown 2)"` — so origins 2021-11-28 … 2021-12-26 tally under that wrong
+  label. `plot_rwis_by_period` is safe (drops `missing`). Left unfixed; flag if it matters.
+- **NotebookEdit gotcha**: it rewrites the edited cell's `source` as a single JSON **string** and strips the EOF
+  newline, exploding the git diff (whole cell shown as rewritten). Renormalise afterwards — `source` back to a
+  list of `\n`-terminated lines, `json.dump(..., indent=1, ensure_ascii=False)` + trailing newline — to keep
+  notebook diffs line-wise and reviewable.
+
+## Plots.jl panel figures: derive the layout, never hard-code it 2026-07-15 (9j: 9 → 15 forecast panels)
+
+- **A hard-coded `layout` silently caps a `n`-panel figure.** `plot_forecast_panels` took `n::Integer = 9` but
+  ended in `layout = (3, 3)`, so any `n > 9` died with `When doing layout, n (9) < n_override (12)` — pointing at
+  the `plot(...)` line, not at the `n` the caller passed. A previous session hit exactly this at `n = 12` and left
+  the error stored in notebook cell `4109ada9`. If a panel count is a kwarg, the tile grid must be **derived**:
+  `nrow = max(1, floor(Int, sqrt(np))); ncol = ceil(Int, np / nrow)` (9 → 3×3, 12 → 3×4, 15 → 3×5 — exact, no
+  blanks, and wide grids suit a date x-axis). Size per-cell too (430×330 keeps 9 at the former 1300×1000).
+- **`plot_title` adds an extra, series-less subplot.** `length(fig.subplots)` is panels **+1** whenever
+  `plot_title` is set — a 15-panel figure reports 16. Assert on `count(sp -> !isempty(sp.series_list), ...)`
+  instead; I wrote a wrong assertion first and briefly mistook it for a real failure.
+- **Medians don't commute with a weighted average.** `susc`/`inf` super-group ratios are pop-weighted means of the
+  per-bin ones **exactly, per draw** — but *not* after taking medians (`inf` differs by up to 11%, `susc` ~1%,
+  tracking how skewed each posterior is). Verify such a refinement identity on the **raw draws** (`< 1e-10`), never
+  on the stored `med` — an assertion on medians tests nothing and will fail for honest reasons.
+- **`markerstrokewidth = 0` when markers are small and colour carries meaning.** The default black 1px stroke
+  swamps a `ms = 1.5` marker, so a 7-line `:viridis` age palette rendered as 7 near-black lines — and, worse, 7
+  identical **legend swatches**, which is the only thing identifying the series. Bit `plot_ratio_bins`.
+- The Date-axis gotcha already noted for `plot_ratio` applies to any new facet: plot the 1.0 reference as a
+  **Date-valued series first**; a leading `hline!` initialises a numeric axis and collapses the dates.
+
+## Overlaying incommensurable series on one axis 2026-07-15 (9j: inc2prev R over the relative contact R)
+
+- **When the user asks for a mixed-units overlay, say so in the figure — don't refuse and don't hide it.**
+  `plot_relative_contact_reproduction`'s steps are a dimensionless ratio to a baseline week; inc2prev's
+  national R is an absolute R. Same symbol, two meanings, and both hover near 1 — so a shared axis makes them
+  *look* comparable. The user asked for the shared axis knowingly ("even though those two show not a
+  comparative quantity"), which is legitimate: the shapes ARE worth comparing, only the vertical gap is
+  meaningless. The fix is labelling, not refusal — ylabel says `MIXED UNITS`, the series label says
+  `ABSOLUTE, different quantity`, and the single 1.0 line is labelled with BOTH jobs it does
+  ("baseline week (steps) & R = 1 (inc2prev)"). A shared axis at least leaves the conflation visible;
+  `twinx` hides it behind two independently-scaled ranges that invite reading a scaling artifact as
+  agreement. (I built `twinx` first, from an earlier answer to the same question — the reversal was cheap
+  because the overlay was one `national::Bool` kwarg, not a new function.)
+- **A `ylabel` is measured against the axis HEIGHT** (it is rotated 90°). The 62-char mixed-units label
+  clipped "MIXED UNITS" clean off the top of a 950×520 figure; ~39 chars is the budget here. Watch this
+  whenever a label grows to explain something.
+- **`marker = :circle` doubles `series_list`.** Plots emits a `scatter` *and* a `path` per marked series, so
+  a 6-curve panel reports 11 entries. I asserted `== 6` and it failed on correct code (same family as the
+  `plot_title` extra-subplot trap above). Assert on the **non-empty `:label`s** — what the reader actually
+  sees — not on raw series counts.
+- `pad_margins` sets left/bottom only; a right-hand axis label needs an explicit `right_margin` on the base
+  `plot(...)`. (Moot now the twin is gone, but it will bite the next `twinx`.)
+- Substantive result the overlay was built to show: relative contact R correlates with national R at only
+  **Pearson ≈ 0.36–0.40 / Spearman ≈ 0.36–0.44** (n=63 origins, h=1) — and the RAW observed weekly means score
+  the same (0.359), so that ceiling is the contact data's, not any modelling choice's. Contacts swing 0.5–2.8×
+  while R stays in 0.75–1.33; the gaps line up with Alpha, Delta and the vaccine rollout.

@@ -581,17 +581,31 @@ end
 
 Relative contact reproduction number over time — `ρ(C*)/ρ(C*_ref)` (contacts only, reference = first
 origin). Same step-function/90%-ribbon layout and x-axis as `plot_reproduction`; the anchor is a dashed
-line at 1.0. No national-R overlay and no fixed `ylims` (a contacts-only ratio is not comparable to the
-observed absolute R). Pass `observed` (from `observed_contact_reproduction_over_time`) to overlay a
-single model-free line built from the RAW weekly observed mean-contact matrices (`emean`, no GP / no
-model estimate) — same first-origin anchor, drawn as a black step (matching the model curves, black
-diamonds to set it apart).
+line at 1.0, and the left axis has no fixed `ylims`. Pass `observed` (from
+`observed_contact_reproduction_over_time`) to overlay a single model-free line built from the RAW weekly
+observed mean-contact matrices (`emean`, no GP / no model estimate) — same first-origin anchor, drawn as
+a black step (matching the model curves, black diamonds to set it apart).
+
+`national=true` overlays the inc2prev national R (`national_R`, England) on the **same, shared** axis,
+absolute and unrescaled. The two are **not commensurable** and sharing an axis does not make them so: the
+steps are a dimensionless ratio to the baseline contact week, the red curve is an absolute R. Both happen
+to sit near 1, which is exactly the trap — the single 1.0 line is the baseline week for the steps *and*
+the epidemic threshold for the red curve at once (its label says both). Read the SHAPES against each
+other (does contact-driven transmissibility turn when R turns?); the vertical gap between them means
+nothing. Sharing the axis also squeezes R's ~0.75–1.35 range against the steps' far wider swing — the
+price of one frame, and why `national=false` (a twin axis is the other way out, but it invites reading a
+scaling artifact as agreement; a shared axis at least leaves the conflation visible).
 """
 function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
-                                            h::Integer = 1, observed = nothing)
+                                            h::Integer = 1, observed = nothing,
+                                            national::Bool = true,
+                                            region::AbstractString = "England")
     x = week_mid.(origins .+ Day(7 * h))   # same contact-week x as plot_reproduction, so panels align
     fig = plot(; xlabel = "contact week (origin + $(h) wk)",
-               ylabel = "relative contact R  (ρ(C*) / ρ(C*_ref))",
+               # Keep the shared-axis label SHORT: rotated 90° it is measured against the axis
+               # HEIGHT, and anything much past the original's ~39 chars clips off the top.
+               ylabel = national ? "ρ(C*)/ρ(C*_ref)  &  R  — MIXED UNITS" :
+                                   "relative contact R  (ρ(C*) / ρ(C*_ref))",
                title = "9j — relative contact reproduction number (contacts only; ref = first origin; 90% CI)",
                size = (950, 520), legend = :topleft, xrotation = 45)
     # Real Date-bearing series FIRST (establish the date axis), then the reference hline — same
@@ -608,7 +622,21 @@ function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
         plot!(fig, x, observed; color = :black, lw = 2.2, ls = :solid, linetype = :steppost,
               marker = :diamond, ms = 3, label = "observed weekly means (raw)")
     end
-    hline!(fig, [1.0]; color = :gray, ls = :dash, label = "reference (first origin)")
+    # Shared axis, absolute and unrescaled — see the docstring: the units are mixed on purpose.
+    # Daily (not :steppost) and unmarked, so the smooth red curve reads as the external reference it
+    # is rather than as a fifth step function.
+    natR = national ? national_R(; region = region, d0 = first(x), d1 = last(x)) : nothing
+    drew_nat = natR !== nothing && !isempty(natR.date)
+    if drew_nat
+        plot!(fig, natR.date, natR.med; color = :firebrick, lw = 2,
+              ribbon = (natR.med .- natR.lo, natR.hi .- natR.med), fillalpha = 0.10,
+              label = "inc2prev national R ($(region)) — ABSOLUTE, different quantity")
+    end
+    # ONE line at 1.0 doing two jobs once the axis is shared: baseline week for the steps, epidemic
+    # threshold for the red curve. Spell both out — the coincidence is the figure's main trap.
+    hline!(fig, [1.0]; color = :gray, ls = :dash,
+           label = drew_nat ? "1.0 — baseline week (steps) & R = 1 (inc2prev)" :
+                              "reference (first origin)")
     return fig
 end
 
@@ -707,9 +735,13 @@ end
 Forecast vs observed at `n` evenly-spaced origins. Each panel: one observed series (the
 fit-week history ++ the realized target weeks) overlaid with the four configs' total-infection
 forecast fans (median + 90% band). Reloads window/truth data for the selected origins.
+
+The tile grid and figure size are DERIVED from the panel count (`pick_origins` clamps it to
+`min(n, length(wins))`), so `n` is a free knob: a hard-coded `layout` throws
+`When doing layout, n (…) < n_override (…)` the moment `n` exceeds it.
 """
 function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
-                              grid = cis_age_grid(), n::Integer = 9)
+                              grid = cis_age_grid(), n::Integer = 15)
     origins = [w.origin for w in wins]
     sel = pick_origins(origins; n = n)
     qs_lo, qs_hi = 0.05, 0.95
@@ -740,38 +772,57 @@ function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
         end
         push!(panels, p)
     end
-    return plot(panels...; layout = (3, 3), size = (1300, 1000),
+    # Tile grid from the panel count: floor(√)-cols / ceil-rows favours a tall grid
+    # (9 → 3×3, 12 → 4×3, 15 → 5×3). 430×330 per cell keeps 9 at the former 1300×1000 figure.
+    np   = length(panels)
+    ncol = max(1, floor(Int, sqrt(np)))
+    nrow = ceil(Int, np / ncol)
+    return plot(panels...; layout = (nrow, ncol), size = (430 * ncol, 330 * nrow),
                 plot_title = "8j — total-infection forecast (four ways) vs observed, by origin (90% band)",
                 plot_titlefontsize = 11)
 end
 
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
-    collect_transmission_structure(labels4, origins; grid, h) -> (; susc, inf, rho, gamma)
+    collect_transmission_structure(labels4, origins; grid, h)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 two-stage artefacts: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
-(≡ 1 by construction); `rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2
-ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the
-per-contact secondary attack rate γ_SAR. `susc`/`inf` stores are
-`Dict(label => (med, lo, hi))` of `nO × 2` matrices, `rho` of `nO × 3`, `gamma` of `nO × 1`;
-missing artefacts leave `NaN` gaps. Reuses `load_transmission_draws` + `aggregate_supergroups`.
+(≡ 1 by construction); `susc_bin`/`inf_bin` are the same quantity at full per-age-bin
+resolution — every CIS bin against that same pop-weighted 2-15 baseline, so the super-group
+series are pop-weighted averages of these (`plot_ratio` vs `plot_ratio_bins`). Note this is a
+DIFFERENT denominator from the stored draws' own reference (bin 1 "2-10" ≡ 1, the model's
+identification, which 10j's `make_susc_inf_fig` plots against). `rho` holds the three GP
+length-scales (col 1 ρ_diag total-age, col 2 ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks —
+`NaN` for pooled chains); `gamma` holds the per-contact secondary attack rate γ_SAR. Stores are
+`Dict(label => (med, lo, hi))` of `nO × 2` matrices for `susc`/`inf`, `nO × grid.N` for the
+`*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing artefacts leave `NaN` gaps.
+Reuses `load_transmission_draws` + `aggregate_supergroups`.
 """
 function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
     nO = length(origins)
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
     susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
+    susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
         d === nothing && continue
-        for (V, dst) in ((d.susc, susc_store), (d.inf, inf_store))
+        for (V, dst, dstb) in ((d.susc, susc_store, susc_bin_store),
+                               (d.inf,  inf_store,  inf_bin_store))
             sg = aggregate_supergroups(V, grid.POP)      # ndraws × 3 (2-15, 16-49, >50)
             r  = sg[:, 2:3] ./ sg[:, 1]                  # ratios vs 2-15
             for g in 1:2
                 dst[lbl].med[oi, g] = median(r[:, g])
                 dst[lbl].lo[oi, g]  = quantile(r[:, g], 0.05)
                 dst[lbl].hi[oi, g]  = quantile(r[:, g], 0.95)
+            end
+            rb = V ./ sg[:, 1]                           # ndraws × A — each bin vs its own draw's 2-15
+            for a in 1:grid.N
+                dstb[lbl].med[oi, a] = median(rb[:, a])
+                dstb[lbl].lo[oi, a]  = quantile(rb[:, a], 0.05)
+                dstb[lbl].hi[oi, a]  = quantile(rb[:, a], 0.95)
             end
         end
         for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.rho_time))  # ρ_diag,ρ_gap,ρ_time → cols 1,2,3
@@ -785,7 +836,8 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
     end
-    return (; susc = susc_store, inf = inf_store, rho = rho_store, gamma = gamma_store)
+    return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
+              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store)
 end
 
 """
@@ -809,6 +861,35 @@ function plot_ratio(store, labels4, origins, ttl::AbstractString)
             m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
             plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, label = gnames[g],
                   ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
+        end
+        push!(ps, p)
+    end
+    return plot(ps...; layout = (2, 2), size = (1150, 780), plot_title = ttl, plot_titlefontsize = 11)
+end
+
+"""
+    plot_ratio_bins(store, labels4, origins, ttl; grid) -> Plot
+
+2×2 facet (one panel per config) of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
+`collect_transmission_structure`) — the age-resolved refinement of `plot_ratio`, sharing its
+2-15 baseline so the two figures read against the same 1.0 reference. Median lines only: seven
+overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure.
+"""
+function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = cis_age_grid())
+    cols = palette(:viridis, grid.N)     # age is ordinal → perceptually ordered palette
+    ps = Plots.Plot[]
+    for (k, lbl) in enumerate(labels4)
+        p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
+                 ylabel = "ratio to 2-15", legend = (k == 1 ? :topright : false),
+                 legendfontsize = 5, background_color_legend = RGBA(1, 1, 1, 0.7),
+                 xrotation = 45)
+        # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
+        plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
+        for a in 1:grid.N
+            # markerstrokewidth = 0: the default black 1px stroke swamps a 1.5px marker and hides
+            # the age colour — including in the legend swatches, which is what identifies the lines.
+            plot!(p, origins, store[lbl].med[:, a]; color = cols[a], lw = 1.5,
+                  marker = :circle, ms = 1.5, markerstrokewidth = 0, label = grid.LAB[a])
         end
         push!(ps, p)
     end
