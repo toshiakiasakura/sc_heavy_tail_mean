@@ -2,6 +2,173 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## scoringutils drops metric COLUMNS on drifted quantile levels — and `score_wis` was never once executed 2026-07-30 (`scoring.jl`, `CLAUDE.md`)
+
+- **Context: `score_wis` had ZERO runtime coverage.** R was installed, `scoringutils` was not, so the
+  entire WIS path had never run — through every prior session of this framework. Worth asking, for
+  any "verified" pipeline: which paths has the environment *silently prevented* from executing?
+- **The old CLAUDE.md gotcha was wrong in two ways.** It said fp drift from
+  `collect(0.05:0.05:0.95)` breaks `interval_coverage_50` "while the 90% endpoints still work".
+  Measured (`verify_scoring.jl`): (a) **`collect` on a Julia range does NOT drift** — 0/19 levels
+  differ from their 2-dp rounding, because ranges carry `TwicePrecision` internals; the risk lives in
+  constructions like `cumsum(fill(0.05,19))`. (b) The 90% endpoints do **not** survive. One drifted
+  endpoint makes the whole interval set asymmetric, so scoringutils refuses **`wis`,
+  `overprediction`, `underprediction`, `dispersion`, `ae_median` AND both coverages** — `by_model`
+  came back as literally `["model","scale","bias"]`.
+- **The columns are ABSENT, not NA, and R emits only WARNINGS**, so `score_wis` returns a
+  well-formed frame and Julia raises nothing. **`nrow(sc) > 0` passes with every metric gone** —
+  which is exactly what the original smoke test asserted. *Assert on columns and their VALUES, never
+  on row count.* `score_wis` now hard-errors on any missing metric column, naming the dropped
+  columns and printing which endpoints (0.05/0.25/0.5/0.75/0.95) were actually matched.
+- **Test coverage against its NOMINAL level, not just "populated".** First attempt built synthetic
+  draws centred exactly on `observed` ⇒ coverage 1.0 at *every* level, which cannot tell a working
+  50% interval from a broken one. Drawing `observed` as an **independent draw from the same
+  predictive law** over 560 units recovers 0.498/0.896 vs nominal 0.50/0.90 — a broken 0.25/0.75
+  match cannot produce 0.498.
+- **`try`/`catch` opens a new scope: a flag set in the `catch` does not escape.** `threw = false`
+  outside, `threw = true` inside the catch ⇒ a *local*; the probe reported "no error raised" when the
+  guard had fired correctly. Same soft-scope trap as a bare top-level `for`. Wrap the probe in a
+  **function that returns** the outcome.
+
+## `fit_concurrency` silently returned 1 on macOS 2026-07-30 (`joint_model.jl`)
+
+- **`Sys.free_memory()` is NOT "available memory" on darwin.** `_mem_available_gib` read
+  `/proc/meminfo`, which **does not exist on macOS**; the bare `catch` swallowed the `SystemError`
+  and fell through to `Sys.free_memory()` = libuv's `uv_get_free_memory()` = **truly-free pages
+  only**. macOS deliberately keeps that near zero (memory is held as inactive/cached, not freed):
+  **measured 2.09 GiB on an idle 32 GiB machine**. Then
+  `mem_cap = floor((2.09 − reserve 4.0)/1.0) = 0` ⇒ `fit_concurrency() = max(1, min(cpu_cap, 0)) = 1`
+  ⇒ **fully serial fitting, with no warning**. The `max(1, …)` floor made it safe, not correct.
+- **Fix:** a `Sys.isapple()` branch parsing `vm_stat` — **free + inactive + speculative** pages ×
+  page size, the darwin analogue of Linux `MemAvailable`. Measured 14.0 GiB vs 2.09 GiB on the same
+  idle machine ⇒ `mem_cap` 0 → 10. **`purgeable` is deliberately NOT added**: it is a subset of
+  active/inactive, so it would double-count. The Linux branch is now explicitly `Sys.islinux()`
+  rather than try-and-fall-through.
+- **It was invisible because the notebooks store zero outputs.** `8j` printed the value and nothing
+  else, and all three notebooks are committed with no outputs, so no artefact ever recorded it.
+  Added `fit_concurrency_report()` → `(; concurrency, mem_cap, cpu_cap, avail_gib, nthreads,
+  cpu_threads, binding)` and wired it into 8j's setup cell. **Print the breakdown, not the number** —
+  `binding` names which cap actually bit.
+- **Second darwin under-report, documented NOT fixed:** on Apple silicon `Sys.CPU_THREADS` reports
+  **performance cores only** (`hw.perflevel0.logicalcpu` = 4) while `hw.ncpu` = 10 (P+E). So
+  `cpu_cap = min(nthreads, CPU_THREADS−1)` saturates at 3. That is a defensible cap for compute-bound
+  Pathfinder fits (E-cores contribute little, oversubscription hurts), so it is left alone — pass
+  `max_concurrent` to override. **A return of 1 usually means `Threads.nthreads()==1`** (Julia
+  started without `-t`/`JULIA_NUM_THREADS`), not the memory cap; the report says which.
+- **Lesson beyond this function:** a resource heuristic that silently degrades to the safe-but-slow
+  branch is worse than one that errors. Measure it and print the breakdown before trusting it to
+  size a multi-hour run.
+
+## Formal model: hierarchical dispersion + fitted p⁰ + estimated GI + t₀+h antibody 2026-07-30 (`inst/5_formal_pathfinder_impl.md`)
+
+- **Dispersion is now a two-level hierarchy with a SHARED per-week scale.**
+  `log_disp_{ij,t} = β[bl,t] + τ_t·z[pcode,t]`, non-centred, `pcode=(i−1)A+j` over the **49 ordered**
+  cells (directional blocks ⇒ ordered, not the 28 unordered pairs the contact *mean* uses).
+  `tau ~ filldist(N⁺(0, cfg.disp_re_scale_prior[2]), Tn)` — **one τ per week, shared across the four
+  blocks**. The user rejected a per-block `σ_XY,t`: child→child has only `2×2=4` ordered cells and
+  the scale is re-estimated every week, so 12 SDs from 4 observations each would just sit on the
+  prior. This re-derives the **same conclusion as the 2026-07-11 attempt** (reverted then, restored
+  now) — `git show a9a2953` is the reference implementation; restore it rather than re-deriving.
+- **Prior scale 0.5, NOT the old 0.109.** The 2026-07-11 value was E[τ²]-matched to the observed
+  *between-block* homogeneity of κ; τ here scales *within-block between-cell* spread, which has
+  never been measured. 0.5 ⇒ a typical cell within ≈[0.37,2.7]× its block mean at ±2 SD.
+  **Watch BOTH directions** (10j `plot_tau_over_weeks`): τ hugging the prior ⇒ the RE is not earning
+  its place; τ far ABOVE the prior ⇒ `m + τ·z` saturating the `log_kappa` clamp.
+
+## κ soft-clamp WIDENED `[-3,3]` → `[-4.3,5]` 2026-07-30 (`joint_model.jl`, `10j_viz_utils.jl`, spec) (user request)
+
+- **Symptom:** after the hierarchy landed, EVERY fitted Weibull κ sat exactly on `0.0498` — the
+  lower clamp — where the pre-hierarchy block-only fits had κ ≈ 0.88–1.03. Alongside it, τ_t medians
+  ≈2 against a prior median of 0.34.
+- **The τ reading was a SYMPTOM, not the cause — and the obvious fix was the wrong one.** A four-way
+  sweep of the τ prior (1e-6 / 0.109 / 0.25 / 0.5) came out **non-monotone**: 1e-6 and 0.25 gave sane
+  block means `[0.53,1.98,1.81,-1.46]` with κ interior, while **0.109 and 0.5 gave block means of
+  −441 and −247** — ≈900 prior SDs from `Normal(0,0.5)`, i.e. a diverged LBFGS path, not a posterior.
+  Non-monotone ⇒ optimiser-path luck, not a prior-scale effect. Tightening τ (the "obvious" fix,
+  and the one the seam text originally recommended) would NOT have helped.
+- **Mechanism:** the soft-clamp creates a genuinely FLAT region. Once `β + τ·z` leaves the bounds, κ
+  is constant, the Weibull likelihood has zero gradient in β and τ, and LBFGS wanders arbitrarily
+  far. The per-cell RE makes that region far easier to reach because 588 `z`'s now multiply τ. **A
+  clamp that binds is not merely biased — it can destabilise the optimiser**, which is a stronger
+  failure than the γ_SAR clamp-compression case of 2026-07-13.
+- **FLOOR IS −4.446, NOT −5.14 — I got this wrong once; check EVERY `gamma` on the path, not the
+  first one.** I widened to `lo=−5.0` having verified only `λ = μ/gamma(1+1/κ)`, and two sweeps then
+  crashed inside `draws_to_chains`. `_weibull_moments` *also* forms
+  `CV² = gamma(1+2/κ)/gamma(1+1/κ)²`, and `1+2/κ` overflows at **twice the κ**:
+
+  | quantity | gamma arg | overflows at | log κ floor |
+  |---|---|---|---|
+  | `λ = μ/gamma(1+1/κ)` | `1+1/κ` | κ ≲ 0.00586 | −5.14 |
+  | `CV² = gamma(1+2/κ)/gamma(1+1/κ)²` | `1+2/κ` | κ ≲ 0.01172 | **−4.446** |
+
+  At `logκ=−5` λ is still finite (1.5e-263) so a λ-only check PASSES, but `CV² = Inf/Inf = NaN`
+  propagates into `⟨k²⟩` and aborts the fit. Settled on **`lo=−4.3`** (≈0.15 margin). Failure mode
+  differs from the λ one: NaN silently poisons the moments rather than throwing `Weibull: θ>0`.
+  `diag_multipath.jl` now asserts finiteness at −4.3/−4.44 and non-finiteness at −4.5/−5.0, so a
+  future mis-widening fails in seconds instead of after a multi-minute fit.
+  The NegBin φ clamp has no analogous constraint (its moments are polynomial in `1/φ`) and is
+  unchanged at `[-4,5]`.
+- **The mirror must move in lockstep.** `reconstruct_dispersion_draws` hardcodes
+  `lo, hi = weighted ? (-4.3,5.0) : (-4.0,5.0)`; leaving it at `(-3,3)` would silently break the
+  reconstruct-matches-model invariant (which is checked to 3.9e-16, so it WOULD have been caught —
+  but only if the check is re-run).
+- **Hurdle p⁰ is FITTED** (weighted path only): `p0f ~ filldist(Beta(1,1), A*A, Tn)` with
+  `n_zero ~ Binomial(n, p⁰)`. **The data was already there and dead**: `AgePairData.n` /`ds.n` was
+  populated and never read anywhere, and `whist_nobs` (`degree_dist.jl:40`) was defined and never
+  called. `n_zero = n − whist_nobs(pos_weight)` is EXACT (verified 588/588 cells, three independent
+  routes). Do **not** use `dd_count.y[1]` — the zero bin is only pushed `if n_zero > 0`, so a cell
+  with no zeros has no `x==0` row; `sum(y[x .== 0])` is the safe idiom.
+- **Binomial written as the raw kernel** `nz*log(p0) + (nn−nz)*log1p(-p0)`, not
+  `logpdf(Binomial(n,p0), nz)`: the `log C(n,k)` normaliser is data-only so the posterior is
+  identical, it keeps `lgamma` out of a 49×Tn loop that runs on every gradient eval, and it avoids
+  any question about AD through `binomlogpdf`. **Skip cells with `n == 0`** — there the stored
+  `p0 = 1.0` is fabricated (`degree_agepair.jl:194`), not observed. Cells with `n>0, n_zero==n` are
+  real data and must be kept.
+- **The two degree models' Stage-1 parameter spaces now DIFFER** — only the weighted path declares
+  `p0f` (+588 latents). Anything inferring regime from parameter names must account for it; it is
+  also the cheapest way to tell the chain shapes apart.
+- **Generation interval estimated** (Munday 2023 Eq 2 + Table 1). `w_σ` is the **LOG-VARIANCE**, not
+  the log-SD: Table 1 builds its prior centre as `log((sd/mean)²+1)`, which *is* σ²_log, even though
+  Eq 2 passes it as the second CDF argument and p.8 calls it a "log-standard-deviation". Taking the
+  Table-1 reading makes the prior mean reproduce 5 d/5 d **exactly**, so the estimated-GI model
+  **nests** the fixed-GI one (verified: `gen_interval_pmf_log(gen_interval_logparams(5,5)…) ==
+  gen_interval_pmf(5,5)`). The sdlog reading would imply 4.5 d/3.5 d at the same centre.
+- **The paper's printed GI prior is not a valid statement** — `w_μ` has prior mean −0.683 yet is
+  written `T[0,]` with a *negative* prior SD (−0.1366). A negative meanlog is REQUIRED (a 5-day GI is
+  shorter than a week), so only `w_σ` is truncated and `abs()` guards the SD.
+- **Return latents POST-clamp.** `model_transmission` returns `w_mu`/`w_sigma` *after* `_softclamp`,
+  so `gen_interval_pmf_log(w_mu[d], w_sigma[d])` downstream reproduces the fit exactly. Same
+  convention `gamma_sar`/`susc`/`inf` already used. Returning raw latents would have silently
+  desynced the forecast from the fit at the clamp boundary.
+- **`w` is now PER DRAW — three consumers had to change together**: `fit_stage2_pooled` (stores
+  `w_mu`/`w_sigma`), `two_stage_forecast` (the renewal lag sum `acc` **moves inside the draw loop**;
+  it could no longer be hoisted per horizon), and `10j fit_window_infection_draws`. Miss any one and
+  it silently uses the PRIOR-CENTRE GI while the fit used the posterior.
+- **Antibody at t₀+h — forecast NGM only.** New `WindowData.antibody_fc` (A×H) field rather than
+  widening `antibody`, so `antibody[:, t]` keeps its meaning in the Stage-2 fit loop and no existing
+  `[:, end]` silently changes meaning. The fit loop stays t₀-anchored on the user's reasoning: its
+  infection outcomes only exist up to t₀, so shifting it contributes nothing. `reproduction_draws`
+  (8j viz) shifted too, so the plotted R describes the NGM the forecast actually uses.
+- **`weekly_antibody` zero-fill now warns.** An unmatched week returned `0.0`, indistinguishable from
+  genuinely zero prevalence — and zero antibody means FULL susceptibility, so a zero-filled forecast
+  column inflates the forecast silently. It now collects the unmatched weeks and `@warn`s **once per
+  call** (per week, not per cell — a missing week is missing for all A bins). The zero fill is kept
+  as the value on purpose: `NaN`/`missing` would propagate into the NGM.
+- **Cache token `…-sc` → `…-sc-hd-p0-gi`.** All 504 `8j_s1_*` + 1008 `8j_s2_*` are stale; full refit
+  required. The token is SHARED by `stage1_path`/`stage2_path`, so Stage 1 cannot be spared even
+  though `-gi` is Stage-2-only. Regenerate the 9j caches too — the forecast changed (per-draw `w`,
+  t₀+h antibody) independently of the chains.
+- **`gi_moments_days` lives in `renewal.jl`, not `8j_viz_utils.jl`.** First written as a viz helper,
+  which broke any non-viz consumer: `forecast_utils.jl` does not include the `*_viz_utils.jl` files.
+  Pure functions about a model parameterisation belong beside the parameterisation.
+- **The space-form `@view` trap bit again, in VIZ code this time.** `quantile(@view τ[:, t], 0.05)`
+  fails with *"Invalid use of @view macro: argument must be a reference expression"* — the macro
+  greedily swallows the trailing `0.05`. The single-argument `median(@view τ[:, t])` on the adjacent
+  line is fine, which is what makes it easy to miss. Worse, the error surfaces from `Base.Docs.docm`
+  (docstring expansion) with **no line number for the offending call**, so it reads like a docstring
+  problem. Use the `view(τ, :, t)` function form everywhere in an argument list — the rule is not
+  specific to `_cell_moments!` where it was first documented.
+
 ## susc/inf smoothing REMOVED entirely → independent per-bin offsets 2026-07-13 (`joint_model.jl`, `framework.jl`, spec, 10j) (user request)
 
 - **The relative susc/inf age profiles are no longer smoothed at all.** The `A-1` non-reference

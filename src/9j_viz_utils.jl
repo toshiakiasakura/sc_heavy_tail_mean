@@ -805,6 +805,7 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
     susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
+    gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
@@ -835,9 +836,67 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
         gamma_store[lbl].med[oi, 1] = median(γ)
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
+        # generation interval (estimated since 2026-07-30) → natural scale, DAYS. Col 1 = mean, 2 = SD.
+        gm = gi_moments_days(d.w_mu, d.w_sigma)
+        for (g, v) in enumerate((gm.mean_days, gm.sd_days))
+            gi_store[lbl].med[oi, g] = median(v)
+            gi_store[lbl].lo[oi, g]  = quantile(v, 0.05)
+            gi_store[lbl].hi[oi, g]  = quantile(v, 0.95)
+        end
     end
     return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
-              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store)
+              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store)
+end
+
+"""
+    plot_gen_interval(gi, labels4, origins, cfg; h=1) -> Plot
+
+2×2 facet (one panel per config) of the **estimated generation interval** over the rolling
+origins: posterior median + 90% band of its natural-scale mean and SD in DAYS, against the prior
+band (grey) implied by `cfg.gen_mean_days`/`gen_sd_days` and `cfg.gen_prior_rel_sd`.
+
+This is the identifiability read for the `w` ↔ `γ_SAR` confounding (§3.1): the two are only
+separated by this informative prior, so
+- posterior band ≈ prior band  ⇒ the data say nothing about the GI, it is carrying prior only;
+- posterior pinned at a soft-clamp with a *narrow* band ⇒ clamp compression, not certainty
+  (the failure mode γ_SAR hit at log 0.02 in 2026-07-13 — suspect the clamp, not the data).
+"""
+function plot_gen_interval(gi, labels4, origins, cfg; h::Integer = 1)
+    # Prior reference band: each log-parameter swept to its own ±1.645σ with the OTHER held at its
+    # centre, then mapped to days. This is a CONDITIONAL band, not the true joint marginal (the GI
+    # mean depends on both w_mu and w_sigma), so it is labelled as such — it is a visual reference
+    # for "has the posterior moved?", not a calibrated interval.
+    wmu0, wv0 = gen_interval_logparams(cfg.gen_mean_days, cfg.gen_sd_days)
+    r = cfg.gen_prior_rel_sd
+    zq = 1.6448536269514722                                    # 90% two-sided normal quantile
+    pri_mean = gi_moments_days(wmu0 .+ zq .* abs(wmu0) * r .* [-1, 0, 1], fill(wv0, 3)).mean_days
+    pri_sd   = gi_moments_days(fill(wmu0, 3), wv0 .+ zq .* abs(wv0) * r .* [-1, 0, 1]).sd_days
+    series = [("GI mean (days)", 1, :solid, pri_mean), ("GI SD (days)", 2, :dash, pri_sd)]
+    panels = Plots.Plot[]
+    for lbl in labels4
+        p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
+                 ylabel = "generation interval (days)",
+                 legend = (lbl == labels4[1] ? :topright : false),
+                 legendfontsize = 6, xrotation = 45)
+        # Date-valued series FIRST — a leading hline!/hspan! locks in a numeric axis and mangles
+        # the date ticks (the trap plot_ratio/plot_reproduction already document).
+        for (nm, g, ls, pri) in series
+            m, lo, hi = gi[lbl].med[:, g], gi[lbl].lo[:, g], gi[lbl].hi[:, g]
+            all(isnan, m) && continue
+            plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, markerstrokewidth = 0,
+                  ls = ls, label = nm, ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
+            plot!(p, origins, fill(pri[2], length(origins)); lw = 1.0, ls = :dot, color = :grey40,
+                  label = (nm == series[1][1] ? "prior centre & 90% (other param fixed)" : ""),
+                  ribbon = (fill(pri[2] - pri[1], length(origins)),
+                            fill(pri[3] - pri[2], length(origins))),
+                  fillalpha = 0.08, fillcolor = :grey60)
+        end
+        push!(panels, p)
+    end
+    return plot(panels...; layout = (2, 2), size = (1150, 780),
+                plot_title = "8j — ESTIMATED generation interval vs prior (h=$h); " *
+                             "posterior≈prior ⇒ GI not identified by the data",
+                plot_titlefontsize = 10)
 end
 
 """

@@ -68,6 +68,28 @@ function score_wis(df_quant::DataFrame)
     by_model_dt    = rcopy(R"by_model_dt")
     by_model_dt_h  = rcopy(R"by_model_dt_h")
     by_model_h_age = rcopy(R"by_model_h_age")
+
+    # scoringutils DROPS a metric's column when its computation fails, and reports the failure as an
+    # R *warning* — so this function would otherwise return a perfectly well-formed frame with the
+    # headline metric missing, and `nrow(sc) > 0` would pass. Measured 2026-07-30: one drifted
+    # quantile endpoint (0.75 -> 0.7500000000000001) makes the interval set asymmetric and reduces
+    # `by_model` to ["model","scale","bias"] — wis, both coverages, all 3 WIS components and
+    # ae_median gone. Fail loudly instead; see CLAUDE.md "scoringutils v2 quantile levels".
+    required = ["wis", "overprediction", "underprediction", "dispersion",
+                "interval_coverage_50", "interval_coverage_90", "ae_median"]
+    missing_cols = setdiff(required, names(by_model))
+    if !isempty(missing_cols)
+        qs = sort(unique(df_quant.quantile_level))
+        error("""
+              score_wis: scoringutils dropped metric column(s) $(missing_cols).
+              This is almost always non-exact quantile levels: interval endpoints are matched by
+              exact Float64 equality, so a single drifted level breaks the whole symmetric-interval
+              set (and with it `wis` itself), emitting only an R warning.
+              Levels received ($(length(qs))): $(qs)
+              Endpoints present — 0.05:$(0.05 in qs) 0.25:$(0.25 in qs) 0.5:$(0.5 in qs) \
+              0.75:$(0.75 in qs) 0.95:$(0.95 in qs)
+              Fix: round the levels (`to_quantile_long` does this via `round(q; digits=2)`).""")
+    end
     return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)
 end
 

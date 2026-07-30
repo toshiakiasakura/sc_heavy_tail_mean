@@ -14,7 +14,8 @@
 #   FrameworkConfig, WeeklyWindow, cis_age_grid                         (framework.jl)
 #   load_window_data, load_forecast_truth                              (infection_data.jl)
 #   prepare_degree_data, pool_over_time                                (degree_agepair.jl)
-#   gen_interval_pmf, renewal_next, forecast_forward                   (renewal.jl)
+#   gen_interval_logparams, gen_interval_pmf_log, gen_interval_pmf,
+#   gi_moments_days, renewal_next, forecast_forward                    (renewal.jl)
 #   MeanNGM / NeighbourhoodDegreeNGM, build_ngm, contact_star          (ngm.jl)
 #   NegBinAgePair / HurdleWeibullAgePair, model_degree, model_transmission,
 #     fit_stage1, fit_stage2_pooled, two_stage_forecast, build_degree_stats,

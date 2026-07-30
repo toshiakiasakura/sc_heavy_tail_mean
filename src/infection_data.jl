@@ -53,8 +53,19 @@ function weekly_infections(df::DataFrame, weeks::Vector{Date}, grid)
 end
 
 """Weekly antibody prevalence A_a(t) ∈ [0,1] (A × length(weeks)), averaged over the
-week from `gen_dab`; dates recovered from `t_index` via `tmap`."""
-function weekly_antibody(df::DataFrame, tmap::Dict{Int,Date}, weeks::Vector{Date}, grid)
+week from `gen_dab`; dates recovered from `t_index` via `tmap`.
+
+⚠ Unmatched weeks are filled with `0.0`, which is INDISTINGUISHABLE from genuinely zero antibody
+prevalence — and zero antibody means full susceptibility, so a zero-filled column inflates
+whatever it feeds. Nothing bounds forecast origins by the `gen_dab` series' end (the sibling
+problem `weekly_infections` has, tasks/lessons.md 2026-07-15). Since 2026-07-30 this **warns**
+once per call listing the offending weeks; `what` labels them in the message (e.g. "forecast
+target"), and `warn_unmatched=false` silences it for callers that expect gaps.
+
+The zero fill is retained as the VALUE on purpose: a `NaN`/`missing` would propagate silently
+into the NGM and poison every downstream draw. The warning is the tripwire, not the fill."""
+function weekly_antibody(df::DataFrame, tmap::Dict{Int,Date}, weeks::Vector{Date}, grid;
+                         warn_unmatched::Bool = true, what::AbstractString = "window")
     A = grid.N; T = length(weeks)
     wkset = Dict(w => k for (k, w) in enumerate(weeks))
     ageidx = _age_index_map(grid)
@@ -69,6 +80,13 @@ function weekly_antibody(df::DataFrame, tmap::Dict{Int,Date}, weeks::Vector{Date
     AB = zeros(A, T)
     for a in 1:A, t in 1:T
         AB[a, t] = isempty(acc[a, t]) ? 0.0 : mean(acc[a, t])
+    end
+    if warn_unmatched
+        # report per WEEK (not per cell): a missing week is missing for every age bin, so a
+        # per-cell warning would fire A times for the same cause.
+        missing_wk = [weeks[t] for t in 1:T if all(isempty, @view acc[:, t])]
+        isempty(missing_wk) || @warn "weekly_antibody: no gen_dab rows for these $what weeks — " *
+                                     "antibody zero-filled ⇒ FULL susceptibility there" weeks = missing_wk
     end
     return AB
 end
@@ -95,8 +113,12 @@ function load_window_data(win::WeeklyWindow, df::DataFrame, tmap::Dict{Int,Date}
                           grid = cis_age_grid())
     weeks = win.all_weeks
     I_mean, I_sd = weekly_infections(df, weeks, grid)
-    AB = weekly_antibody(df, tmap, weeks, grid)
-    return WindowData(weeks, grid.N, I_mean, I_sd, AB, grid.POP, grid.PROP, grid.LAB)
+    AB = weekly_antibody(df, tmap, weeks, grid; what = "window")
+    # Antibody at the FORECAST TARGET weeks t₀+h, for the frozen forecast NGM (§3.2). A gap here
+    # matters more than one in the fit window — it drives every horizon-h prediction — so it gets
+    # its own labelled warning.
+    AB_fc = weekly_antibody(df, tmap, win.forecast_weeks, grid; what = "FORECAST TARGET")
+    return WindowData(weeks, grid.N, I_mean, I_sd, AB, AB_fc, grid.POP, grid.PROP, grid.LAB)
 end
 
 """Assemble `WindowData` for the full 12-week (lags + fit) span of `win`, reading the

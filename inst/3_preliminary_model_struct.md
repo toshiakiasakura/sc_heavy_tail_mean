@@ -35,6 +35,22 @@ probabilistic programs, with Stage 2 conditioning on Stage-1 draws and no feedba
 Stage 1 is NGM-independent (Axis 2 enters only downstream), so one Stage-1 fit per degree model serves
 both builders; the two axes remain fixed arguments so each stage's parameter space is well defined.
 
+> **Formal-model update, 2026-07-30 (`inst/5_formal_pathfinder_impl.md`).** Four extensions move the
+> model from *preliminary* to *formal*, all inside the same two-stage cut and still fitted with
+> Pathfinder (Stage 1 switchable to NUTS later):
+> **(1)** the contact-degree **dispersion becomes a two-level hierarchy** — a random term on every
+> age-pair cell, drawn within its child/adult block, independent per week, non-centred, with a block
+> **mean** per block × week and a **scale $\tau_t$ shared across the four blocks**, and no hyperprior
+> above the blocks (§4.3, §6);
+> **(2)** the hurdle **zero probability $p^0$ is now fitted** rather than taken empirically, via a
+> Binomial likelihood on the roster (§4.2, §6) — weighted/Weibull path only;
+> **(3)** the **generation-interval parameters are estimated** rather than fixed, following Munday 2023
+> Eq 2 and Table 1 (§3.1);
+> **(4)** the forecast NGM's **antibody moves to the target week $A(t_0+h)$** (§3.2, §8).
+> Three deliberate **overrides of the analysis-plan docx** are recorded with these: the level-2 priors
+> (§4.3), the fitted $p^0$ (§4.2) and the serial-interval discretisation (§3.1). Both stages'
+> parameter spaces change, so all cached chains under the previous `…-sc` token are stale (§10).
+
 Notationally we use $A$ age groups indexed $a,b,i,j \in \{1,\dots,A\}$, with $i$ (or $a$) the
 **participant / contactor / susceptible** group and $j$ (or $b$) the **contactee / infectious**
 group. Time is discretised into ISO-like calendar weeks indexed $t$.
@@ -89,6 +105,17 @@ Age-stratified estimates are taken from the `inc2prev` output `estimates_age_ab.
   rows. Those rows carry no date column, so their dates are reconstructed from the `t_index` field
   via the `t_index → date` map built from the infection rows.
 
+  Antibody is assembled **twice**: over the $T$ window weeks (`antibody`, used in the Stage-2 fit
+  loop) and separately over the $H$ **forecast target weeks** $t_0+h$ (`antibody_fc`, used by the
+  forecast NGM — §3.2). The two are kept in distinct fields rather than one widened matrix so that
+  `antibody[:, t]` keeps its exact meaning inside the likelihood. `weekly_antibody` fills any week it
+  cannot match with $0$, which is indistinguishable from *genuinely zero antibody prevalence* — and on
+  a forecast column that reads as full susceptibility and would inflate the forecast without erroring.
+  It therefore **warns** on unmatched weeks (fixed 2026-07-30), loudly for forecast targets. The zero
+  fill is retained as the value (a `NaN`/`missing` would propagate into the NGM); the warning is a
+  tripwire for when the origin cap is raised past the `gen_dab` series' end, and is silent over the
+  current 63 origins.
+
 Populations $N_a$ and proportions $N_a / \sum_b N_b$ complete the `WindowData` container.
 
 ### 2.4 Age-pair contact-degree data
@@ -128,19 +155,69 @@ Each cell $(t,i,j)$ therefore yields four objects used downstream:
 
 ## 3. Transmission core: renewal equation and NGM
 
-### 3.1 Generation interval
+### 3.1 Generation interval (**estimated**, 2026-07-30)
 
 The weekly generation-interval PMF $w = (w_1,\dots,w_{s_{\max}})$, $s_{\max} = 4$, is a discretised
-log-normal (`gen_interval_pmf`). With mean and SD given in days (both $5$ days by default,
-i.e. $\mathrm{CV}=1$), converted to weeks $\mu_w, \sigma_w$, the log-normal has
-$\text{sdlog}^2 = \log\!\big((\sigma_w/\mu_w)^2 + 1\big)$ and
-$\text{meanlog} = \log\mu_w - \text{sdlog}^2/2$, and
+log-normal whose **two log-parameters are estimated** as part of the Stage-2 transmission block
+(`inst/5_formal_pathfinder_impl.md`; previously they were fixed). The construction follows
+Munday et al. 2023 Eq 2 (`inst/pcbi.1011453.pdf`, p. 6):
 
 $$
-w_s \propto F(s) - F(s-1),\qquad s = 1,\dots,s_{\max},
+w_s \;=\; \frac{F(s;\,w_\mu, w_\sigma) - F(s-1;\,w_\mu, w_\sigma)}{F(s_{\max};\,w_\mu, w_\sigma)},
+\qquad s = 1,\dots,s_{\max},
 $$
 
-renormalised to sum to one, where $F$ is the log-normal CDF.
+where $F$ is the CDF of $\mathrm{LogNormal}(\text{meanlog}=w_\mu,\ \text{sdlog}=\sqrt{w_\sigma})$ on a
+**weekly** time axis. Because $F(0)=0$, the denominator equals the numerator sum exactly, so $w$ is a
+proper right-truncated-and-renormalised PMF on $\{1,\dots,4\}$ with no further normalisation step.
+
+**$w_\sigma$ is the log-VARIANCE, not the log-SD.** Munday's Table 1 names the pair "log-mean and
+log-variance" and builds its prior centre as $w_{\sigma,0} = \log\!\big((\sigma_w/\mu_w)^2+1\big)$,
+which *is* $\sigma^2_{\log}$; the paper's p. 8 prose calling it a "log-standard-deviation" is
+inconsistent with its own construction. We take the Table-1 reading, i.e. $\text{sdlog}=\sqrt{w_\sigma}$.
+The practical consequence is that the **prior mean reproduces the previous fixed GI exactly** —
+$\mu_w = \sigma_w = 5$ days — so the estimated-GI model **nests** the fixed-GI model. (Reading
+$w_\sigma$ as the sdlog instead would imply a $4.5$-day mean and $3.5$-day SD at the prior centre,
+i.e. not the $5/5$ the paper states it wants.)
+
+**Priors** (Munday p. 8: normal, with an SD of $20\%$ of the prior mean), centred on the moment-matched
+log-parameters of `cfg.gen_mean_days` / `cfg.gen_sd_days` $= 5/5$ days $\Rightarrow$
+$(w_{\mu,0}, w_{\sigma,0}) = (-0.6830,\ \log 2 = 0.6931)$:
+
+$$
+w_\mu \sim \mathcal N\!\big(w_{\mu,0},\ (|w_{\mu,0}|\cdot r)^2\big),
+\qquad
+w_\sigma \sim \mathcal N^{+}\!\big(w_{\sigma,0},\ (w_{\sigma,0}\cdot r)^2\big),
+\qquad r = \texttt{gen\_prior\_rel\_sd} = 0.2 .
+$$
+
+Only $w_\sigma$ is truncated at $0$. The paper prints $T[0,]$ on **both** and a *negative* prior SD
+for $w_\mu$ — which is not a valid statement, and truncating $w_\mu$ at $0$ would be wrong anyway: a
+5-day generation interval is shorter than a week, so $\text{meanlog} = -0.683 < 0$ is *required*. This
+is a deliberate, documented departure from the printed table.
+
+Both latents are soft-clamped inside the model — $w_\mu \in [\log\tfrac17, \log 3]$ (GI mean between
+about one day and three weeks) and $w_\sigma \in [0.02, 4]$ — far outside the prior's $\pm 2$ SD, per
+the codebase idiom that a clamp is an outer safety bound with the weakly-informative prior living
+inside it. At either clamp $F(s_{\max}) \ge 0.55$, so the division above cannot blow up.
+
+At the prior mean the PMF is $w \approx (0.799,\ 0.158,\ 0.033,\ 0.010)$.
+
+> **Deliberate override of the docx.** The analysis plan discretises the serial interval as
+> $w(s) = \big(F(s+1) - F(s-1)\big)\big/\big(F(S_{\max}+1) + F(S_{\max})\big)$ (citing Park 2024). We
+> use Munday's Eq 2 instead: it is what the implementation was asked to follow, it is what
+> `gen_interval_pmf` already computes, and its denominator is *exactly* the numerator sum — whereas the
+> docx's is not, since $\sum_{s=1}^{S}\!\big(F(s{+}1)-F(s{-}1)\big) = F(S{+}1)+F(S)-F(1)$. Taken
+> literally the docx weights therefore sum to $\approx 0.60$, not $1$, at the 5 d / 5 d centre (a
+> constant factor that would simply be absorbed into $\gamma_{\mathrm{SAR}}$, but it is not a PMF).
+> Once renormalised the two forms are in fact numerically close here —
+> $(0.795, 0.159, 0.036, 0.011)$ for the docx against $(0.799, 0.158, 0.033, 0.010)$ for Eq 2 — because
+> the docx numerator is just a two-lag moving sum of Eq 2's and the PMF decays sharply. So this
+> override of the usual "docx wins" rule is about correctness of form, not about materially different
+> weights.
+
+$w$ is therefore a **per-draw** quantity: each Stage-2 posterior draw carries its own $(w_\mu,w_\sigma)$
+and hence its own $w$, which the forecast (§8) and the fit-window diagnostic must both use.
 
 ### 3.2 Next-generation matrix
 
@@ -160,6 +237,18 @@ antibody-protection factor scaling
 susceptibility by the group's antibody prevalence $A_a(t)$ (at $F=1$ antibodies confer no
 protection; smaller $F$ gives stronger protection). $C^\ast_{ab}$ is the per-capita effective
 contact matrix produced by the NGM builder (§5.1).
+
+> **Antibody at the target week (2026-07-30, `inst/5_formal_pathfinder_impl.md`).** Inside the
+> Stage-2 *fit* loop $A_a(t)$ is the week-$t$ antibody of the $t_0$-anchored infection window, as
+> before. In the **forecast** (§8) the frozen NGM instead uses $A_a(t_0+h)$ — the antibody prevalence
+> at the horizon target week — mirroring the availability assumption already made for the contact
+> data (whose Stage-1 window ends at $t_0+h$). The fit loop is deliberately **not** shifted: the
+> infection outcomes it is evaluated against exist only up to $t_0$, so an $h$-shifted antibody there
+> would pair future antibody with present infections for no gain. One consequence is that the
+> likelihood pairs $t{+}h$ contacts with $t$ antibody, and only the forecast step has both at
+> $t_0+h$. Note also that antibody (`gen_dab`) comes from the **same** inc2prev/CIS pipeline as the
+> infection targets, whereas CoMix is an independent survey — so assuming $A(t_0+h)$ is known is a
+> stronger assumption than assuming contacts at $t_0+h$ are.
 
 > **Update 2026-07-12 (two-stage cut + γ_SAR revert, inst/4_cut_Bayes.md).** The `-gnorm`
 > $C^\ast\!\to\!C^\ast/\bar S$ normalisation (added 2026-07-11 to decouple the transmissibility scalar
@@ -203,12 +292,13 @@ the NGM.
 ### 4.1 Unweighted negative binomial (`NegBinAgePair`)
 
 The integer contact counts (including zeros) of cell $(i,j)$ are modelled as
-$\mathrm{NegBin}(\mu_{ij}, \phi_{\beta(i)\beta(j)})$, parameterised by **mean** $\mu_{ij}$ and a
-**dispersion** $\phi$ that depends only on the child/adult block pair $(\beta(i),\beta(j))$, with
-$\mathrm{Var} = \mu + \mu^2/\phi$. The log-likelihood sums over the empirical count distribution:
+$\mathrm{NegBin}(\mu_{ij}, \phi_{ij})$, parameterised by **mean** $\mu_{ij}$ and a **per-cell
+dispersion** $\phi_{ij}$ drawn hierarchically within the child/adult block pair
+$(\beta(i),\beta(j))$ (§4.3), with $\mathrm{Var} = \mu + \mu^2/\phi$. The log-likelihood sums over
+the empirical count distribution:
 
 $$
-\ell_{ij} = \sum_{k} y_k\,\log \mathrm{NegBin}(k;\mu_{ij},\phi_{\beta(i)\beta(j)}),
+\ell_{ij} = \sum_{k} y_k\,\log \mathrm{NegBin}(k;\mu_{ij},\phi_{ij}),
 $$
 
 where $(k,y_k)$ are the distinct degrees and their observed frequencies. Zeros are modelled
@@ -226,17 +316,35 @@ on having at least one contact (left-truncating the fitted NegBin).
 ### 4.2 Duration-weighted hurdle-Weibull (`HurdleWeibullAgePair`)
 
 Here $\mu_{ij}$ denotes the mean of the **positive** duration-weighted degrees. The positive weights
-$\{W\}_{ij}$ are modelled as $\mathrm{Weibull}(\kappa_{\beta(i)\beta(j)}, \lambda_{ij})$ with a
-block-indexed shape $\kappa$ and scale chosen so the Weibull mean equals $\mu_{ij}$:
+$\{W\}_{ij}$ are modelled as $\mathrm{Weibull}(\kappa_{ij}, \lambda_{ij})$ with a **per-cell** shape
+$\kappa_{ij}$ drawn hierarchically within the block pair (§4.3) and scale chosen so the Weibull mean
+equals $\mu_{ij}$:
 
 $$
 \lambda_{ij} = \frac{\mu_{ij}}{\Gamma(1 + 1/\kappa)},\qquad
 \ell_{ij} = \sum_{W \in \{W\}_{ij}} \log \mathrm{Weibull}(W;\kappa,\lambda_{ij}).
 $$
 
-The zero part is a genuine **hurdle**: the zero probability is *not* a fitted parameter but the
-empirical $p^0_{ij}$, which enters only the moments (not the likelihood). With
-$\mathrm{CV}_W^2 = \Gamma(1+2/\kappa)/\Gamma(1+1/\kappa)^2 - 1$ the zero-included raw moments are
+The zero part is a genuine **hurdle**, and as of 2026-07-30 its probability is **fitted** rather than
+plugged in empirically. Each cell carries its own zero probability with a flat prior, and the roster
+supplies a Binomial likelihood:
+
+$$
+p^0_{ij,t} \sim \mathrm{Beta}(1,1),
+\qquad
+n^{0}_{t,i,j} \sim \mathrm{Binomial}\big(n_{t,i,j},\ p^0_{ij,t}\big),
+$$
+
+where $n_{t,i,j}$ is the roster count of §2.4 and $n^{0}_{t,i,j}$ the number of those
+participant-days with no contact in the cell. So the zero part now contributes to the Stage-1
+likelihood, not only to the moments. **No pooling**: the $A^2 \times T$ zero probabilities are
+independent. That is safe here precisely because each is directly identified by its own Binomial with
+a large $n$ — there is no funnel, unlike the dispersion scale $\tau_t$ (§4.3), so a non-centred
+re-parameterisation is unnecessary. Cells with $n_{t,i,j} = 0$ contribute no Binomial term (the whole
+roster row is absent — there is no trial to observe), and their $p^0$ is prior-only.
+
+With $\mathrm{CV}_W^2 = \Gamma(1+2/\kappa)/\Gamma(1+1/\kappa)^2 - 1$ the zero-included raw moments are
+unchanged in form, now evaluated at the *fitted* $p^0$:
 
 $$
 \langle k\rangle = (1-p^0)\,\mu,\qquad
@@ -244,15 +352,105 @@ $$
 g = 1 - p^0 .
 $$
 
-### 4.3 Dispersion/shape parameterisation
+Two consequences. The zero factor $g$ is now a **latent**, so the neighbourhood builder's
+$C^\ast$ inherits its uncertainty. And a cell where the roster exists but no contacts landed
+($n>0$, $n^0 = n$) gets $p^0$ posterior just *below* $1$ rather than exactly $1$, so
+$\langle k\rangle > 0$ and the $k_1 > 0$ guard in `base_contact` (§5.1) stops firing in that common
+case — the guard is still required for $n = 0$ rows, where $p^0$ can reach $1$.
 
-The block-indexed dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) carries one value
-per child/adult block pair — four values indexed by the block-linear code
-$\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\}$ (contactor block $\times$ contactee block), stored
-as a $4 \times T$ array (one block-vector per week). Inside the model these log-parameters are
-clamped to keep the mode interior and avoid Weibull/exponential underflow
-($\log\kappa \in [-3,3]$, i.e. $\kappa \in [0.05,20]$; $\log\phi \in [-4,5]$, i.e.
-$\phi \in [0.018,148]$).
+> **Deliberate override of the docx.** The analysis plan states: *"We do not estimate the parameter
+> $p_{0,xy}^{t}$ and use the empirical value from each survey for this parameter."* Fitting it
+> propagates the zero-probability uncertainty into $\langle k\rangle$, $\langle k^2\rangle$ and $g$,
+> which the empirical plug-in discards. This overrides the usual "docx wins" rule and is recorded as
+> such. The unweighted NegBin path (§4.1) is untouched — it is not a hurdle, and models its zeros
+> directly.
+
+### 4.3 Dispersion/shape parameterisation (**two-level hierarchy**, 2026-07-30)
+
+The dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) is a **per-age-pair-cell** quantity
+drawn from a **child/adult block** distribution — the analysis plan's
+$\log k^{t}_{xy} \sim \mathcal N\big(\mu^{t}_{k,XY},\ (\sigma^{t}_{k,XY})^2\big)$
+(`inst/analysis_plan_heavy_tail_mean.md`, "Unweighted contact degree distribution estimation"; the
+hand-drawn `inst/media/image4.png`, *"variance is hierarchical"*). Writing $d$ for either family's
+log-parameter, for every ordered cell $(i,j)$ and week $t$:
+
+$$
+\log d_{ij,t} \;=\; \underbrace{m_{\ell(i,j),\,t}}_{\text{level 2: block mean}}
+\;+\; \underbrace{\tau_{t}}_{\text{level 2: shared scale}} \cdot
+\underbrace{z_{ij,t}}_{\text{level 1: per-cell}},
+\qquad z_{ij,t} \sim \mathcal N(0,1),
+$$
+
+with the block-linear code $\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\}$ (contactor block
+$\times$ contactee block).
+
+- **Level 1 — one random term per age-pair cell.** The index runs over the $A^2 = 49$ **ordered**
+  pairs, $p = (i-1)A + j$, not the 28 unordered ones: the four blocks are *directional*
+  (child$\to$adult $\ne$ adult$\to$child), and self-pairs $(i,i)$ are included. (Contrast the contact
+  **mean**, §5, whose reciprocity construction is defined on the 28 *unordered* pairs.)
+- **Level 2 — block mean per block, scale SHARED across blocks.** The mean $m_{\ell,t}$ is indexed by
+  the block pair, so the four blocks have separately estimated centres. The scale $\tau_t$ is a
+  **single value per week**, shared by all four blocks. This is an identifiability choice
+  (2026-07-30, user): a per-block scale $s_{\ell,t}$ would be estimated from that block's cells
+  alone, and child$\to$child holds only $2\times2 = 4$ ordered cells — re-estimated *every* week,
+  so 12 SDs from 4 observations each, which would sit on its prior. A shared $\tau_t$ is informed by
+  all 49 cells of its week.
+- **No level 3.** The block means and $\tau_t$ are top-level latents with fixed priors; there is
+  **no** overall hyperprior pooling them.
+- **Independent per week.** $m$, $\tau$ and $z$ are re-drawn each of the $T$ window weeks with no
+  temporal correlation — unlike the contact mean field, which *is* temporally smoothed (§5).
+- **Non-centred.** The composition above is written out in the model body from a standard-normal
+  $z$; the centred form $\log d \sim \mathcal N(m, \tau^2)$ is *not* used. The centred version puts a
+  sharp funnel between $\tau_t$ and its 49 cells, which the Pathfinder/LBFGS path negotiates badly
+  (and NUTS, the intended Stage-1 refinement, worse).
+
+Storage shapes are kept $\le$ 2-D — $m$ is $4\times T$, $z$ is $A^2\times T$, $\tau$ is length $T$ —
+because DynamicPPL's `generated_quantities` cannot reconstruct a 3-D `filldist` (see
+`tasks/lessons.md`). $\tau_t$ is drawn from a **half-Normal**, so it is already non-negative and needs
+no exponential/soft-clamp transform: $\tau = \texttt{tau}[t]$ directly.
+
+The **composed** value is soft-clamped (not the block mean alone), keeping the mode interior and
+avoiding Weibull/exponential underflow: $\log\kappa \in [-4.3,5]$, i.e. $\kappa \in [0.0136,148]$;
+$\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$.
+
+> **$\kappa$ clamp WIDENED $[-3,3]\to[-4.3,5]$, 2026-07-30.** With the per-cell random effect added,
+> the old bound bound *hard*: every fitted $\kappa$ sat exactly on $0.0498$ — the clamp-compression
+> signature — and the flat region it creates let the Stage-1 LBFGS path run away, producing block
+> means near $-441$ (≈900 prior SDs from $\mathcal N(0,0.5)$, i.e. a diverged optimiser rather than a
+> posterior). Widening moves the flat region far enough out that the likelihood keeps steering.
+>
+> **The floor is $\approx-4.446$, set by $\Gamma(1+2/\kappa)$ — not by $\lambda$.** $\Gamma$ overflows
+> above argument $\approx 171.6$. There are **two** $\Gamma$ calls on this path and the *second* is
+> the binding one:
+>
+> | quantity | $\Gamma$ argument | overflows at | $\log\kappa$ floor |
+> |---|---|---|---|
+> | scale $\lambda = \mu/\Gamma(1+1/\kappa)$ | $1+1/\kappa$ | $\kappa \lesssim 0.00586$ | $-5.14$ |
+> | $\mathrm{CV}^2 = \Gamma(1+2/\kappa)/\Gamma(1+1/\kappa)^2$ | $1+2/\kappa$ | $\kappa \lesssim 0.01172$ | $\mathbf{-4.446}$ |
+>
+> `_weibull_moments` computes **both**, so the tighter floor governs. At $\log\kappa=-5$ the scale is
+> still finite ($1.5\times10^{-263}$) but $\mathrm{CV}^2 = \infty/\infty = $ **NaN**, which propagates
+> into $\langle k^2\rangle$ and aborts the fit. $-4.3$ leaves ≈0.15 in $\log\kappa$ of margin.
+> The NegBin $\phi$ clamp has no such constraint (its moments are polynomial in $1/\phi$) and is
+> unchanged at $[-4,5]$.
+
+> **Relation to the earlier attempt.** A hierarchical dispersion was added on 2026-07-11 and reverted
+> the same day (`tasks/lessons.md`). The form adopted here is **exactly** what that attempt settled
+> on — a per-week half-Normal $\tau_t$ shared across blocks (*"single shared τ not per-block — one
+> scalar, more identifiable than a per-block scale"*, and *"estimated for each time step"*). Only the
+> prior scale differs: that attempt used $\mathcal N^{+}(0, 0.109^2)$, matched to the observed
+> *between-block* homogeneity of $\kappa$; here the quantity being scaled is *within-block
+> between-cell* spread, which has never been measured, so the weaker $\mathcal N^{+}(0, 0.5^2)$ is
+> used and $0.109$ is the documented fallback (§11).
+
+> **Deliberate override of the docx.** The plan specifies $\mu_{k,XY} \sim \mathrm{Gamma}(2,1/4)$ and
+> $\sigma_{k,XY} \sim \mathrm{Gamma}(2,1/2)$ — a per-block mean *and* a per-block SD, both with
+> positive support. Two departures: **(i)** the Gamma on the mean would force the block **mean of
+> $\log k$** above zero, i.e. $k > 1$, against the fitted values ($\phi \approx 0.28$,
+> $\kappa \approx 0.9$–$1.0$; `tasks/lessons.md`), so the block means keep their existing Normal
+> priors; **(ii)** the SD is shared across blocks rather than per-block, for the identifiability
+> reason above. Only the shared scale takes a positive-support prior (half-Normal, §6). This
+> overrides the usual "docx wins" rule and is recorded as such.
 
 ---
 
@@ -384,7 +582,7 @@ the temporal kernel $L_{\text{time}}$, the length-scales
 $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ — so the
 weekly log-rate fields are **temporally correlated** rather than independent draws. Each week yields
 its own $C^\ast_t$ (through the per-week level $c_t$, structure-field column $R_{\cdot,t}$, and
-per-week block dispersion $\phi_{\beta(i)\beta(j),t}$/$\kappa_{\beta(i)\beta(j),t}$), and the transmission NGM $N(t)$ therefore varies in time through
+per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$, §4.3), and the transmission NGM $N(t)$ therefore varies in time through
 **both** antibody prevalence and (now temporally-smooth) contacts.
 
 **Sampling statements.**
@@ -400,19 +598,30 @@ c &\sim \mathcal N(c_0,\ 3^2), &
 \log\sigma_c &\sim \mathcal N(0,\ 0.5^2), &
 z_c &\sim \mathcal N(0,1)^{T}, \\
 z &\sim \mathcal N(0,1)^{P\times T}, &
-\log\kappa_{t}\ \text{or}\ \log\phi_{t} &\sim \mathcal N(0,\sigma_d^2)^{4}
-& & (\sigma_d = 0.5\ \text{Weibull},\ 1.0\ \text{NegBin};\ \text{4 block pairs}).
+m_{t} &\sim \mathcal N(0,\sigma_d^2)^{4}, &
+\tau_{t} &\sim \mathcal N^{+}(0,\ 0.5^2), \\
+z^{d}_{t} &\sim \mathcal N(0,1)^{A^2}, &
+p^{0}_{t} &\sim \mathrm{Beta}(1,1)^{A^2}
+& & (\sigma_d = 0.5\ \text{Weibull},\ 1.0\ \text{NegBin};\ A^2 = 49\ \text{cells}).
 \end{aligned}
 $$
+
+$p^{0}_{t}$ is declared on the **weighted/Weibull path only** (§4.2); the NegBin path's parameter
+space does not contain it, so the two degree models' Stage-1 chains now differ in shape.
 
 with the derived level $c_t = c + \sigma_c (L_{\text{time}} z_c)_t$ and structure field
 $R = \eta\,(L_{\text{age}}\, z\, L_{\text{time}}^{\!\top})$ giving the week-$t$ log-rate
 $r_{p,t} = c_t + R_{p,t}$ (§5), the contact-degree log-likelihood of §4 injected via
 `Turing.@addlogprob!`, and
 $C^\ast_t = $ `contact_star`$(nb, \langle k\rangle_t, \langle k^2\rangle_t, g_t)$. The dispersion is
-**block-linear per week** (§4.3): one $\log\kappa$/$\log\phi$ value per child/adult block pair (a
-$4\times T$ array), re-drawn each week with no age-pair random effect; it is **not** temporally
-smoothed (unlike the mean field).
+**hierarchical per week** (§4.3): the block mean $m_{\ell,t}$ (a $4\times T$ array) and the shared
+scale $\tau_t$ (length $T$) combine with the per-cell standard-normal $z^{d}_{p,t}$ (an $A^2\times T$
+array) as $\log d_{ij,t} = m_{\ell,t} + \tau_t\,z^{d}_{p,t}$, $\ell = 2(\beta(i)-1)+\beta(j)$,
+$p = (i-1)A+j$ — non-centred, and re-drawn each week with **no** temporal smoothing (unlike the mean
+field). The block-mean priors $\mathcal N(0,\sigma_d^2)$ are unchanged from the block-only model, so
+$\tau_t\to 0$ recovers it exactly; the scale takes the half-Normal $\mathcal N^{+}(0,0.5^2)$
+(`disp_re_scale_prior`), whose marginal RE SD of $\approx 0.5$ in log puts a typical cell within
+$\approx[0.37,\,2.7]\times$ its block mean at $\pm2$ SD.
 
 *Stage 2 — transmission block (per-contact $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf,
 non-centred; conditions on the fixed $\{C^\ast_t\}$ of one Stage-1 draw):* susceptibility and
@@ -422,22 +631,25 @@ carries the level (it replaces the old confounded $\mu_s,\mu_i$ pair).
 
 $$
 \begin{aligned}
-\log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.33,\, 0.56^2), &&
-\gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.02,\log 5)),\\
+\log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.1,\, 1.8^2), &&
+\gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.001,\log 10)),\\
 \sigma_s &\sim \mathcal N^+(0.5, 0.25^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
 \text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
 \sigma_i &\sim \mathcal N^+(0.5, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
 \text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
-F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2). & & &
+F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2), & & \\
+w_\mu &\sim \mathcal N(-0.6830,\ 0.1366^2), & w_\sigma &\sim \mathcal N^{+}(0.6931,\ 0.1386^2), &
+w &= \text{Eq. §3.1}\big(w_\mu, w_\sigma\big).
 \end{aligned}
 $$
 
 With $C^\ast$ **un-normalised** (§3.2 update, 2026-07-12), $\gamma_{\mathrm{SAR}}$ is the per-contact
 secondary attack rate: it reproduces the reference cell $N_{11}=\text{susc}_1\cdot\text{inf}_1$
-directly and is comparable across origins. The prior is calibrated by reading 18 pre-`-gnorm`
-`temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$ had median
-$0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$, 90% $\gamma_{\mathrm{SAR}}\in[0.13,0.83]$,
-interior to the softclamp $[\log 0.02,\log 5]$. Age variation in inherent susceptibility/infectivity
+directly and is comparable across origins. Its prior was originally calibrated by reading 18
+pre-`-gnorm` `temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$
+had median $0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$. It was **loosened twice since**
+and now stands at $\mathcal N(\log 0.1, 1.8^2)$ with softclamp $[\log 0.001,\log 10]$ — see the
+§3.2 update box (2026-07-13); the calibration above now informs only the centre. Age variation in inherent susceptibility/infectivity
 admits genuine age variation, and the **soft-clamp** is a looser safety bound: the offset scale
 $\sigma_{s,i}\sim\mathcal N^+(0.5,0.25^2)$ (**loosened 2026-07-13 from $\mathcal N^+(0.1,0.05^2)$**;
 marginal SD $\approx0.5$ ⟹ $\pm2$ SD $\approx\pm1.0$ in log ⟹ TYPICAL
@@ -453,9 +665,10 @@ correlated neighbouring bins; it was **removed 2026-07-13** (user request), alon
 latent $\rho_{si}$. Because that kernel had unit diagonal, dropping it leaves each bin's marginal SD
 $=\sigma_{s,i}$ unchanged, so the $[0.37,2.7]$ band and $[0.05,20]$ clamp are preserved — the age
 profile is simply rougher. See the GP→RW1→RW2→GP→none history in `tasks/lessons.md`.)
-Stage 2 returns the generated quantities
-$(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}})$; Stage 1 returns the raw
-moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_t\})$.
+The **generation-interval** latents $(w_\mu, w_\sigma)$ live here too (§3.1) — they enter only the
+renewal, so the cut keeps them clear of the contact GP. Stage 2 returns the generated quantities
+$(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, w_\mu, w_\sigma)$; Stage 1
+returns the raw moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_t\})$.
 
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
 only as renewal history). For each age $a$,
@@ -480,9 +693,12 @@ $$
 \log \mathcal N\!\big(I_{a,t}\,;\ \hat I_a(t),\ \sigma_{a,t}^2\big)}_{\text{infection renewal}},
 $$
 
-where $\ell^{(t)}_{ij}$ is the §4.1 NegBin (over the count histogram) or §4.2 Weibull-hurdle (over
-the positive duration-weighted degrees) cell log-likelihood, evaluated at the week-$t$ contact mean
-$\mu_{ij,t}$ and its block-pair dispersion. Stage 1's contact term runs over **all** $T$ window weeks;
+where $\ell^{(t)}_{ij}$ is the §4.1 NegBin (over the count histogram) or §4.2 Weibull-hurdle cell
+log-likelihood, evaluated at the week-$t$ contact mean $\mu_{ij,t}$ and its per-cell dispersion
+$d_{ij,t}$ (§4.3). On the hurdle path $\ell^{(t)}_{ij}$ now has **two** terms — the Weibull over the
+positive duration-weighted degrees *plus* the Binomial zero term
+$\log\mathrm{Binomial}\big(n^0_{t,i,j};\,n_{t,i,j},\,p^0_{ij,t}\big)$ of §4.2, omitted where
+$n_{t,i,j}=0$. Stage 1's contact term runs over **all** $T$ window weeks;
 Stage 2's infection term (conditioning on that stage-1 draw's fixed $\{C^\ast_t\}$) uses only the
 $t>s_{\max}$ fit weeks. Because the two are fit separately, the infection likelihood does **not**
 feed back into the contact GP — this is the "cut" (§6.0).
@@ -500,8 +716,9 @@ that stage's $\{C^\ast_t\}$ against the infection/renewal window anchored at the
 fixed; the pooled draws cached as `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`). Thus for every
 horizon the contact term is fit over weeks offset $h$ **ahead** of the infection term — the age-pair
 degree distribution is observed **at** the target week $t_0+h$ (contemporaneous with it), whereas
-infections and antibody are frozen at $t_0$. The two windows never coincide (even at $h=1$ the contacts
-lead the infection block by one week).
+infections and the fit-loop antibody are anchored at $t_0$. The two windows never coincide (even at
+$h=1$ the contacts lead the infection block by one week). The forecast NGM additionally takes its
+antibody at $t_0+h$ (§3.2, §8).
 
 ---
 
@@ -516,8 +733,8 @@ For one $(dm, nb, \text{origin}, h)$:
 2. **Stage 2** — `fit_stage2_pooled(nb, moment_draws, wd, cfg)` forms $\{C^\ast_t\}$ for each Stage-1
    draw (via `contact_star`) and Pathfinder-fits `model_transmission` conditioning on it, keeping
    $D = $ `cfg.n_stage2_draws` $= 100$ draws. The $M\times D = 10{,}000$ pooled draws
-   $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, F, \sigma_{\text{inf}}, \text{post\_index},
-   \{C^\ast_{\text{end}}\})$ are the infection predictive.
+   $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, F, \sigma_{\text{inf}}, w_\mu, w_\sigma,
+   \text{post\_index}, \{C^\ast_{\text{end}}\})$ are the infection predictive.
 
 The random seed is `cfg.seed = 1236` (Stage-2 draw $m$ uses `Xoshiro(seed + m)`). Fits are mutually
 independent: `prefit_stage1!` fans the Stage-1 chains out over Julia threads (BLAS pinned, warm-compile
@@ -529,21 +746,41 @@ origins are processed sequentially (bounded memory). Artefacts cache to
 **The 8j notebook uses Pathfinder for both stages (`STAGE1_USE_NUTS = false`); switching Stage 1 to
 NUTS is the intended later refinement.**
 
+> **Stage-1 dimension after the hierarchical dispersion and fitted $p^0$ (2026-07-30).** The contact
+> block gains $T = 12$ shared scales $\tau_t$ and $A^2 T = 588$ per-cell standard normals, and — on
+> the **weighted path only** — a further $A^2 T = 588$ zero probabilities. So the Stage-1 latent
+> count goes from $\approx 400$ to $\approx 1000$ for `NegBinAgePair` ($\approx 2.5\times$) and
+> $\approx 1590$ for `HurdleWeibullAgePair` ($\approx 4\times$). **The two degree models' parameter
+> spaces now differ materially in size**, so per-fit cost and memory diverge between them — the
+> Weibull fits are the binding constraint. Pathfinder's LBFGS path is correspondingly slower and more
+> prone to wandering, and the planned NUTS switch will be substantially more expensive.
+>
+> `fit_concurrency`'s `mem_per_fit_gib = 1.0` is an unmeasured guess and should be set from an actual
+> fit (separately per degree model, given the above). Note also that `_mem_available_gib` reads
+> `/proc/meminfo`, which does not exist on macOS — the darwin path silently falls through to
+> `Sys.free_memory()`, which reports only *truly free* pages (macOS keeps these near zero), so the
+> memory cap can collapse and force fully serial fitting without any warning. Measure the returned
+> concurrency before committing to a full refit.
+
 ---
 
 ## 8. Forecasting: the contact-updated pooled iterate
 
 The notebook forecasts with `two_stage_forecast`, the *contact-updated* iterate over the **pooled**
-draws. For a baseline origin $t_0$, the infection and antibody series are **frozen at $t_0$**, while
-the contact/degree window slides: for horizon $h$ the Stage-1 degree window ends at $t_0 + h$ and the
+draws. For a baseline origin $t_0$, the infection series is **frozen at $t_0$**, while the
+contact/degree window slides: for horizon $h$ the Stage-1 degree window ends at $t_0 + h$ and the
 Stage-2 pooled draws for $(dm, nb, t_0, h)$ are reloaded (or fit). Per pooled draw $d$ (from Stage-1
 draw $m = $ `post_index[d]`) a fresh NGM is formed from that draw's origin-week $C^\ast$
-(`Cstar_end[m]`, antibody held at $t_0$) and its Stage-2 infection parameters, and a single renewal
-step is taken,
+(`Cstar_end[m]`) with **antibody at the target week $A(t_0+h)$** (§3.2, changed 2026-07-30 from
+$A(t_0)$) and its Stage-2 infection parameters, and a single renewal step is taken with **that draw's
+own** generation interval $w^{(d)} = $ §3.1$(w_\mu^{(d)}, w_\sigma^{(d)})$,
 
 $$
-\hat I_a(t_0+h) = \Big[N\, \textstyle\sum_{s=1}^{s_{\max}} w_s\, I(t_0+h-s)\Big]_a,
+\hat I_a(t_0+h) = \Big[N\, \textstyle\sum_{s=1}^{s_{\max}} w^{(d)}_s\, I(t_0+h-s)\Big]_a,
 $$
+
+(the renewal-weighted lag sum is therefore computed **inside** the draw loop, not once per horizon
+as it was under a fixed $w$)
 
 with observation noise $\sigma = \max(\sigma_{\text{inf}}\hat I_a, 10^{-6})$ added per draw. The
 renewal lags use observed infections up to $t_0$ plus the **mean** predictions of the intervening
@@ -577,20 +814,31 @@ The primary metric is the **weighted interval score (WIS)** computed by the R pa
 The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 
 - **Configuration** (`FrameworkConfig`): $d_{\max}=240$, $w_{\text{group}}=2.5/240$,
-  $s_{\max}=4$, `n_fit` $=8$, `horizons` $=1{:}4$, seed $=1236$, generation interval mean/SD
-  $=5/5$ days, `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
+  $s_{\max}=4$, `n_fit` $=8$, `horizons` $=1{:}4$, seed $=1236$, generation-interval prior centre
+  `gen_mean_days`/`gen_sd_days` $=5/5$ days with `gen_prior_rel_sd` $=0.2$ (§3.1 — these now set the
+  *prior* on the estimated $w_\mu,w_\sigma$, not a fixed $w$), `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
   `n_stage1_post` $=100$ / `n_stage2_draws` $=100$ (⟹ 10 000 pooled), `stage1_use_nuts` $=$ `false`,
   GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log15,0.5^2)$ (shared
   prior for both diagonal length-scales), $\log\eta\sim\mathcal N(0,0.5^2)$,
   $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
   $\log\gamma_{\mathrm{SAR}}\sim\mathcal N(\log0.1,1.8^2)$ (`gamma_sar_prior`; loosened 2026-07-13 to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$, 90% $\in[0.0052,1.93]$, softclamp $[\log0.001,\log10]$),
-  **block-linear per-week dispersion** (one $\log\kappa$/$\log\phi$ per child/adult block pair, §4.3),
+  **hierarchical per-week dispersion** (block mean + shared per-week scale
+  `disp_re_scale_prior` $=\mathcal N^{+}(0,0.5^2)$ + per-cell random term, §4.3),
+  **fitted hurdle zero probability** $p^0 \sim \mathrm{Beta}(1,1)$ per cell × week on the weighted
+  path (§4.2),
   and **per-week temporally-smoothed contact estimation** (one separable spatio-temporal age-pair GP
-  across the window weeks). The chain-cache `contacts_label` is `"temporal-gsar-cut"` — the `-gsar-cut`
-  tag marks the **two-stage cut** split with per-contact $\gamma_{\mathrm{SAR}}$ and **un-normalised**
-  $C^\ast$ (the S̄-normalising `-gnorm` chains, differently-scaled `log_gamma`, are disjoint and left
-  on disk).
+  across the window weeks). The chain-cache `contacts_label` is `"temporal-gsar-cut-sc-hd-p0-gi"` — the
+  `-gsar-cut` tag marks the **two-stage cut** split with per-contact $\gamma_{\mathrm{SAR}}$ and
+  **un-normalised** $C^\ast$ (the S̄-normalising `-gnorm` chains, differently-scaled `log_gamma`, are
+  disjoint and left on disk); `-sc` the Stage-2 susc/inf soft-clamp; and, added 2026-07-30, `-hd` the
+  **h**ierarchical **d**ispersion, `-p0` the fitted hurdle zero probability (both Stage 1) and `-gi`
+  the estimated **g**eneration **i**nterval (Stage 2). Both stages' parameter spaces changed, and the
+  token is shared by `stage1_path` and `stage2_path`, so the 504 `8j_s1_*` and 1008 `8j_s2_*` files
+  under `…-sc` are stale — they are left on disk and simply never reloaded, and a full refit is
+  required. The derived 9j caches (`9j_rt_*`, `9j_relrt_*`, `9j_obsrt_*`) and any stored forecast
+  assembly must also be regenerated, because the forecast changed (per-draw $w$, antibody at
+  $t_0+h$) even where the pooled draws did not.
 - **Rolling origins.** The forecast origin is rolled weekly over the whole *available period* the
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
   ($2020$-$08$-$02$) plus the 12-week fit/lag lookback, and above by the last CoMix contact week
@@ -605,6 +853,15 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   horizon, four-ways WIS bars, WIS over the forecast period, forecast-vs-observed fans by origin,
   and fitted transmission structure (susceptibility/infectivity ratios to a reference group and the
   three GP length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ over time).
+  Added 2026-07-30: *(i)* a **generation-interval** panel (9j) showing the posterior of the GI mean
+  and SD **in days** (back-transformed from $w_\mu,w_\sigma$) and of $w=(w_1..w_4)$, overlaid on the
+  prior, by model and over the rolling origins — the identifiability check for the
+  $w$–$\gamma_{\mathrm{SAR}}$ confounding noted in §11; *(ii)* two **dispersion-hierarchy** panels
+  (10j) — the shared scale $\tau_t$ across the window weeks (one series $\times$ $T$, against its
+  prior band; if it hugs the prior the random term is not earning its place) and a $7\times7$ map of
+  the per-cell dispersion against its block mean; and *(iii)* a **$p^0$** panel (10j, weighted path)
+  plotting the fitted zero probability against the empirical $n^0/n$ per cell — the check that the
+  Binomial denominator is wired to the roster correctly.
 - **Reproduction number** (two separate figures). *(1)* `res/9j_reproduction_number.png` — the
   "contact & transmission" $R$: the dominant (Perron) eigenvalue $\rho(N)$ of the frozen origin-week
   NGM, per origin, over the inc2prev national $R$ and the $R=1$ line. *(2)*
@@ -626,14 +883,48 @@ the seams at which they would be relaxed:
 
 - **Contact temporal structure.** *Implemented* — contacts are smoothed across weeks by a separable
   spatio-temporal GP (§5), both the structure field and the overall level, sharing one temporal
-  length-scale $\rho_{\text{time}}$. The **dispersion** remains **block-linear** — one $\log\kappa$/
-  $\log\phi$ value per child/adult block pair (§4.3), re-drawn **per week** (not temporally smoothed)
-  with no age-pair random effect. Remaining seams: temporally smoothing the block dispersion, an
-  age-pair dispersion random effect (partial pooling within a block), and a longer-memory or
-  non-separable space–time kernel (a stationary RBF is used now).
+  length-scale $\rho_{\text{time}}$. Remaining seams: a longer-memory or non-separable space–time
+  kernel (a stationary RBF is used now).
+- **Contact-degree dispersion.** *Implemented 2026-07-30* — the age-pair dispersion random effect
+  (partial pooling within a child/adult block) is now in the model, with a per-block mean and a
+  **shared per-week scale** $\tau_t$ (§4.3). The earlier child$\to$child identifiability worry is
+  **resolved by that sharing**: a per-block scale would have been 12 SDs estimated from 4 ordered
+  cells each, whereas $\tau_t$ draws on all 49 cells of its week. *Remaining seams*: **(i)** the
+  dispersion is still **not temporally smoothed** — $m$, $\tau$ and $z$ are redrawn iid each week,
+  unlike the mean field; **(ii)** $\tau_t$'s prior scale $\mathcal N^{+}(0,0.5^2)$ is *not*
+  data-derived (the previously measured $0.109$ described between-block, not within-block, spread).
+  Two failure directions, both diagnosed by the 10j $\tau_t$ panel: if the posterior *hugs* the prior
+  the random term is not earning its place (fall back to a single scalar $\tau$, or to $0.109$); if
+  it runs far *above* the prior, the composed $m + \tau z$ saturates the $\log\kappa$ soft-clamp,
+  which is clamp compression rather than a real fit.
+  *What the smoke-scale fits actually showed, and the correction:* an early reading of
+  $\tau_t \approx 2$ against a prior median of $0.34$ looked like the second direction, but a
+  four-way sweep of the $\tau$ prior ($10^{-6}$, $0.109$, $0.25$, $0.5$) was **not monotone** —
+  $0.109$ and $0.5$ diverged while $10^{-6}$ and $0.25$ were healthy. That is optimiser-path luck,
+  not a prior-scale effect: the diverged runs had block means near $-441$, so the large $\tau$ was a
+  *symptom* of a runaway LBFGS path in the clamp's flat region, not evidence of real between-cell
+  spread. The response was to **widen the $\kappa$ clamp** (§4.3), not to retune $\tau$. Re-read
+  $\tau_t$ from a converged fit before drawing any conclusion about between-cell dispersion;
+  **(iii)** many per-week
+  cells are **empty** (no sampled participant-days), so their random term is prior-only yet still
+  feeds $\langle k^2\rangle$ into the NGM — noise that the **neighbourhood** builder, which divides by
+  $\langle k\rangle$, amplifies. Whether to zero the random term on empty cells is an open
+  implementation choice; on the weighted path the fitted $p^0$ (§4.2) partly mitigates it.
+- **Hurdle zero probability.** *Implemented 2026-07-30* — $p^0$ is fitted per cell × week with a
+  Binomial roster likelihood rather than plugged in empirically (§4.2), so its uncertainty now
+  propagates into $\langle k\rangle$, $\langle k^2\rangle$ and $g$. *Remaining seams*: **no pooling**
+  across cells or weeks (each $p^0$ stands alone under a flat $\mathrm{Beta}(1,1)$ — defensible while
+  roster counts are large, but sparse cells lean entirely on the prior), and cells with
+  $n_{t,i,j} = 0$ have no likelihood at all.
 - **Group-contact weight** $w_{\text{group}} = 2.5/240$ is fixed, not estimated.
-- **Fixed generation interval** (5-day mean, log-normal) rather than an estimated or
-  variant-specific one.
+- **Generation interval.** *Implemented 2026-07-30* — the two log-normal parameters are estimated
+  (§3.1) with Munday's informative prior. *Remaining seams*: it is **not variant-specific** (one
+  $w$ per fitting window, re-estimated per origin), and $s_{\max}=4$ stays fixed. Note that $w$ and
+  $\gamma_{\mathrm{SAR}}$ are **confounded** — both scale the renewal predictor, so raising $w_1$ and
+  lowering $\gamma_{\mathrm{SAR}}$ nearly compensate over an 8-week window. The $20\%$ prior SD is what
+  keeps the pair identified and should not be loosened; if the posterior equals the prior, the GI is
+  adding nothing, and if it parks on a soft-clamp with a tight CI that is clamp compression, not
+  certainty (cf. the $\gamma_{\mathrm{SAR}}\approx0.021$ episode, `tasks/lessons.md` 2026-07-13).
 - **Transmission block** — *partially addressed*: the level is now an explicit, data-identified
   **per-contact secondary attack rate** $\gamma_{\mathrm{SAR}}$ (un-normalised $C^\ast$) with
   susceptibility/infectivity **relative** to the reference bin $1$ (the plan's $\gamma_{\mathrm{SAR}}$ +
@@ -646,7 +937,14 @@ the seams at which they would be relaxed:
   $[\log 0.05,\log 20]$ **hard-bounding** susc/inf to $[0.05,20]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
   $\Gamma(2,2)T[0,1]$), and infection observation error uses an independence approximation across the week
   and across ages.
-- **Hurdle zero probability** in the weighted path is taken empirically ($p^0$), not fitted.
+- **Antibody availability.** The forecast NGM assumes $A(t_0+h)$ is known at forecast time (§3.2),
+  parallel to the contact data. This is a *stronger* assumption than the contact one, because
+  `gen_dab` shares the inc2prev/CIS pipeline with the infection targets while CoMix is an independent
+  survey. The Stage-2 fit loop is left at $t_0$-anchored antibody, so the likelihood pairs $t{+}h$
+  contacts with $t$ antibody.
+- **NGM lag index.** Munday Eq 1/6 places the NGM *inside* the lag sum,
+  $\sum_s w(s)\,N(t-s)\,I(t-s)$ — the NGM at the infector's primary event. This implementation applies
+  a single $N(t)$ outside the sum (§3.3). The deviation predates the formal model and is unresolved.
 
 These should be revisited before any scientific interpretation of the fitted transmission
 parameters.

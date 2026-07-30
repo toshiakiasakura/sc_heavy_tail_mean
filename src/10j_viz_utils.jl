@@ -43,7 +43,7 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gsar-cut-sc",
+                              contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -137,29 +137,32 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
 end
 
 """
-    reconstruct_dispersion_draws(lbl, origin, h; weighted, week_index=nothing,
-                                 contacts, save_dir) -> ndraws × 4  |  nothing
+    reconstruct_dispersion_draws(lbl, origin, h; weighted, cfg, grid, week_index=nothing,
+                                 contacts, save_dir) -> ndraws × A × A  |  nothing
 
-Load the cached chain for `(lbl, origin, h)` and rebuild the per-cell degree-model dispersion
-(one value per block-linear index `bl = 2(block_of(i)−1) + block_of(j) ∈ {1,2,3,4}`) for one
-week, once per posterior draw — the companion to `reconstruct_mu_draws` (same chain, same draw
-order, so column `d` pairs with μ's draw `d`).
+Load the cached Stage-1 chain for `(lbl, origin, h)` and rebuild the **per-cell** degree-model
+dispersion for one week, once per posterior draw — the companion to `reconstruct_mu_draws` (same
+chain, same draw order, so slice `d` pairs with μ's draw `d`).
 
-`weighted` selects the parameter and its soft-clamp bounds, mirroring `_cell_moments!`
-(joint_model.jl):
-- Weibull (`weighted=true`):  `κ = exp(softclamp(log_kappa, −3, 3))`
-- NegBin  (`weighted=false`): `k = exp(softclamp(log_k,     −4, 5))`
+Mirrors the HIERARCHICAL construction of `_cell_moments!` (joint_model.jl §4.3) exactly — this
+reconstruct-matches-model invariant is the standing rule for every viz mirror here:
 
-Handles the per-week regime (`log_k[bl,t]` / `log_kappa[bl,t]`, the cached `contacts="temporal-gsar-cut-sc"`
-chains — dispersion stays per-week × block, so this is unchanged by the spatio-temporal GP;
-`week_index` defaults to the last window week, the origin week the NGM is frozen at) and the pooled
-regime (`2×2` block matrix `log_k[bi,bj]`, mapped to `bl`). Returns `nothing` when the chain file is
-missing. (Dispersion is block-linear only — the hierarchical per-age-pair RE was reverted 2026-07-11.)
+    log_disp[i,j] = β[bl] + τ·z[pcode],   bl = 2(block_of(i)−1)+block_of(j),  pcode = (i−1)A+j
+    disp[i,j]     = exp(softclamp(log_disp[i,j], lo, hi))
+
+`weighted` selects the parameter family and its soft-clamp bounds:
+- Weibull (`weighted=true`):  `κ = exp(softclamp(·, −5, 5))`, from `log_kappa` + `z_kappa`
+- NegBin  (`weighted=false`): `k = exp(softclamp(·, −4, 5))`, from `log_k` + `z_k`
+
+τ is the RE scale: `tau[wk]` per week (shared across blocks), or a scalar `tau` when pooled.
+Returns `ndraws × A × A` (was `ndraws × 4` while dispersion was block-only, pre-2026-07-30), so
+callers index `[:, i, j]`, not `[:, bl]`. `week_index` defaults to the last window week (the origin
+week the NGM is frozen at). Returns `nothing` when the chain file is missing.
 """
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                      weighted::Bool,
+                                      weighted::Bool, cfg, grid,
                                       week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gsar-cut-sc",
+                                      contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                                       save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -170,31 +173,262 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
         return nothing
     end
 
-    base    = weighted ? "log_kappa" : "log_k"
-    lo, hi  = weighted ? (-3.0, 3.0) : (-4.0, 5.0)        # soft-clamp bounds mirror _cell_moments!
-    pnames  = string.(names(chn, :parameters))
-    perweek = Regex("^" * base * raw"\[(\d+)\s*,\s*(\d+)\]$")
-    D = length(vec(Array(chn[Symbol("log_eta")])))         # draw count (shared with μ reconstruction)
-    disp = Matrix{Float64}(undef, D, 4)
+    A      = grid.N
+    bbase  = weighted ? "log_kappa" : "log_k"              # block-MEAN param
+    zbase  = weighted ? "z_kappa"   : "z_k"                # per-ordered-cell random term
+    lo, hi = weighted ? (-4.3, 5.0) : (-4.0, 5.0)          # soft-clamp bounds MIRROR _cell_moments!
+                                                           # (κ widened -3,3 → -4.3,5 on 2026-07-30;
+                                                           #  −4.45 is the hard floor, see there.
+                                                           #  Keep these two in lockstep or the
+                                                           #  reconstruct-matches-model check fails)
+    pnames = string.(names(chn, :parameters))
+    D = size(chn, 1) * size(chn, 3)                        # posterior draws (iter × chains)
 
-    # collect (row, col, exact-name) for every disp param. Read via the EXACT stored name — MCMCChains
-    # prints matrix indices as "log_k[1, 2]" (space after the comma), so a rebuilt "log_k[1,2]" misses.
-    entries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
-               for n in pnames for m in (match(perweek, n),) if m !== nothing]
-    isempty(entries) && (@warn "no $base parameters in chain" path; return nothing)
-    read_col!(bl, name) = (disp[:, bl] = exp.(_softclamp.(vec(Array(chn[Symbol(name)])), lo, hi)))
-
-    if maximum(e[1] for e in entries) == 4                 # per-week: row = block-linear bl, col = week
-        wk = week_index === nothing ? maximum(e[2] for e in entries) : week_index
-        for (bl, t, name) in entries
-            t == wk && read_col!(bl, name)
+    # --- block means β: D × 4 (block-linear bl). Read via the EXACT stored name — MCMCChains prints
+    # matrix indices as "log_k[1, 2]" (SPACE after the comma), so a rebuilt "log_k[1,2]" would miss. ---
+    β  = Matrix{Float64}(undef, D, 4)
+    bw = Regex("^" * bbase * raw"\[(\d+)\s*,\s*(\d+)\]$")
+    bentries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
+                for n in pnames for m in (match(bw, n),) if m !== nothing]
+    isempty(bentries) && (@warn "no $bbase parameters in chain" path; return nothing)
+    if maximum(e[1] for e in bentries) == 4                # per-week: [bl, t]
+        wk = week_index === nothing ? maximum(e[2] for e in bentries) : week_index
+        for (bl, t, name) in bentries
+            t == wk && (β[:, bl] = vec(Array(chn[Symbol(name)])))
         end
-    else                                                   # pooled: 2×2 block matrix log_*[bi,bj]
-        for (bi, bj, name) in entries
-            read_col!(2 * (bi - 1) + bj, name)
+    else                                                   # pooled: 2×2 [row, col] → COLUMN-major
+        wk = nothing                                       # bl = row + 2(col−1), matching `vec(log_*)`
+        for (r, c, name) in bentries
+            β[:, r + 2 * (c - 1)] = vec(Array(chn[Symbol(name)]))
+        end
+    end
+
+    # --- RE scale τ: per-week `tau ~ filldist(HalfNormal, Tn)` ⇒ stored "tau[t]" (select week `wk`);
+    # pooled draws a scalar `tau`. Resolved AFTER `wk` is known — the two regimes store it differently. ---
+    τ = wk === nothing ? vec(Array(chn[:tau])) : vec(Array(chn[Symbol("tau[$wk]")]))
+
+    # --- per-ordered-cell random term z: D × A² ---
+    Z = Matrix{Float64}(undef, D, A * A)
+    if wk === nothing                                      # pooled: 1-D z[p]
+        zw1 = Regex("^" * zbase * raw"\[(\d+)\]$")
+        for n in pnames
+            m = match(zw1, n); m === nothing && continue
+            Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
+        end
+    else                                                   # per-week: z[p, wk]
+        zw = Regex("^" * zbase * raw"\[(\d+)\s*,\s*(\d+)\]$")
+        for n in pnames
+            m = match(zw, n); m === nothing && continue
+            parse(Int, m.captures[2]) == wk &&
+                (Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])))
+        end
+    end
+
+    # --- per cell: log_disp = β[bl] + τ·z[pcode], then exp∘softclamp (mirrors _cell_moments!) ---
+    disp = Array{Float64,3}(undef, D, A, A)
+    for i in 1:A, j in 1:A
+        bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+        pcode = (i - 1) * A + j
+        for d in 1:D
+            disp[d, i, j] = exp(_softclamp(β[d, bl] + τ[d] * Z[d, pcode], lo, hi))
         end
     end
     return disp
+end
+
+"""
+    reconstruct_p0_draws(lbl, origin, h; grid, week_index=nothing, contacts, save_dir)
+        -> ndraws × A × A  |  nothing
+
+Fitted hurdle zero probability `p⁰_{ij}` per draw for one week, from a **weighted-path** Stage-1
+chain (`p0f[pcode, t]`, §4.2). Returns `nothing` for a NegBin chain — that path has no `p0f` (it
+models its zeros directly), which is also the cheapest way to tell the two chain shapes apart.
+
+Companion diagnostic: compare against the empirical `n_zero/n` (`AgePairData.p0`) — they should
+track closely wherever the roster count is large, which is the check that the Binomial in
+`_cell_moments!` is wired to the right denominator.
+"""
+function reconstruct_p0_draws(lbl::AbstractString, origin::Date, h::Integer; grid,
+                              week_index::Union{Int,Nothing} = nothing,
+                              contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                              save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(path) || return nothing
+    chn = try
+        load(path, "result")
+    catch err
+        @warn "could not load chain" path err
+        return nothing
+    end
+    A = grid.N
+    pnames = string.(names(chn, :parameters))
+    D = size(chn, 1) * size(chn, 3)
+    pw = r"^p0f\[(\d+)\s*,\s*(\d+)\]$"
+    entries = [(parse(Int, m.captures[1]), parse(Int, m.captures[2]), n)
+               for n in pnames for m in (match(pw, n),) if m !== nothing]
+    if isempty(entries)                                    # pooled 1-D p0f[p], or a NegBin chain
+        p1 = [(parse(Int, m.captures[1]), n)
+              for n in pnames for m in (match(r"^p0f\[(\d+)\]$", n),) if m !== nothing]
+        isempty(p1) && return nothing                      # NegBin path: no p0f by design
+        out = Array{Float64,3}(undef, D, A, A)
+        for (p, name) in p1
+            i, j = fldmod1(p, A)                           # pcode = (i−1)A + j
+            out[:, i, j] = vec(Array(chn[Symbol(name)]))
+        end
+        return out
+    end
+    wk = week_index === nothing ? maximum(e[2] for e in entries) : week_index
+    out = Array{Float64,3}(undef, D, A, A)
+    for (p, t, name) in entries
+        t == wk || continue
+        i, j = fldmod1(p, A)
+        out[:, i, j] = vec(Array(chn[Symbol(name)]))
+    end
+    return out
+end
+
+"""
+    reconstruct_tau_draws(lbl, origin, h; contacts, save_dir) -> ndraws × Tn  |  nothing
+
+The dispersion random-effect scale τ_t for EVERY window week (`tau[t]`, one per week, shared
+across the four child/adult blocks — §4.3). Half-Normal, so it is stored untransformed: no
+exp/softclamp mirror needed here, unlike `reconstruct_dispersion_draws`.
+Returns `nothing` if the chain is missing, or a `ndraws × 1` matrix for a pooled chain (scalar τ).
+"""
+function reconstruct_tau_draws(lbl::AbstractString, origin::Date, h::Integer;
+                               contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(path) || return nothing
+    chn = try
+        load(path, "result")
+    catch err
+        @warn "could not load chain" path err
+        return nothing
+    end
+    pnames = string.(names(chn, :parameters))
+    ent = [(parse(Int, m.captures[1]), n)
+           for n in pnames for m in (match(r"^tau\[(\d+)\]$", n),) if m !== nothing]
+    isempty(ent) && return reshape(vec(Array(chn[:tau])), :, 1)     # pooled: scalar τ
+    Tn = maximum(first.(ent))
+    D  = size(chn, 1) * size(chn, 3)
+    out = Matrix{Float64}(undef, D, Tn)
+    for (t, name) in ent
+        out[:, t] = vec(Array(chn[Symbol(name)]))
+    end
+    return out
+end
+
+"""
+    plot_tau_over_weeks(lbl, origin, cfg, weeks; h=1, save_dir) -> Plots.Plot | nothing
+
+Posterior median + 90% band of the dispersion RE scale τ_t across the window weeks, against its
+`N⁺(0, cfg.disp_re_scale_prior[2])` prior band (grey).
+
+Read it as the "is the hierarchy earning its place?" check: **τ_t hugging the prior across all
+weeks means the data are not informing the per-cell spread** — the random term is then just prior
+noise flowing into ⟨k²⟩ (and amplified by the neighbourhood NGM). The documented fallbacks are a
+tighter prior scale (0.109, the 2026-07-11 value) or a single scalar τ for the whole window.
+τ_t → 0 recovers the block-only dispersion exactly.
+"""
+function plot_tau_over_weeks(lbl::AbstractString, origin::Date, cfg, weeks;
+                             h::Integer = 1,
+                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    τ = reconstruct_tau_draws(lbl, origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    τ === nothing && (@warn "no Stage-1 chain for τ panel" lbl origin; return nothing)
+    Tn  = size(τ, 2)
+    wks = length(weeks) == Tn ? collect(weeks) : collect(1:Tn)
+    # `view(...)` function form, NOT the space-form `@view`: in an argument list with further args
+    # the macro greedily swallows them (`quantile(@view τ[:, t], 0.05)` → "Invalid use of @view
+    # macro"). Same trap the model's `_cell_moments!` call site documents.
+    med = [median(view(τ, :, t)) for t in 1:Tn]
+    lo  = [quantile(view(τ, :, t), 0.05) for t in 1:Tn]
+    hi  = [quantile(view(τ, :, t), 0.95) for t in 1:Tn]
+    # half-Normal N⁺(0,σ) prior quantiles: q(p) = σ·Φ⁻¹((1+p)/2)
+    σp  = cfg.disp_re_scale_prior[2]
+    pri = (med = σp * 0.6744897501960817, lo = σp * 0.06270677794321385, hi = σp * 1.959963984540054)
+    p = plot(; title = "$lbl — dispersion RE scale τ_t (origin $origin, h=$h)", titlefontsize = 9,
+             xlabel = "window week", ylabel = "τ  (log-scale SD of the per-cell RE)",
+             legend = :topright, legendfontsize = 6, xrotation = 45, ylims = (0, max(σp * 2.5, maximum(hi) * 1.1)))
+    # Date-valued series FIRST — a leading hline!/hspan! locks a numeric axis and mangles date ticks.
+    plot!(p, wks, med; lw = 2, marker = :circle, ms = 3, markerstrokewidth = 0,
+          ribbon = (med .- lo, hi .- med), fillalpha = 0.18, label = "posterior median & 90%")
+    plot!(p, wks, fill(pri.med, Tn); lw = 1.2, ls = :dot, color = :grey40, label = "prior median & 90%",
+          ribbon = (fill(pri.med - pri.lo, Tn), fill(pri.hi - pri.med, Tn)),
+          fillalpha = 0.08, fillcolor = :grey60)
+    return p
+end
+
+"""
+    plot_dispersion_cells(lbl, origin, cfg, grid; weighted, h=1, week_index=nothing, save_dir)
+        -> Plots.Plot | nothing
+
+7×7 heatmap of the per-cell dispersion (posterior median of `κ_{ij}` / `φ_{ij}`) at one week, with
+the child/adult **block boundary** drawn on top.
+
+This is the direct picture of what the 2026-07-30 hierarchy bought: before it, every cell inside a
+block was **identical** by construction, so each of the four block quadrants would be one flat
+colour. Visible within-quadrant variation is the per-cell random term `τ_t·z_{ij,t}` doing work;
+four flat quadrants mean τ_t has been shrunk to ~0 and the model has collapsed back to block-only
+(cross-check with `plot_tau_over_weeks`).
+"""
+function plot_dispersion_cells(lbl::AbstractString, origin::Date, cfg, grid;
+                               weighted::Bool, h::Integer = 1,
+                               week_index::Union{Int,Nothing} = nothing,
+                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    D = reconstruct_dispersion_draws(lbl, origin, h; weighted = weighted, cfg = cfg, grid = grid,
+                                     week_index = week_index, contacts = contacts_label(cfg),
+                                     save_dir = save_dir)
+    D === nothing && return nothing
+    A = grid.N
+    med = [median(view(D, :, i, j)) for i in 1:A, j in 1:A]
+    sym = weighted ? "κ" : "φ"
+    p = heatmap(1:A, 1:A, med; c = :viridis, yflip = true,
+                xticks = (1:A, grid.LAB), yticks = (1:A, grid.LAB), xrotation = 45,
+                xlabel = "contactee age group j", ylabel = "participant age group i",
+                title = "$lbl — per-cell dispersion $sym (median, week $(week_index === nothing ? "last" : week_index))",
+                titlefontsize = 9, tickfontsize = 6)
+    # child/adult block boundary (cfg.child_bins splits both axes)
+    b = cfg.child_bins + 0.5
+    plot!(p, [b, b], [0.5, A + 0.5]; lw = 2, color = :white, label = "")
+    plot!(p, [0.5, A + 0.5], [b, b]; lw = 2, color = :white, label = "")
+    return p
+end
+
+"""
+    plot_p0_vs_empirical(lbl, origin, apd, cfg, grid; h=1, week_index=nothing, save_dir)
+        -> Plots.Plot | nothing
+
+Fitted hurdle zero probability `p⁰` against the empirical `n_zero/n`, one point per age-pair cell,
+sized by roster count `n`. **Weighted (hurdle-Weibull) path only** — returns `nothing` for a NegBin
+chain, which has no `p0f` by design.
+
+This is the wiring check for the Binomial in `_cell_moments!`: with a flat `Beta(1,1)` and a large
+`n`, the posterior mean must sit essentially on the empirical ratio. Systematic departure at large
+`n` means the denominator is wrong (e.g. `whist_nobs` vs roster mismatch). Small-`n` cells legitimately
+shrink toward 0.5, and all-zero cells legitimately land just BELOW 1 rather than on it — that is the
+change that stops `base_contact`'s `k1>0` guard from firing.
+"""
+function plot_p0_vs_empirical(lbl::AbstractString, origin::Date, apd, cfg, grid;
+                              h::Integer = 1, week_index::Union{Int,Nothing} = nothing,
+                              save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    P = reconstruct_p0_draws(lbl, origin, h; grid = grid, week_index = week_index,
+                             contacts = contacts_label(cfg), save_dir = save_dir)
+    P === nothing && return nothing                    # NegBin path (no p0f) or missing chain
+    A = grid.N
+    wk = week_index === nothing ? length(apd.weeks) : week_index
+    fitted = [median(view(P, :, i, j)) for i in 1:A, j in 1:A]
+    emp    = [apd.p0[wk, i, j] for i in 1:A, j in 1:A]
+    nn     = [apd.n[wk, i, j]  for i in 1:A, j in 1:A]
+    keep   = vec(nn) .> 0
+    p = plot(; title = "$lbl — fitted p⁰ vs empirical n₀/n (origin $origin, week $wk)",
+             titlefontsize = 9, xlabel = "empirical n₀/n", ylabel = "posterior median p⁰",
+             legend = :bottomright, legendfontsize = 6, xlims = (-0.02, 1.02), ylims = (-0.02, 1.02))
+    plot!(p, [0, 1], [0, 1]; lw = 1, ls = :dash, color = :grey50, label = "y = x")
+    scatter!(p, vec(emp)[keep], vec(fitted)[keep];
+             ms = 2 .+ 4 .* sqrt.(vec(nn)[keep] ./ maximum(nn)), markerstrokewidth = 0,
+             alpha = 0.65, label = "age-pair cells (size ∝ √n)")
+    return p
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,7 +490,6 @@ function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
     s1p = stage1_chain_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
     s2p = stage2_pooled_path(lbl, origin, h; contacts = tag, save_dir = save_dir)
     (isfile(s1p) && isfile(s2p)) || (@warn "no two-stage artefacts for fit-window fit" lbl; return nothing)
-    w_gi = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     ds   = build_degree_stats(dm, apd_o[h], cfg)              # h-window degree stats (matches cached chain)
     local md, pooled
     try
@@ -274,10 +507,15 @@ function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
     out = Array{Float64}(undef, A, length(fitcols), Np)
     for d in 1:Np
         m = pooled.post_index[d]
+        # PER-DRAW generation interval (2026-07-30, §3.1): the GI is estimated in Stage 2, so
+        # each pooled draw carries its own (w_mu, w_sigma). Rebuilding it from cfg here would
+        # silently use the PRIOR CENTRE while the fit used the posterior. The stored values are
+        # post-clamp, so this reproduces the model's `w` exactly.
+        w_d = gen_interval_pmf_log(pooled.w_mu[d], pooled.w_sigma[d]; smax = cfg.smax)
         for (c, t) in enumerate(fitcols)
             N = build_ngm(Cstar_by_m[m][t], pooled.susc[d, :], pooled.inf[d, :],
                           pooled.F[d], wd.antibody[:, t]; gamma_sar = pooled.gamma_sar[d])
-            out[:, c, d] = renewal_next(N, wd.I_mean, t, w_gi)
+            out[:, c, d] = renewal_next(N, wd.I_mean, t, w_d)
         end
     end
     return out
@@ -572,12 +810,13 @@ end
 
 One small age-pair CCDF panel: observed CCDF markers (at `oc.t_o`) + estimated median line & 90%
 ribbon (`estimated_ccdf_band`). `xlim` is the figure-wide shared x-range (from `_shared_xlim`).
-Dispersion is sliced at block-linear index `bl = 2(block_of(i)−1)+block_of(j)`.
+`κdraws` is `ndraws × A × A` and sliced PER CELL — the dispersion has been hierarchical since
+2026-07-30 (§4.3), so it varies within a child/adult block; the old `[:, bl]` block-linear slice
+would collapse all cells of a block onto one value.
 """
 function agepair_ccdf_panel(i, j, μdraws, κdraws, weighted::Bool, oc; xlim = :auto)
-    grid = oc.grid; apd = oc.apd; t_o = oc.t_o; cfg = oc.cfg
-    bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)           # block-linear dispersion index
-    κd = view(κdraws, :, bl); μd = view(μdraws, :, i, j)
+    grid = oc.grid; apd = oc.apd; t_o = oc.t_o
+    κd = view(κdraws, :, i, j); μd = view(μdraws, :, i, j)
     pnl = plot(; title = "$(grid.LAB[i])→$(grid.LAB[j])", titlefontsize = 6, xaxis = :log10, xlim = xlim,
                yscale = weighted ? :log10 : :identity, ylim = weighted ? (1e-5, 1.0) : (-5.0, 0.0),
                left_margin = 5Plots.mm, bottom_margin = 5Plots.mm,   # room for per-panel axis ticks
@@ -640,7 +879,7 @@ function make_agepair_ccdf_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
     μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
     κdraws = reconstruct_dispersion_draws(lbl, oc.origin, 1; weighted = is_weighted(dm),
-                                          week_index = oc.t_o_est)
+                                          cfg = oc.cfg, grid = grid, week_index = oc.t_o_est)
     (μdraws === nothing || κdraws === nothing) && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
     weighted = is_weighted(dm)
     xlim_shared = _shared_xlim(weighted, oc)                     # one x-axis for the whole grid

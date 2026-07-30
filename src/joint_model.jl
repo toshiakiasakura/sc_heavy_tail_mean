@@ -33,6 +33,13 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
 _softclamp(x, lo, hi) = lo + _softplus((hi - _softplus(hi - x)) - lo)
 
+# Element type of the fitted hurdle p⁰ block, for the `ETp` promotion in `model_degree`.
+# The NegBin path has no p⁰ (it models its zeros directly) and passes `nothing`; `Bool` is the
+# identity for `promote_type` (`promote_type(T, Bool) == T` for every numeric T), so the NegBin
+# promotion is unaffected.
+_p0_eltype(::Nothing) = Bool
+_p0_eltype(x) = eltype(x)
+
 """
     _unordered_pairs(A)
 
@@ -166,23 +173,68 @@ end
         [exp(_softclamp(rvec[ds.pair_index[i, j]] + logpop[j], -8.0, 6.0)) for i in 1:A, j in 1:A]
 
     # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
-    # μ matrix. `didx` indexes the (possibly weekly) degree arrays; `dispv` is the length-4
-    # block-linear dispersion for this context, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`
-    # (kept 1-D per week: DynamicPPL's `generated_quantities` can't reconstruct a 3-D
-    # `filldist`, so dispersion is a 2-D `4×Tn` array sliced per week, never `2×2×Tn`).
-    function _cell_moments!(K1, K2, G, μ, didx, dispv)
-        ll = zero(eltype(μ))
+    # μ matrix. `didx` indexes the (possibly weekly) degree arrays.
+    #
+    # DISPERSION IS HIERARCHICAL (§4.3): `βv` is the length-4 block-linear MEAN, indexed
+    # `bl = 2(bi−1)+bj ∈ {1,2,3,4}`; `zv` is the per-ordered-cell random term, indexed
+    # `pcode = (i−1)A+j ∈ 1..A²`; `τ` is the RE scale, ONE per week SHARED across the four
+    # blocks. Per cell:  log_disp_{ij} = βv[bl] + τ·zv[pcode]  — NON-CENTRED (never
+    # `log_disp ~ Normal(β, τ)`: that funnels τ against its 49 cells and wrecks Pathfinder /
+    # NUTS). The scale is shared rather than per-block for identifiability — a per-block scale
+    # would be estimated from that block's cells alone, and child→child has only 2×2 = 4
+    # ordered cells, re-estimated every week (see tasks/lessons.md 2026-07-11).
+    # The SOFT-CLAMP is applied to the COMPOSED value, not to βv alone.
+    #
+    # `p0v` (weighted path only; `nothing` for NegBin) is the per-cell FITTED hurdle zero
+    # probability, replacing the empirical `ds.p0` plug-in (§4.2).
+    #
+    # All of βv/zv/τ/p0v are ≤ 2-D `filldist` slices (`4×Tn`, `A²×Tn`, `Tn`, `A²×Tn`) so
+    # `generated_quantities` can reconstruct them — a 3-D `filldist` cannot be (see build sites).
+    function _cell_moments!(K1, K2, G, μ, didx, βv, zv, τ, p0v)
+        ll = zero(eltype(K1))                     # NOT eltype(μ): μ carries neither τ nor p0's type
         for i in 1:A, j in 1:A
-            bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+            bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+            pcode = (i - 1) * A + j                        # ordered/directional, self-pairs included
+            logd  = βv[bl] + τ * zv[pcode]                 # block mean + shared-scale cell RE
             if is_weighted(dm)
-                κ = exp(_softclamp(dispv[bl], -3.0, 3.0))   # shape ∈ ≈[0.05, 20], soft-bounded
-                λ = μ[i, j] / gamma(1 + 1 / κ)              # scale stays finite & >0 (μ, κ bounded)
+                # WIDENED 2026-07-30 from [-3,3] (κ∈[0.05,20]) to [-4.3,5] (κ∈[0.0136,148]).
+                # The old bound was binding hard once the per-cell RE was added: every κ sat
+                # exactly on 0.0498, which is the clamp-compression signature, and the flat
+                # region it creates let the LBFGS path run away (block means reached −441, ~900
+                # prior SDs). See tasks/lessons.md 2026-07-30.
+                #
+                # ⚠ THE LOWER BOUND IS NUMERICALLY LOAD-BEARING AND −4.45 IS THE HARD FLOOR.
+                # It guards TWO different overflows, and the SECOND one binds much earlier — the
+                # trap that first cost a run here:
+                #   (a) λ = μ/gamma(1+1/κ)          needs 1+1/κ ≲ 171.6 ⇒ log κ ≳ −5.14
+                #   (b) CV² = gamma(1+2/κ)/gamma(1+1/κ)²  (in `_weibull_moments`)
+                #                                    needs 1+2/κ ≲ 171.6 ⇒ log κ ≳ −4.446  ← BINDS
+                # Past (b) both gammas are Inf, so CV² = Inf/Inf = NaN, K2 goes NaN, and it
+                # propagates silently into C* and the whole Stage-2 chain. Measured: −4.44 ⇒
+                # gamma(170.6)=7.2e305, CV²=6.7e49 (finite); −4.50 ⇒ Inf ⇒ NaN. −4.3 keeps ~50
+                # orders of headroom. Do NOT raise this to −5 "because λ is still finite" —
+                # that was checked once and it broke (b).
+                κ = exp(_softclamp(logd, -4.3, 5.0))       # shape ∈ ≈[0.0136, 148], soft-bounded
+                λ = μ[i, j] / gamma(1 + 1 / κ)             # scale stays finite & >0 (μ, κ bounded)
                 pos = didx === nothing ? ds.pos_weight[i, j] : ds.pos_weight[didx, i, j]
                 isempty(pos) || (ll += calculate_loglikelihood(pos, Weibull(κ, λ)))  # collapsed histogram
-                p0 = didx === nothing ? ds.p0[i, j] : ds.p0[didx, i, j]
+                # ---- hurdle zero part: FITTED p⁰ with a Binomial roster likelihood (§4.2) ----
+                # n = sampled participant-days for bin i in this week (constant in j);
+                # n_zero = those with NO contact in cell (i,j) = n − (#participant-days with ≥1),
+                # and `whist_nobs(pos)` is exactly that second count, so the split is exact.
+                # The `log C(n, n_zero)` normaliser is dropped: it depends only on data, so the
+                # posterior is unchanged, and it keeps lgamma out of a 49×Tn inner loop that runs
+                # on every gradient evaluation. Written as the raw kernel rather than
+                # `logpdf(Binomial(n, p0), nz)` to keep the AD surface trivial.
+                p0 = p0v[pcode]
+                nn = didx === nothing ? ds.n[i, j] : ds.n[didx, i, j]
+                if nn > 0                                  # n == 0 ⇒ roster row absent ⇒ no trial
+                    nz = nn - whist_nobs(pos)
+                    ll += nz * log(p0) + (nn - nz) * log1p(-p0)
+                end
                 k1, k2, g = _weibull_moments(μ[i, j], κ, p0)
             else
-                kk = exp(_softclamp(dispv[bl], -4.0, 5.0))  # dispersion ∈ ≈[0.018, 148], soft-bounded
+                kk = exp(_softclamp(logd, -4.0, 5.0))      # dispersion ∈ ≈[0.018, 148], soft-bounded
                 dd = didx === nothing ? ds.dd_count[i, j] : ds.dd_count[didx, i, j]
                 ll += calculate_loglikelihood(dd, NegBin(μ[i, j], kk))
                 k1, k2, g = _negbin_moments(μ[i, j], kk)
@@ -199,17 +251,25 @@ end
         # pooled: one latent field, one moment set reused for every renewal week.
         c ~ Normal(c0, 3.0)
         z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
+        # dispersion RE scale — a SCALAR here (the pooled regime has no week axis).
+        # Half-Normal ⇒ already ≥0, so no exp/softclamp transform: τ = tau directly.
+        tau ~ truncated(Normal(cfg.disp_re_scale_prior[1], cfg.disp_re_scale_prior[2]); lower = 0)
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
-            disp = log_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape MEAN by child/adult block
+            z_kappa ~ filldist(Normal(0, 1), A * A)       # per-ordered-cell shape random term
+            p0f ~ filldist(Beta(1.0, 1.0), A * A)         # fitted hurdle zero prob (weighted path only)
+            β_disp = vec(log_kappa); z_disp = z_kappa; p0v = p0f
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
-            disp = log_k
+            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion MEAN by block
+            z_k ~ filldist(Normal(0, 1), A * A)           # per-ordered-cell dispersion random term
+            β_disp = vec(log_k); z_disp = z_k; p0v = nothing   # NegBin models its zeros directly
         end
         μ = _mu_matrix(c .+ η .* (Lp * z))
-        ETp = eltype(μ)
+        ETp = promote_type(eltype(μ), typeof(tau), _p0_eltype(p0v))
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
-        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, vec(disp))   # 2×2 → block-linear 4
+        # vec(2×2)→bl is column-major (off-diagonal blocks bl=2/3 labelled by that order); harmless
+        # as the block-mean prior is exchangeable, and this regime is inactive. See §4.3.
+        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, β_disp, z_disp, tau, p0v)
         K1w = [K1 for _ in 1:Tn]; K2w = [K2 for _ in 1:Tn]; Gw = [G for _ in 1:Tn]
         return (; K1 = K1w, K2 = K2w, G = Gw)
     else
@@ -237,20 +297,28 @@ end
         c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
 
         z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
-        # dispersion 4×Tn (block-linear rows × week): 2-D so generated_quantities can
-        # reconstruct it (a 3-D 2×2×Tn filldist can't be — see _cell_moments!).
+        # HIERARCHICAL dispersion, per week (§4.3): block MEAN β (4×Tn, block-linear rows × week)
+        # + per-ordered-cell random term z_disp (A²×Tn) scaled by a per-week τ_t SHARED across the
+        # four blocks. Non-centred: log_disp_{ij,t} = β[bl,t] + τ_t·z_disp[pcode,t].
+        # Everything ≤2-D so generated_quantities can reconstruct it (a 3-D filldist can't be).
+        # Dispersion stays per-week iid — it is NOT temporally smoothed, unlike the mean field.
+        tau ~ filldist(truncated(Normal(cfg.disp_re_scale_prior[1],
+                                        cfg.disp_re_scale_prior[2]); lower = 0), Tn)
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape by block-linear × week
-            disp = log_kappa
+            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape MEAN by block-linear × week
+            z_kappa ~ filldist(Normal(0, 1), A * A, Tn)        # per-ordered-cell shape RE × week
+            p0f ~ filldist(Beta(1.0, 1.0), A * A, Tn)          # fitted hurdle zero prob (weighted path only)
+            β_disp = log_kappa; z_disp = z_kappa; p0m = p0f
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
-            disp = log_k
+            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion MEAN by block-linear × week
+            z_k ~ filldist(Normal(0, 1), A * A, Tn)            # per-ordered-cell dispersion RE × week
+            β_disp = log_k; z_disp = z_k; p0m = nothing        # NegBin models its zeros directly
         end
         # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
         # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
         # already carries η; don't re-apply it below.
         Fld = η .* (Lp * z * Lt')                          # P×Tn
-        ETp = promote_type(typeof(c), eltype(Fld))
+        ETp = promote_type(typeof(c), eltype(Fld), eltype(tau), _p0_eltype(p0m))
         K1w = Vector{Matrix{ETp}}(undef, Tn)               # per-week raw moments (NGM applied downstream)
         K2w = Vector{Matrix{ETp}}(undef, Tn)
         Gw  = Vector{Matrix{ETp}}(undef, Tn)
@@ -258,7 +326,10 @@ end
         for t in 1:Tn
             K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
             μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
-            ll += _cell_moments!(K1, K2, G, μ, t, @view disp[:, t])
+            # `view(...)` (function form), NOT a space-form `@view a, @view b`: in an argument
+            # list the macro greedily swallows the following args ("Invalid use of @view macro").
+            ll += _cell_moments!(K1, K2, G, μ, t, view(β_disp, :, t), view(z_disp, :, t),
+                                 tau[t], p0m === nothing ? nothing : view(p0m, :, t))
             K1w[t] = K1; K2w[t] = K2; Gw[t] = G           # fresh matrices per week (not reused buffers)
         end
         Turing.@addlogprob! ll
@@ -273,7 +344,7 @@ end
 # C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
 # secondary attack rate and reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly.
 # ======================================================================================
-@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig)
+@model function model_transmission(Cstar_weeks, wd::WindowData, cfg::FrameworkConfig)
     A = wd.A
     Tn = length(wd.weeks)
 
@@ -312,6 +383,37 @@ end
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
+    # ---- generation interval, ESTIMATED (2026-07-30; Munday 2023 Eq 2 + Table 1, §3.1) ----
+    # Prior centres are the moment-matched log-parameters of cfg.gen_mean_days/gen_sd_days
+    # (5d/5d ⇒ (w_mu0, w_sigma0) = (−0.6830, log2 = 0.6931)), with Munday p.8's "SD = 20% of the
+    # prior mean". `w_sigma` is the LOG-VARIANCE (see gen_interval_logparams), so sdlog = √w_sigma.
+    #
+    # Only w_sigma is truncated at 0. The paper prints T[0,] on BOTH and a *negative* prior SD for
+    # w_mu, which is not a valid statement — and truncating w_mu at 0 would be wrong regardless: a
+    # 5-day GI is shorter than a week, so meanlog = −0.683 < 0 is REQUIRED. Hence `abs(...)` on the
+    # SD and no truncation on w_mu. Deliberate, documented departure from the printed table.
+    #
+    # Soft-clamps are outer safety bounds (codebase idiom), far outside the prior's ±2 SD:
+    # w_mu ∈ [log(1/7), log 3] ⇒ GI mean ≈ 1 day .. 3 weeks; w_sigma ∈ [0.02, 4]. At either bound
+    # F(smax) ≥ 0.55, so gen_interval_pmf_log's division by F(smax) cannot blow up.
+    #
+    # ⚠ IDENTIFIABILITY: w and gamma_sar are confounded — both scale the renewal predictor, so
+    # raising w₁ and lowering gamma_sar nearly compensate over an 8-week window. The 20% prior SD
+    # is what keeps the pair identified; do NOT loosen it. Check the posterior against the prior
+    # (9j `plot_gen_interval`): equal to the prior ⇒ the GI is adding nothing; parked on a clamp
+    # with a tight CI ⇒ clamp compression, not certainty (cf. the γ_SAR≈0.021 episode).
+    wmu0, wv0 = gen_interval_logparams(cfg.gen_mean_days, cfg.gen_sd_days)
+    r = cfg.gen_prior_rel_sd
+    w_mu ~ Normal(wmu0, abs(wmu0) * r)                                   # meanlog (weeks)
+    w_sigma ~ truncated(Normal(wv0, abs(wv0) * r); lower = 0)            # LOG-VARIANCE
+    # POST-CLAMP values — these, not the raw latents, are what the likelihood used, and they are
+    # what gets returned/stored so `gen_interval_pmf_log(w_mu, w_sigma)` downstream (the forecast,
+    # the 10j fit-window reconstruction, the 9j GI panel) reproduces this fit exactly. Same
+    # convention as gamma_sar/susc/inf, which are also returned post-clamp.
+    w_mu_e    = _softclamp(w_mu, log(1 / 7), log(3.0))
+    w_sigma_e = _softclamp(w_sigma, 0.02, 4.0)
+    w = gen_interval_pmf_log(w_mu_e, w_sigma_e; smax = cfg.smax)
+
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
     # (antibody and contacts vary by week; C*_t is the fixed Cstar_weeks[t].)
     for t in (cfg.smax + 1):Tn
@@ -323,7 +425,7 @@ end
         end
     end
 
-    return (; susc, inf, F, gamma_sar, sigma_inf)
+    return (; susc, inf, F, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
 end
 
 # --------------------------------------------------------------------------------------
@@ -339,25 +441,121 @@ stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
     joinpath(save_dir, "8j_s2_$(degree_label(dm))_$(ngm_label(nb))_$(contacts)_$(origin)_h$(h).jld2")
 
 """
+    _stage1_init(model, z_scale, rng)
+
+Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vector.
+
+Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
+variable whose name starts with `z` (`z`, `z_c`, `z_kappa`/`z_k`) — which are drawn from
+`N(0, z_scale²)` instead of `N(0,1)`. Returns `nothing` when `z_scale ≤ 0`, which leaves
+Pathfinder on its own `UniformSampler(2)` default.
+
+Built by round-tripping a `NamedTuple` through `InitFromParams` + `link!!` rather than by writing
+into index ranges of the flat vector. The ranges are contiguous today (measured: `z_kappa` is
+415:1002 of 1590) but that is an implementation detail of DynamicPPL's variable ordering — it would
+shift the moment a latent is added, reordered, or made conditional, and silently initialise the
+wrong block. The named round-trip cannot go wrong that way.
+
+Note these `z`s are identity-transformed under `link!!` (a standard Normal is already
+unconstrained), so the requested SD is the SD *in the space Pathfinder optimises*, not merely on
+the constrained scale.
+"""
+function _stage1_init(model, z_scale::Real, rng)
+    z_scale > 0 || return nothing
+    vi = DynamicPPL.VarInfo(rng, model)
+    nt = DynamicPPL.values_as(vi, NamedTuple)
+    zk = filter(k -> startswith(string(k), "z"), keys(nt))
+    isempty(zk) && return nothing
+    vals = NamedTuple{Tuple(zk)}(Tuple(z_scale .* randn(rng, size(nt[k])) for k in zk))
+    _, vi2 = DynamicPPL.init!!(rng, model, DynamicPPL.VarInfo(),
+                               DynamicPPL.InitFromParams(merge(nt, vals)))
+    # `collect(Float64, …)` is REQUIRED, not tidying: the InitFromParams round-trip yields a
+    # `Vector{Real}` (non-concrete eltype), and Optimization.jl rejects that outright —
+    # "Non-concrete element type inside of an `Array` detected. Element type: Real" — so the fit
+    # dies before the first gradient. The vector itself is already correct at that point, which is
+    # why a length/finiteness/SD check on it passes while the fit still fails.
+    return collect(Float64, DynamicPPL.link!!(vi2, model)[:])
+end
+
+"""
+    _fit_pathfinder(model, ndraws, nruns, rng, adtype; init=nothing)
+
+Run Pathfinder on `model`, single- or multi-path depending on `nruns`.
+
+`init` (single-path only) is an explicit unconstrained starting vector from `_stage1_init`;
+`nothing` leaves Pathfinder on its `UniformSampler(2)` default. It is not forwarded to
+`multipathfinder`, which derives its own per-path inits and throws if given both `init` and `nruns`.
+
+**`nruns > 1` ⇒ `multipathfinder`** — `nruns` independent LBFGS paths, then Pareto-smoothed
+importance resampling to `ndraws`. This is the robustness fix for Stage-1 divergence (2026-07-30):
+a single path diverged into the soft-clamp's flat region in **2 of 5 seeds** on the hurdle-Weibull
+path. A diverged path lands where the log-posterior is minuscule, so its importance weights are
+negligible and the resampling all but discards it — provided at least one path is healthy.
+
+Two API details that matter:
+- `ndraws` is POSITIONAL for `multipathfinder` but a keyword for `pathfinder`.
+- `nruns` has **no usable default** (it is `-1` unless `init` is supplied, which then throws), so it
+  must be passed explicitly.
+- `executor` is left at its `SequentialEx()` default **deliberately**: `prefit_stage1!` already fans
+  fits out over Julia threads under a semaphore, so letting multipathfinder thread internally would
+  oversubscribe and (per its own docs) requires a thread-safe `rng` and log-density.
+
+Warns when the Pareto shape k > 0.7 — the standard threshold above which importance resampling is
+unreliable, i.e. the paths disagree so badly that the pooled draws should not be trusted.
+"""
+function _fit_pathfinder(model, ndraws::Int, nruns::Int, rng, adtype; init = nothing)
+    if nruns <= 1
+        kw = (; ndraws = ndraws, rng = rng)
+        adtype === nothing || (kw = merge(kw, (; adtype = adtype)))
+        init === nothing   || (kw = merge(kw, (; init = init)))
+        return pathfinder(model; kw...)
+    end
+    pf = adtype === nothing ?
+        multipathfinder(model, ndraws; nruns = nruns, rng = rng) :
+        multipathfinder(model, ndraws; nruns = nruns, rng = rng, adtype = adtype)
+    k = try
+        pf.psis_result === nothing ? nothing : pf.psis_result.pareto_shape
+    catch
+        nothing
+    end
+    (k !== nothing && k > 0.7) &&
+        @warn "multipathfinder: Pareto k > 0.7 — importance resampling unreliable, paths disagree" k nruns
+    return pf
+end
+
+"""
     fit_stage1(dm, ds, pop, cfg; use_nuts=cfg.stage1_use_nuts, ndraws_pf, n_sample=250)
 
 Stage-1 (contact-degree GP) fit: Pathfinder init → (optionally) NUTS on `model_degree`.
 Returns `(; chn, model, pf)`. `chn` is the Pathfinder approximate posterior (default) or the
 NUTS chain; both carry the same GP parameter names. `ndraws_pf`/`n_sample` are kept ≥
 `cfg.n_stage1_post` so there are always enough draws to impute into Stage 2.
+
+Uses **multi-path** Pathfinder when `cfg.stage1_pathfinder_runs > 1` (see `_fit_pathfinder`);
+`= 1` (the default since 2026-07-30) is single-path. Both return types expose `draws_transformed`,
+so the NUTS-init branch below is unaffected.
+
+Single-path additionally starts from an explicit `_stage1_init(model, z_init_scale, rng)`: all
+latents drawn from their priors except the non-centred `z*` blocks, drawn from `N(0, z_init_scale²)`.
+Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` default. The init is
+`rng`-dependent, so distinct seeds still explore distinct starting points.
 """
 function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
                     use_nuts::Bool = cfg.stage1_use_nuts,
                     ndraws_pf::Int = max(200, cfg.n_stage1_post),
                     n_sample::Int = max(250, cfg.n_stage1_post),
+                    nruns::Int = cfg.stage1_pathfinder_runs,
+                    z_init_scale::Real = cfg.stage1_z_init_scale,
                     adtype = AutoReverseDiff(), rng = nothing)
     if rng === nothing
         Random.seed!(cfg.seed)
         rng = Random.default_rng()
     end
     model = model_degree(dm, ds, pop, cfg)
-    pf = adtype === nothing ? pathfinder(model; ndraws = ndraws_pf, rng = rng) :
-                              pathfinder(model; ndraws = ndraws_pf, rng = rng, adtype = adtype)
+    # Explicit small init for the non-centred z blocks (single-path only — multipathfinder derives
+    # its own inits per path, and passing `init` to it makes `nruns` throw; see _fit_pathfinder).
+    init = nruns <= 1 ? _stage1_init(model, z_init_scale, rng) : nothing
+    pf = _fit_pathfinder(model, ndraws_pf, nruns, rng, adtype; init = init)
     if !use_nuts
         return (; chn = pf.draws_transformed, model, pf)
     end
@@ -424,7 +622,6 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
                            n_draw::Int = cfg.n_stage2_draws, adtype = AutoReverseDiff(),
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
     A = wd.A; Tn = length(wd.weeks)
-    w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     M = length(moment_draws)
     Cstar_end = Vector{Matrix{Float64}}(undef, M)
     per_m = Vector{Any}(undef, M)
@@ -432,20 +629,23 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         md = moment_draws[m]
         Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tn]
         Cstar_end[m] = Cstar_m[end]
-        model = model_transmission(Cstar_m, wd, w, cfg)
+        model = model_transmission(Cstar_m, wd, cfg)   # GI is now sampled INSIDE (no `w` arg)
         rng = Random.Xoshiro(base_seed + m)
         pf = adtype === nothing ? pathfinder(model; ndraws = n_draw, rng = rng) :
                                   pathfinder(model; ndraws = n_draw, rng = rng, adtype = adtype)
         gq = vec(generated_quantities(model, pf.draws_transformed))
         nd = min(n_draw, length(gq))
         gs = Vector{Float64}(undef, nd); Fv = Vector{Float64}(undef, nd); sg = Vector{Float64}(undef, nd)
+        wm = Vector{Float64}(undef, nd); wv = Vector{Float64}(undef, nd)
         su = Matrix{Float64}(undef, nd, A); infm = Matrix{Float64}(undef, nd, A)
         for d in 1:nd
             q = gq[d]
             gs[d] = q.gamma_sar; Fv[d] = q.F; sg[d] = q.sigma_inf
+            wm[d] = q.w_mu; wv[d] = q.w_sigma          # per-draw GI log-parameters
             su[d, :] = q.susc; infm[d, :] = q.inf
         end
-        per_m[m] = (; gamma_sar = gs, susc = su, inf = infm, F = Fv, sigma_inf = sg)
+        per_m[m] = (; gamma_sar = gs, susc = su, inf = infm, F = Fv, sigma_inf = sg,
+                      w_mu = wm, w_sigma = wv)
     end
 
     if max_concurrent <= 1 || M <= 1
@@ -473,8 +673,11 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
     sigma_inf  = reduce(vcat, (per_m[m].sigma_inf  for m in 1:M))
     susc       = reduce(vcat, (per_m[m].susc       for m in 1:M))
     inf        = reduce(vcat, (per_m[m].inf        for m in 1:M))
+    w_mu       = reduce(vcat, (per_m[m].w_mu       for m in 1:M))
+    w_sigma    = reduce(vcat, (per_m[m].w_sigma    for m in 1:M))
     post_index = reduce(vcat, (fill(m, length(per_m[m].gamma_sar)) for m in 1:M))
-    return (; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post = M, n_draw = n_draw)
+    return (; gamma_sar, susc, inf, F, sigma_inf, w_mu, w_sigma, post_index, Cstar_end,
+              n_post = M, n_draw = n_draw)
 end
 
 # ---- parallel pre-fitting of the (origin × combo × horizon) two-stage artefacts -------
@@ -483,13 +686,47 @@ end
 # Threading (not Distributed) keeps memory low — one process, shared compiled code — which
 # matters here: each worker process would otherwise re-load/compile the whole Turing stack.
 
-"Available RAM (GiB): `/proc/meminfo` `MemAvailable` (counts reclaimable cache), else `Sys.free_memory`."
+"""
+Reclaimable RAM (GiB) on macOS, parsed from `vm_stat`: free + inactive + speculative pages.
+
+`Sys.free_memory()` is NOT usable on darwin — it is libuv's `uv_get_free_memory()`, i.e. the
+*truly free* page count only. macOS deliberately keeps that near zero (it holds memory as
+inactive/cached rather than freeing it), so it reads ~2 GiB on an idle 32 GiB machine and
+`fit_concurrency`'s memory cap floors to 0 ⇒ silently serial fitting. Free + inactive +
+speculative is the darwin analogue of Linux's `MemAvailable` (inactive and speculative pages
+are reclaimable, the latter being file read-ahead). `purgeable` is deliberately NOT added: it
+is a subset of active/inactive, so counting it would double-count.
+"""
+function _darwin_available_gib()
+    out = read(`vm_stat`, String)
+    m = match(r"page size of (\d+) bytes", out)
+    pagesize = m === nothing ? 4096 : parse(Int, m.captures[1])
+    npages(label) = begin
+        mm = match(Regex("^Pages " * label * ":\\s+(\\d+)\\.", "m"), out)
+        mm === nothing ? 0 : parse(Int, mm.captures[1])
+    end
+    return (npages("free") + npages("inactive") + npages("speculative")) * pagesize / 2^30
+end
+
+"""
+Available RAM (GiB), per platform: Linux `/proc/meminfo` `MemAvailable` (counts reclaimable
+cache); macOS `vm_stat` free+inactive+speculative (see `_darwin_available_gib` — the old
+`/proc/meminfo`-then-`Sys.free_memory` fallback under-reported by ~7× on darwin and forced
+`fit_concurrency` to 1); anything else `Sys.free_memory`.
+"""
 function _mem_available_gib()
-    try
-        for line in eachline("/proc/meminfo")
-            startswith(line, "MemAvailable:") && return parse(Int, split(line)[2]) / 2^20
+    if Sys.islinux()
+        try
+            for line in eachline("/proc/meminfo")
+                startswith(line, "MemAvailable:") && return parse(Int, split(line)[2]) / 2^20
+            end
+        catch
         end
-    catch
+    elseif Sys.isapple()
+        try
+            return _darwin_available_gib()
+        catch
+        end
     end
     return Sys.free_memory() / 2^30
 end
@@ -500,11 +737,39 @@ end
 How many joint fits to run at once, balancing CPU and memory: the minimum of the Julia
 thread count, (physical cores − 1), and how many `mem_per_fit_gib`-sized fits fit in
 available RAM after a `reserve_gib` headroom. Always ≥ 1.
+
+Note the CPU cap is bounded by `Threads.nthreads()`, which is 1 unless Julia is started with
+`-t`/`JULIA_NUM_THREADS` (the devcontainer sets 12) — so a return of 1 on a many-core machine
+usually means the thread count, not the memory cap. `fit_concurrency_report()` says which.
+
+Second darwin caveat (documented, NOT worked around): on Apple silicon `Sys.CPU_THREADS` reports
+the *performance* cores only (`hw.perflevel0.logicalcpu`, e.g. 4) while `hw.ncpu` counts P+E
+(e.g. 10), so `cpu_cap` saturates well below the apparent core count. That is a defensible cap
+for compute-bound Pathfinder fits — E-cores contribute little and oversubscribing hurts — so it
+is left as is; pass `max_concurrent` explicitly to override.
 """
 function fit_concurrency(; mem_per_fit_gib::Real = 1.0, reserve_gib::Real = 4.0)
     mem_cap = floor(Int, max(0.0, _mem_available_gib() - reserve_gib) / mem_per_fit_gib)
     cpu_cap = min(Threads.nthreads(), max(1, Sys.CPU_THREADS - 1))
     return max(1, min(cpu_cap, mem_cap))
+end
+
+"""
+    fit_concurrency_report(; mem_per_fit_gib=1.0, reserve_gib=4.0)
+
+Diagnostic breakdown of `fit_concurrency`: which cap binds, and the memory reading behind it.
+Returns `(; concurrency, mem_cap, cpu_cap, avail_gib, nthreads, cpu_threads, binding)`.
+Print this before a long pre-fit — the value decides whether the run is serial or `n`-way, and
+nothing in the notebooks records it.
+"""
+function fit_concurrency_report(; mem_per_fit_gib::Real = 1.0, reserve_gib::Real = 4.0)
+    avail   = _mem_available_gib()
+    mem_cap = floor(Int, max(0.0, avail - reserve_gib) / mem_per_fit_gib)
+    cpu_cap = min(Threads.nthreads(), max(1, Sys.CPU_THREADS - 1))
+    k       = max(1, min(cpu_cap, mem_cap))
+    binding = mem_cap <= cpu_cap ? :memory : :cpu
+    return (; concurrency = k, mem_cap, cpu_cap, avail_gib = avail,
+              nthreads = Threads.nthreads(), cpu_threads = Sys.CPU_THREADS, binding)
 end
 
 """
@@ -663,20 +928,27 @@ end
 """
     two_stage_forecast(dm, nb, wd0, cfg, win0; apd_by_h=nothing, grid, setting, save_dir, adtype)
 
-Pooled `A × H × N` forecast (N = n_stage1_post·n_stage2_draws = 10_000). Infections and antibody are
-frozen at the baseline `win0.origin` (t₀); for each horizon `h` the Stage-2 pooled draws for
+Pooled `A × H × N` forecast (N = n_stage1_post·n_stage2_draws = 10_000). **Infections** are frozen at
+the baseline `win0.origin` (t₀); for each horizon `h` the Stage-2 pooled draws for
 `(dm, nb, origin, h)` are reloaded (or built), and per pooled draw `d` (from Stage-1 draw
-`m = post_index[d]`) the NGM `N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], antibody_t₀;
-gamma_sar=gamma_sar[d])` takes one renewal step against the history (observed lags up to t₀ plus the
-intervening horizons' MEAN forecasts — per-draw coherence across horizons is undefined, mirroring the
-former `iterated_forecast`). `apd_by_h[hi]` (optional) is the pre-built horizon-window `AgePairData`.
+`m = post_index[d]`) the NGM
+`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd0.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
+takes one renewal step against the history (observed lags up to t₀ plus the intervening horizons'
+MEAN forecasts — per-draw coherence across horizons is undefined, mirroring the former
+`iterated_forecast`). `apd_by_h[hi]` (optional) is the pre-built horizon-window `AgePairData`.
+
+Two things changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
+- **Antibody comes from the TARGET week t₀+h** (`antibody_fc[:, hi]`), not t₀ — matching the contact
+  window, which already ends at t₀+h. §3.2.
+- **The generation interval is per draw**, so the renewal-weighted lag sum `acc` is computed INSIDE
+  the draw loop from that draw's `(w_mu, w_sigma)`. It can no longer be hoisted per horizon; hoisting
+  it would silently apply one draw's GI to all of them.
 """
 function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow;
                             apd_by_h = nothing, grid = cis_age_grid(), setting::Symbol = :all,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                             adtype = AutoReverseDiff())
     A = wd0.A; H = length(cfg.horizons)
-    w = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)
     mkpath(save_dir)
     hist = collect(float.(wd0.I_mean))                 # A × Tn0, last col = origin (t₀)
     cols = Vector{Matrix{Float64}}(undef, H)
@@ -686,16 +958,23 @@ function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
                                     setting = setting, save_dir = save_dir, adtype = adtype)
         Np  = length(pooled.gamma_sar)
         rng = MersenneTwister(cfg.seed + h)
-        acc = zeros(A)                                 # renewal-weighted history (fixed within horizon)
-        for s in 1:cfg.smax
-            acc .+= w[s] .* hist[:, end - s + 1]
-        end
+        # The renewal-weighted history is now PER DRAW: the generation interval is estimated
+        # (§3.1), so each pooled draw carries its own (w_mu, w_sigma) ⇒ its own w. It can no
+        # longer be hoisted out of the loop as one horizon-constant `acc`.
+        # Antibody comes from the TARGET week t₀+h (2026-07-30, §3.2), matching the contact
+        # window that already ends at t₀+h — not from the origin.
+        ab_h = wd0.antibody_fc[:, hi]
         draws_h = Array{Float64}(undef, A, Np)
         preds   = Array{Float64}(undef, A, Np)         # deterministic renewal mean per draw
         for d in 1:Np
             m = pooled.post_index[d]
+            w_d = gen_interval_pmf_log(pooled.w_mu[d], pooled.w_sigma[d]; smax = cfg.smax)
+            acc = zeros(A)
+            for s in 1:cfg.smax
+                acc .+= w_d[s] .* hist[:, end - s + 1]
+            end
             N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
-                          pooled.F[d], wd0.antibody[:, end]; gamma_sar = pooled.gamma_sar[d])
+                          pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d])
             pred = N * acc
             for a in 1:A
                 p = pred[a]

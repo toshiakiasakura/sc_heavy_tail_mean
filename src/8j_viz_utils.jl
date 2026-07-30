@@ -27,7 +27,7 @@ Cached Stage-1 GP-chain filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horiz
 ngm token is dropped (Stage 1 is NGM-independent), so both builders of a degree family share it.
 """
 function stage1_chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                           contacts::AbstractString = "temporal-gsar-cut-sc",
+                           contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, _ = split(lbl, "|")
     joinpath(save_dir, "8j_s1_$(deg)_$(contacts)_$(origin)_h$(h).jld2")
@@ -39,7 +39,7 @@ end
 Cached Stage-2 pooled-result filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horizon `h`.
 """
 function stage2_pooled_path(lbl::AbstractString, origin::Date, h::Integer;
-                            contacts::AbstractString = "temporal-gsar-cut-sc",
+                            contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
     joinpath(save_dir, "8j_s2_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
@@ -70,10 +70,16 @@ secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **S
 (diagonal/total-age, age-gap and — in the separable spatio-temporal regime — temporal directions;
 `rho_time` is `NaN` for pooled chains). Note susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ
 (Stage-1, ~200 draws) have different draw counts — they are consumed by separate figures.
+
+Also returns the per-draw **generation-interval** log-parameters `w_mu`/`w_sigma` from the pooled
+file (estimated since 2026-07-30, §3.1; stored POST-clamp, so
+`gen_interval_pmf_log(w_mu[d], w_sigma[d])` reproduces that draw's `w` exactly). Convert to natural
+scale with `gi_moments_days`.
+
 Returns `nothing` when either file is missing/unreadable (skipped origin×combo).
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "temporal-gsar-cut-sc",
+                                 contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     s2p = stage2_pooled_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     s1p = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
@@ -89,7 +95,8 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
     rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled
         exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0))) : fill(NaN, length(rho_diag))
-    return (; susc, inf, gamma_sar, rho_diag, rho_gap, rho_time)
+    w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
+    return (; susc, inf, gamma_sar, rho_diag, rho_gap, rho_time, w_mu, w_sigma)
 end
 
 """
@@ -123,10 +130,12 @@ pick_origins(origins::AbstractVector{Date}; n::Int = 9) =
 
 Per-pooled-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue of
 the horizon-`h` next-generation matrix, exactly the NGM the forecast is frozen at (`Cstar_end` =
-contacts at origin+h, antibody held at the origin). Reloads the cached **Stage-2 pooled** file
-(NO re-fit); for each pooled draw `d` (from Stage-1 draw `m = post_index[d]`) builds
-`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd.antibody[:,end]; gamma_sar=gamma_sar[d])` and
-takes `max real(eigvals(N))` (the NGM is nonnegative ⇒ its Perron root is real & positive).
+contacts at origin+h, antibody at the TARGET week origin+h). Reloads the cached **Stage-2 pooled**
+file (NO re-fit); for each pooled draw `d` (from Stage-1 draw `m = post_index[d]`) builds
+`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
+and takes `max real(eigvals(N))` (the NGM is nonnegative ⇒ its Perron root is real & positive).
+The antibody column moved from the origin to origin+h on 2026-07-30 (§3.2) so this R describes the
+same NGM `two_stage_forecast` actually uses — keep the two in step.
 Returns `nothing` when the pooled file is missing/unreadable, so callers can leave a gap.
 """
 function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win;
@@ -143,10 +152,12 @@ function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win
     end
     Np = length(pooled.gamma_sar)
     R = Vector{Float64}(undef, Np)
+    hi = findfirst(==(h), collect(cfg.horizons))          # antibody column for THIS horizon
+    ab_h = hi === nothing ? wd.antibody[:, end] : wd.antibody_fc[:, hi]
     for d in 1:Np
         m = pooled.post_index[d]
         N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
-                      pooled.F[d], wd.antibody[:, end]; gamma_sar = pooled.gamma_sar[d])
+                      pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d])
         R[d] = maximum(real(eigvals(N)))
     end
     return R
