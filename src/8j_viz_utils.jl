@@ -74,23 +74,34 @@ secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **S
 Also returns the per-draw **generation-interval** log-parameters `w_mu`/`w_sigma` from the pooled
 file (estimated since 2026-07-30, §3.1; stored POST-clamp, so
 `gen_interval_pmf_log(w_mu[d], w_sigma[d])` reproduces that draw's `w` exactly). Convert to natural
-scale with `gi_moments_days`.
+scale with `gi_moments_days`. These come from Stage 2, so they are present for the NULL model too.
 
-Returns `nothing` when either file is missing/unreadable (skipped origin×combo).
+Returns `nothing` when the **Stage-2** file is missing/unreadable (skipped origin×combo). A missing
+**Stage-1** chain is tolerated and yields all-`NaN` ρ: the NULL model (`no-contact|null`,
+inst/6) has no contact fit at all, but its infection block is still worth plotting.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
                                  contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     s2p = stage2_pooled_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     s1p = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
-    (isfile(s2p) && isfile(s1p)) || return nothing
-    pooled, chn = try
-        load(s2p, "pooled"), load(s1p, "result")
+    isfile(s2p) || return nothing
+    pooled = try
+        load(s2p, "pooled")
     catch err
-        @warn "could not load two-stage artefacts" s2p s1p err
+        @warn "could not load the Stage-2 pooled artefact" s2p err
         return nothing
     end
     susc = pooled.susc; inf = pooled.inf; gamma_sar = pooled.gamma_sar   # Stage-2 pooled draws (N×A / N)
+    chn = isfile(s1p) ? (try load(s1p, "result") catch err
+                             @warn "could not load the Stage-1 chain; ρ set to NaN" s1p err
+                             nothing
+                         end) : nothing
+    if chn === nothing                                                   # NULL model: no contact fit
+        nan1 = fill(NaN, 1)
+        return (; susc, inf, gamma_sar, rho_diag = nan1, rho_gap = nan1, rho_time = nan1,
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI is Stage-2, always there
+    end
     rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
     rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled

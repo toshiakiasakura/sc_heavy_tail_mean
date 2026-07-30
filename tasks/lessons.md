@@ -169,6 +169,54 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   problem. Use the `view(τ, :, t)` function form everywhere in an argument list — the rule is not
   specific to `_cell_moments!` where it was first documented.
 
+## Null + no-interaction baselines and the log score 2026-07-30 (`inst/6_null_interaction_model.md`)
+
+- **Read the existing forecast path before "adding" future contacts.** The spec asks that the
+  no-interaction model "be allowed to use the future mean contacts". It already is: for horizon `h`,
+  `fit_or_load_stage2` fits Stage 1 on `WeeklyWindow(origin + 7h)` and freezes the forecast NGM at
+  `Cstar_end[m]` = the **origin+h** contact matrix (infections/antibody stay at the origin). That
+  turned a feared re-architecture into a one-line `contact_star` method. **The null model is the
+  only exception** — its `c̄` comes from the *origin* window's focal weeks and is reused for every
+  horizon, which is what "fixed while forecasting" means.
+- **Stage-1 chains carry no NGM token**, so `(NegBinAgePair, DiagonalMeanNGM)` reuses
+  `8j_s1_unweighted-negbin_*` verbatim: the no-interaction model costs **zero** Stage-1 refits, and
+  neither baseline invalidates a cached file (their Stage-2 tokens are new). Only the
+  `9j_assembly_*` cache self-invalidates, on the model-label change.
+- **`contact_star` broadcasts `base_contact` elementwise**, so a builder that needs the cell index
+  (diagonal-only) must add a **`contact_star` method**, not a `base_contact` method — and must
+  return a **dense** `Matrix`, because `fit_stage2_pooled` stores into `Vector{Matrix{Float64}}`
+  (a `Diagonal` does not fit the slot).
+- **Diagonal C* ⇒ `susc_a·inf_a` is only identified as a product**, hence `inf ≡ 1`. Drop `sig_i`/`z_i`
+  from the parameter space entirely rather than sampling-and-ignoring them: an unused latent stays
+  prior-driven and pollutes the Pathfinder approximation. Use plain `ones(A)` (not
+  `ones(typeof(sig_s), A)` — `one(::Type{TrackedReal})` is not reliably defined) since no gradient
+  flows through a constant.
+- **The null model's `c̄` is unidentified with γ_SAR — by design.** `N = γ_SAR·fs_a·c̄·inf_b`, so the
+  two enter only as a product and the *forecasts are invariant* to the `/A` convention; `c̄` only
+  fixes what γ_SAR **means**. Measured: `c̄`×10 ⇒ posterior median γ_SAR ×**0.105** (the 5% excess is
+  the log-normal prior's pull, not error) and median R unchanged to 0.3%. Corollary: use **M = 1**
+  dummy moment draw with `n_draw = 100×100`, not 100 identical draws — there is no contact
+  uncertainty to propagate, so 100 refits would add only fit-to-fit noise at 100× the cost.
+- **`scoringutils` computes `log_score` ONLY for the sample forecast class** (`as_forecast_sample`
+  → `scoringRules::logs_sample`, KDE) — never for quantile forecasts, so it cannot be a flag on the
+  existing `score_wis`. It needs a second R path over the raw draws. Two traps there: the KDE cannot
+  consume the `±Inf` draws `two_stage_forecast` deliberately keeps, and `log_shift` returns `NaN` on
+  the negative draws a Gaussian fan contains (the quantile path rarely hits this because the 5%
+  quantile is usually positive). Build the log-scale copy explicitly with `log(pmax(·,0)+1)`, and
+  **count and print** every dropped/censored draw. Score **one origin at a time**: `score()` returns
+  one row per forecast unit, so the accumulated table stays small while a single global sample table
+  would be ~10⁸ rows.
+- **Relative log score must be a DIFFERENCE, not a ratio** — a log score is not sign-stable (it goes
+  negative wherever the predictive density exceeds 1), unlike WIS.
+- **Naming trap**: "log-scale WIS" (`transform_forecasts(log_shift)`) is WIS after a log *transform*
+  and is **not** a log score. The repo had the former since 2026-07-12 and none of the latter.
+- Per-model panel figures (`plot_ratio`, `plot_ratio_bins`, `plot_lengthscales`) were hard-coded
+  `layout = (2, 2)` from when there were exactly four models — they silently lose panels at six.
+  Fixed with `panel_grid(np)`; this is the 2026-07-15 "derive the layout" lesson biting again.
+- `9j_viz_utils.jl:22` had documented `unweighted-negbin|mean` as *standing in* for Munday's
+  no-interaction reference. Now that a real one exists, `REF_MODEL` is
+  `unweighted-negbin|mean-diagonal`, which rebases every relative-WIS figure.
+
 ## susc/inf smoothing REMOVED entirely → independent per-bin offsets 2026-07-13 (`joint_model.jl`, `framework.jl`, spec, 10j) (user request)
 
 - **The relative susc/inf age profiles are no longer smoothed at all.** The `A-1` non-reference

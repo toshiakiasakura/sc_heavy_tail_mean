@@ -11,16 +11,20 @@
 #      age-stratified relative WIS, per-period skill, interval coverage, and the
 #      NGM-eigenvalue reproduction number.
 #
-# Reference model = `unweighted-negbin|mean` (the "no-interaction" analog); WIS on the LOG
-# scale is the headline (robust — the neighbourhood-NGM natural-scale WIS blows up).
+# Reference model = `unweighted-negbin|mean-diagonal`, the real NO-INTERACTION model added
+# 2026-07-30 (inst/6_null_interaction_model.md). Until then `unweighted-negbin|mean` *stood in* for
+# Munday's no-interaction reference because no diagonal-only variant existed; it does now, so the
+# relative-skill baseline is the genuine article. WIS on the LOG scale is the headline (robust —
+# the neighbourhood-NGM natural-scale WIS blows up).
 #
 # Depends on the forecasting framework (`forecast_utils.jl`) and the read-only two-stage helpers
 # in `8j_viz_utils.jl` (`reproduction_draws`, `load_transmission_draws`, …), included below.
 
 include("8j_viz_utils.jl")
 
-const REF_MODEL = "unweighted-negbin|mean"   # relative-WIS reference (Munday "no-interaction")
+const REF_MODEL = "unweighted-negbin|mean-diagonal"  # relative-skill ref = the no-interaction model
 const WIS_SCALE = "log"                       # headline scale for WIS / coverage frames
+const LOGS_SCALE = "natural"                  # headline scale for the log score (see report_logscore)
 
 # ── Pandemic periods (Munday 2023, Table 2 / Gimma et al.) ────────────────────────────
 # Named UK COVID phases used to aggregate forecast skill over the epidemic timeline.
@@ -76,14 +80,27 @@ save_show(fig, path::AbstractString) = (pad_margins(fig); savefig(fig, path); di
 "Relative WIS `wis[h] / wis_ref[h]` aligned to horizons `hz` (NaN where the ref is absent)."
 _relwis(wis, hz, ref_by_h) = wis ./ [get(ref_by_h, h, NaN) for h in hz]
 
+"""
+    panel_grid(np) -> (nrow, ncol)
+
+Near-square panel layout for `np` subplots. DERIVE the layout, never hard-code it
+(`tasks/lessons.md` 2026-07-15): the per-model facets were `(2, 2)` while there were exactly four
+models, and silently lose panels the moment the model count changes (it is now six).
+"""
+function panel_grid(np::Int)
+    nr = max(1, floor(Int, sqrt(np)))
+    return (nr, ceil(Int, np / nr))
+end
+
 # ── Forecast assembly + on-disk cache ─────────────────────────────────────────────────
 """
     assemble_or_load_forecasts(wins, combos, cfg; grid, raw, save_dir,
-                               cache_path, rebuild) -> (; qall, fc_store, crps, skipped)
+                               cache_path, rebuild) -> (; qall, fc_store, truth_store, crps, skipped)
 
 Reload the cached 8j chains for every `origin × combo` and assemble the forecast products
 used downstream: `qall` (long quantile table for WIS scoring), `fc_store`
-(`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `crps`
+(`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `truth_store`
+(`origin → A×H` realized infections, so `score_logs` needn't re-read inc2prev per origin), `crps`
 (per-origin native CRPS cross-check) and `skipped` (origin×combo pairs whose reload threw).
 
 This loop (`two_stage_forecast` → `fit_or_load_stage2` → pooled draws, per origin × combo) is the
@@ -103,21 +120,26 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     origins = [w.origin for w in wins]
     if !rebuild && isfile(cache_path)
         c = load(cache_path)
-        if c["origins"] == origins && c["labels"] == labels
+        # `truth_store` was added with the log score (2026-07-30); a cache written before that is
+        # missing the key, so treat it as stale rather than KeyError-ing downstream.
+        if c["origins"] == origins && c["labels"] == labels && haskey(c, "truth_store")
             println("assembly: loaded cache ", cache_path, " (", size(c["qall"], 1), " quantile rows)")
-            return (; qall = c["qall"], fc_store = c["fc_store"], crps = c["crps"], skipped = c["skipped"])
+            return (; qall = c["qall"], fc_store = c["fc_store"], truth_store = c["truth_store"],
+                      crps = c["crps"], skipped = c["skipped"])
         end
-        @warn "assembly cache stale (origins/labels changed) — rebuilding" cache_path
+        @warn "assembly cache stale (origins/labels changed, or pre-truth_store) — rebuilding" cache_path
     end
 
-    qtabs     = DataFrame[]
-    fc_store  = Dict{Tuple{Date,String},Array{Float64,3}}()
-    crps_rows = NamedTuple[]
-    skipped   = Tuple{Date,String}[]
+    qtabs       = DataFrame[]
+    fc_store    = Dict{Tuple{Date,String},Array{Float64,3}}()
+    truth_store = Dict{Date,Matrix{Float64}}()
+    crps_rows   = NamedTuple[]
+    skipped     = Tuple{Date,String}[]
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o    = load_window_data(win_o; grid = grid)
         truth_o = load_forecast_truth(win_o; grid = grid)
+        truth_store[win_o.origin] = Float64.(truth_o)
         # this origin's 4 contact/degree windows (reuse the single raw read); discarded after.
         apd_o = [prepare_degree_data(
                      WeeklyWindow(win_o.origin + Day(7 * h);
@@ -148,9 +170,9 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     crps = DataFrame(crps_rows)
     println("quantile rows: ", size(qall), "   (", length(wins), " origins × ", length(combos),
             " combos; skipped ", length(skipped), ")")
-    jldsave(cache_path; qall, fc_store, crps, skipped, origins, labels)
+    jldsave(cache_path; qall, fc_store, truth_store, crps, skipped, origins, labels)
     println("assembly: wrote cache ", cache_path)
-    return (; qall, fc_store, crps, skipped)
+    return (; qall, fc_store, truth_store, crps, skipped)
 end
 
 # ── Scoring report ────────────────────────────────────────────────────────────────────
@@ -179,6 +201,110 @@ function report_forecast_scores(scores, wins, crps)
     CSV.write("../res/8j_scores_by_model_date.csv", scores.by_model_dt)           # both scales × origin
     CSV.write("../res/8j_scores_by_model_date_horizon.csv", scores.by_model_dt_h) # both scales × origin × horizon
     return by_mh_log
+end
+
+"""
+    report_logscore(logs, wins; scale = LOGS_SCALE) -> by_mh
+
+Print the headline log score (by model, and by model × horizon), restate the sanitisation tallies,
+and write the four `res/8j_logscore_*.csv` frames (both scales). Returns the by-model × horizon
+frame on `scale`, used by the log-score figure builders.
+
+The headline scale is **natural**, not log: unlike WIS — whose natural-scale values are dominated by
+the neighbourhood NGM's blow-ups — the log score is already a density-based quantity, and its
+log-scale variant additionally depends on the `pmax(·,0)+1` censoring applied in `score_logs`. Both
+scales are written to CSV.
+"""
+function report_logscore(logs, wins; scale::AbstractString = LOGS_SCALE)
+    by_mh = sort(@subset(logs.by_model_h, :scale .== scale), [:model, :horizon])
+    by_m  = sort(@subset(logs.by_model,   :scale .== scale), :log_score)
+
+    println("\n===== $(scale)-scale LOG SCORE by model (aggregated over horizons & ",
+            length(wins), " origins; lower = better) =====")
+    show(by_m, allcols = true); println()
+    println("\n===== $(scale)-scale log score by model × horizon (aggregated over origins) =====")
+    show(by_mh, allcols = true); println()
+    println("\nsanitisation: dropped ", logs.dropped.n, "/", logs.dropped.total,
+            " non-finite draws (", round(100 * logs.dropped.frac; digits = 3), "%); censored ",
+            logs.floored.n, "/", logs.floored.total, " negative draws at 0 for the log scale (",
+            round(100 * logs.floored.frac; digits = 3), "%); ",
+            logs.n_nonfinite_logscore, " non-finite unit scores")
+
+    CSV.write("../res/8j_logscore_by_model.csv", logs.by_model)
+    CSV.write("../res/8j_logscore_by_model_horizon.csv", logs.by_model_h)
+    CSV.write("../res/8j_logscore_by_model_date.csv", logs.by_model_dt)
+    CSV.write("../res/8j_logscore_by_model_date_horizon.csv", logs.by_model_dt_h)
+    return by_mh
+end
+
+# ── Log-score figures (siblings of the WIS ones) ──────────────────────────────────────
+"""`plot_logscore_by_horizon(logs, wins, cfg; scale)` — mean log score vs horizon, one line per
+model (sibling of `plot_wis_by_horizon`; lower = better)."""
+function plot_logscore_by_horizon(logs, wins, cfg; scale::AbstractString = LOGS_SCALE)
+    bmh = sort(@subset(logs.by_model_h, :scale .== scale), [:model, :horizon])
+    fig = plot(; xlabel = "horizon (weeks)", ylabel = "mean log score (lower = better)",
+               title = "8j — $(scale)-scale log score by horizon ($(length(wins)) origins)",
+               size = (760, 420), legend = :topleft, xticks = 1:length(cfg.horizons))
+    for m in unique(bmh.model)
+        sub = sort(@subset(bmh, :model .== m), :horizon)
+        plot!(fig, sub.horizon, sub.log_score; marker = :circle, lw = 2, label = m)
+    end
+    return fig
+end
+
+"""`plot_logscore_by_model_horizon(logs, labels, cfg; scale)` — grouped bars, model × horizon
+(sibling of `plot_wis_by_model_horizon`)."""
+function plot_logscore_by_model_horizon(logs, labels, cfg; scale::AbstractString = LOGS_SCALE)
+    bmh = @subset(logs.by_model_h, :scale .== scale)
+    Hn  = length(cfg.horizons)
+    M   = [only(@subset(bmh, :model .== m, :horizon .== h).log_score) for m in labels, h in 1:Hn]
+    return groupedbar(M; bar_position = :dodge,
+                      xticks = (1:length(labels), labels), xrotation = 20,
+                      label = reshape(["h=$h" for h in 1:Hn], 1, :),
+                      ylabel = "mean log score (lower = better)", legend = :topleft,
+                      title = "8j — $(scale)-scale log score by model × horizon",
+                      size = (950, 480), bottom_margin = 14Plots.mm, left_margin = 6Plots.mm)
+end
+
+"""`plot_logscore_over_time(logs; scale)` — mean log score per forecast origin, one line per model
+(sibling of `plot_wis_over_time`)."""
+function plot_logscore_over_time(logs; scale::AbstractString = LOGS_SCALE)
+    by_dt = sort(@subset(logs.by_model_dt, :scale .== scale), [:model, :forecast_date])
+    fig = plot(; xlabel = "forecast origin", ylabel = "mean log score (lower = better)",
+               title = "8j — $(scale)-scale log score over the available period",
+               size = (900, 420), legend = :topleft)
+    for m in unique(by_dt.model)
+        sub = @subset(by_dt, :model .== m)
+        plot!(fig, sub.forecast_date, sub.log_score; lw = 2, marker = :circle, ms = 2, label = m)
+    end
+    return fig
+end
+
+"""
+    plot_rel_logscore_by_horizon(logs, labels, model_cols, cfg; ref, scale) -> Plot
+
+Log score **relative to `ref`**, by horizon — the log-score analogue of panel A of
+`plot_rwis_bias_by_horizon`. Reported as a **difference** (`logs_m − logs_ref`), not a ratio: a log
+score is not sign-stable (it turns negative wherever the predictive density exceeds 1), so a ratio
+is uninterpretable. Below the zero line = better than the reference.
+"""
+function plot_rel_logscore_by_horizon(logs, labels, model_cols, cfg;
+                                      ref::AbstractString = REF_MODEL,
+                                      scale::AbstractString = LOGS_SCALE)
+    bmh   = @subset(logs.by_model_h, :scale .== scale)
+    ref_h = Dict(r.horizon => r.log_score for r in eachrow(@subset(bmh, :model .== ref)))
+    fig = plot(; xlabel = "horizon (weeks)", ylabel = "Δ log score (vs $(ref))",
+               title = "9j — log score relative to $(ref) ($(scale) scale; lower = better)",
+               titlefontsize = 10, legend = :topleft, legendfontsize = 6,
+               size = (860, 440), xticks = 1:length(cfg.horizons))
+    hline!(fig, [0.0]; color = :gray, ls = :dash, label = "")
+    for (ci, m) in enumerate(labels)
+        s = sort(@subset(bmh, :model .== m), :horizon)
+        isempty(s) && continue
+        d = s.log_score .- [get(ref_h, h, NaN) for h in s.horizon]
+        plot!(fig, s.horizon, d; color = model_cols[ci], lw = 2, marker = :circle, ms = 3, label = m)
+    end
+    return fig
 end
 
 # ── Fig 3 analog: relative WIS + bias (A,B) and age-stratified relative WIS (C) ────────
@@ -618,7 +744,7 @@ function plot_relative_contact_reproduction(store, labels4, model_cols, origins;
     end
     if observed !== nothing
         # model-free observed weekly means, as a step (matching the model curves); black diamonds
-        # keep it distinguishable from the four coloured fitted C* steps.
+        # keep it distinguishable from the coloured fitted C* steps.
         plot!(fig, x, observed; color = :black, lw = 2.2, ls = :solid, linetype = :steppost,
               marker = :diamond, ms = 3, label = "observed weekly means (raw)")
     end
@@ -663,11 +789,11 @@ function plot_wis_by_horizon(scores, wins, cfg; scale::AbstractString = WIS_SCAL
 end
 
 """
-    plot_wis_four_ways(scores, labels4, cfg; scale) -> Plot
+    plot_wis_by_model_horizon(scores, labels4, cfg; scale) -> Plot
 
 Grouped bar of mean log-scale WIS, model on the x-axis, dodged by horizon (lower = better).
 """
-function plot_wis_four_ways(scores, labels4, cfg; scale::AbstractString = WIS_SCALE)
+function plot_wis_by_model_horizon(scores, labels4, cfg; scale::AbstractString = WIS_SCALE)
     bmh = @subset(scores.by_model_h, :scale .== scale)
     Hn  = length(cfg.horizons)
     # rows = model, cols = horizon; WIS as bar height (not the model index — the old bug)
@@ -733,7 +859,7 @@ end
     plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg; grid, n) -> Plot
 
 Forecast vs observed at `n` evenly-spaced origins. Each panel: one observed series (the
-fit-week history ++ the realized target weeks) overlaid with the four configs' total-infection
+fit-week history ++ the realized target weeks) overlaid with each config's total-infection
 forecast fans (median + 90% band). Reloads window/truth data for the selected origins.
 
 The tile grid and figure size are DERIVED from the panel count (`pick_origins` clamps it to
@@ -778,7 +904,7 @@ function plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg;
     ncol = max(1, floor(Int, sqrt(np)))
     nrow = ceil(Int, np / ncol)
     return plot(panels...; layout = (nrow, ncol), size = (430 * ncol, 330 * nrow),
-                plot_title = "8j — total-infection forecast (four ways) vs observed, by origin (90% band)",
+                plot_title = "8j — total-infection forecast vs observed, by origin (90% band)",
                 plot_titlefontsize = 11)
 end
 
@@ -851,7 +977,7 @@ end
 """
     plot_gen_interval(gi, labels4, origins, cfg; h=1) -> Plot
 
-2×2 facet (one panel per config) of the **estimated generation interval** over the rolling
+One panel per config (layout via `panel_grid`) of the **estimated generation interval** over the rolling
 origins: posterior median + 90% band of its natural-scale mean and SD in DAYS, against the prior
 band (grey) implied by `cfg.gen_mean_days`/`gen_sd_days` and `cfg.gen_prior_rel_sd`.
 
@@ -893,7 +1019,8 @@ function plot_gen_interval(gi, labels4, origins, cfg; h::Integer = 1)
         end
         push!(panels, p)
     end
-    return plot(panels...; layout = (2, 2), size = (1150, 780),
+    nr, nc = panel_grid(length(panels))          # derive it — six models now, not four
+    return plot(panels...; layout = (nr, nc), size = (575 * nc, 390 * nr),
                 plot_title = "8j — ESTIMATED generation interval vs prior (h=$h); " *
                              "posterior≈prior ⇒ GI not identified by the data",
                 plot_titlefontsize = 10)
@@ -902,7 +1029,7 @@ end
 """
     plot_ratio(store, labels4, origins, ttl) -> Plot
 
-2×2 facet (one panel per config) of a super-group ratio-to-2-15 store from
+One panel per config of a super-group ratio-to-2-15 store from
 `collect_transmission_structure` (susceptibility or infectivity): the 16-49 and >50 series
 with 90% ribbons, referenced to 1.0 (the 2-15 baseline).
 """
@@ -923,13 +1050,15 @@ function plot_ratio(store, labels4, origins, ttl::AbstractString)
         end
         push!(ps, p)
     end
-    return plot(ps...; layout = (2, 2), size = (1150, 780), plot_title = ttl, plot_titlefontsize = 11)
+    nr, nc = panel_grid(length(ps))
+    return plot(ps...; layout = (nr, nc), size = (575 * nc, 390 * nr),
+                plot_title = ttl, plot_titlefontsize = 11)
 end
 
 """
     plot_ratio_bins(store, labels4, origins, ttl; grid) -> Plot
 
-2×2 facet (one panel per config) of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
+One panel per config of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
 `collect_transmission_structure`) — the age-resolved refinement of `plot_ratio`, sharing its
 2-15 baseline so the two figures read against the same 1.0 reference. Median lines only: seven
 overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure.
@@ -952,24 +1081,28 @@ function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = ci
         end
         push!(ps, p)
     end
-    return plot(ps...; layout = (2, 2), size = (1150, 780), plot_title = ttl, plot_titlefontsize = 11)
+    nr, nc = panel_grid(length(ps))
+    return plot(ps...; layout = (nr, nc), size = (575 * nc, 390 * nr),
+                plot_title = ttl, plot_titlefontsize = 11)
 end
 
 """
     plot_lengthscales(rho, labels4, origins; h) -> Plot
 
-2×2 facet of the separable spatio-temporal-GP length-scales per config: ρ_diag (total-age, solid)
+One panel per config of the separable spatio-temporal-GP length-scales: ρ_diag (total-age, solid)
 and ρ_gap (age-gap, dashed) in age-years, plus ρ_time (temporal, dotted) in weeks, each with a 90%
 ribbon. The three share one axis (units age-yrs / weeks; ρ_time ∈ [0.5,26]w, the spatial ρ ∈ [3,45]y);
-ρ_time is absent (NaN, not plotted) for pooled chains.
+ρ_time is absent (NaN, not plotted) for pooled chains. Configs with NO Stage-1 contact fit at all
+(the NULL model) have no length-scales and are skipped entirely rather than drawn as blank panels.
 """
 function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
     rho_dirs = ["ρ_diag (total age, yr)", "ρ_gap (age gap, yr)", "ρ_time (weeks)"]
     rho_ls   = [:solid, :dash, :dot]
+    shown = [l for l in labels4 if any(isfinite, rho[l].med)]   # drop contact-fit-free configs
     panels = Plots.Plot[]
-    for lbl in labels4
+    for lbl in shown
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "GP length-scale (age-yrs / weeks)", legend = (lbl == labels4[1] ? :topright : false),
+                 ylabel = "GP length-scale (age-yrs / weeks)", legend = (lbl == shown[1] ? :topright : false),
                  legendfontsize = 6, xrotation = 45, ylims = (0, 50))
         for g in 1:3
             m, lo, hi = rho[lbl].med[:, g], rho[lbl].lo[:, g], rho[lbl].hi[:, g]
@@ -979,7 +1112,8 @@ function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
         end
         push!(panels, p)
     end
-    return plot(panels...; layout = (2, 2), size = (1150, 780),
+    nr, nc = panel_grid(length(panels))
+    return plot(panels...; layout = (nr, nc), size = (575 * nc, 390 * nr),
                 plot_title = "8j — separable GP length-scales ρ_diag / ρ_gap / ρ_time over time (h=$h)",
                 plot_titlefontsize = 11)
 end

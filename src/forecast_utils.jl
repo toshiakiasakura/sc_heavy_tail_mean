@@ -16,11 +16,14 @@
 #   prepare_degree_data, pool_over_time                                (degree_agepair.jl)
 #   gen_interval_logparams, gen_interval_pmf_log, gen_interval_pmf,
 #   gi_moments_days, renewal_next, forecast_forward                    (renewal.jl)
-#   MeanNGM / NeighbourhoodDegreeNGM, build_ngm, contact_star          (ngm.jl)
-#   NegBinAgePair / HurdleWeibullAgePair, model_degree, model_transmission,
-#     fit_stage1, fit_stage2_pooled, two_stage_forecast, build_degree_stats,
+#   MeanNGM / NeighbourhoodDegreeNGM / NullNGM / DiagonalMeanNGM,
+#     build_ngm, contact_star                                          (ngm.jl)
+#   NegBinAgePair / HurdleWeibullAgePair / NoContactDegree, model_degree, model_transmission,
+#     fit_stage1, stage2_inputs, fit_stage2_pooled, two_stage_forecast, build_degree_stats,
+#     null_contact_level / null_moment_draws,
 #     prefit_stage1! / prefit_stage2! / prefit_two_stage!               (joint_model.jl)
-#   to_quantile_long, score_wis, crps_sample, mean_crps               (scoring.jl)
+#   to_quantile_long, score_wis, to_sample_long, score_logs,
+#     crps_sample, mean_crps                                           (scoring.jl)
 #
 # Run scripts/notebooks from `src/` — relative data paths assume `cwd == src/`.
 # `score_wis` additionally requires the R `scoringutils` package (install once with

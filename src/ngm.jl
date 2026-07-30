@@ -31,6 +31,11 @@ base_contact(::MeanNGM, k1, k2, g)                = k1
 # week) give ⟨k⟩=⟨k²⟩=0, so the raw `k2/k1` is 0/0=NaN. Such a cell contributes no
 # transmission, so return 0. (NegBin keeps k1=μ>0, so it always takes the first branch.)
 base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = k1 > 0 ? (k2 / k1) * g : zero(k1)   # size-biased × zero factor
+# NULL builder (inst/6): C* is a fixed uniform constant. The constant is carried IN `K1` by
+# `null_moment_draws` (joint_model.jl) — no contact fit exists to take a mean of — so the
+# functional is the identity, exactly like `MeanNGM`. Keeping it a distinct builder is what makes
+# the model label (`no-contact|null`) and its cache files self-documenting.
+base_contact(::NullNGM, k1, k2, g)                = k1
 
 """`full_susceptibility(susc, F, A_col)` — leaky antibody susceptibility vector
 `susc .* (1 .+ (F-1).*A_col)` for one week's antibody prevalence `A_col`."""
@@ -50,6 +55,18 @@ function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatri
                       G::AbstractMatrix)
     return base_contact.(Ref(builder), K1, K2, G)
 end
+
+"""
+    contact_star(::DiagonalMeanNGM, K1, K2, G)
+
+NO-INTERACTION model (inst/6): the mean-degree C* with every off-diagonal cell zeroed, so each age
+group's epidemic evolves independently (`I_a(t)` depends only on `I_a(t−s)`). This is a
+MATRIX-level functional — the generic method broadcasts `base_contact` elementwise, which cannot
+see `(i,j)` — hence its own `contact_star` method. Returns a DENSE `Matrix` (not a `Diagonal`):
+`fit_stage2_pooled` stores C* into a `Vector{Matrix{Float64}}` slot.
+"""
+contact_star(::DiagonalMeanNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::AbstractMatrix) =
+    diagm(diag(K1))
 
 """
     build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)

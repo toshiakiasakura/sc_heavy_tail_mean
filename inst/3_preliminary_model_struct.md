@@ -24,11 +24,21 @@ each fixed once per fit and dispatched deterministically:
 
 | Axis | Symbol in code | Options | Meaning |
 |------|----------------|---------|---------|
-| **1. Contact-degree model** | `ContactDegreeModel` | `NegBinAgePair`, `HurdleWeibullAgePair` | How the age-pair degree distribution is modelled (unweighted counts vs. duration-weighted hurdle) |
-| **2. NGM builder** | `NGMBuilder` | `MeanNGM`, `NeighbourhoodDegreeNGM` | How the per-capita effective contact $C^0$ is formed from the degree distribution's moments |
+| **1. Contact-degree model** | `ContactDegreeModel` | `NegBinAgePair`, `HurdleWeibullAgePair`, `NoContactDegree` | How the age-pair degree distribution is modelled (unweighted counts vs. duration-weighted hurdle; or not at all) |
+| **2. NGM builder** | `NGMBuilder` | `MeanNGM`, `NeighbourhoodDegreeNGM`, `DiagonalMeanNGM`, `NullNGM` | How the per-capita effective contact $C^0$ is formed from the degree distribution's moments |
 
-The Cartesian product of the two axes gives the **"four ways"** — a $2\times2$ grid of model
-variants — that the preliminary analysis fits and scores side by side. As of 2026-07-12
+The Cartesian product of the first two options on each axis gives the **"four ways"** — a
+$2\times2$ grid of model variants — that the preliminary analysis fits and scores side by side.
+
+**Two baselines** (added 2026-07-30, `inst/6_null_interaction_model.md`) sit alongside that grid as
+two further *pairings* of the same axes, not as a new axis:
+
+| Model | Pairing | What it removes |
+|-------|---------|-----------------|
+| **No-interaction** `unweighted-negbin\|mean-diagonal` | `NegBinAgePair` × `DiagonalMeanNGM` | Off-diagonal transmission: only $\mathrm{diag}(C^\ast)$ enters the NGM, so each age group's epidemic is self-contained. Age-dependent **infectivity is pinned to $\mathrm{inf}\equiv1$** (§6.1) because a diagonal NGM identifies only the product $\mathrm{susc}_a\!\cdot\!\mathrm{inf}_a$. Reuses the NegBin **Stage-1 chains verbatim** (they carry no NGM token), so it costs no extra Stage-1 fits. |
+| **Null** `no-contact\|null` | `NoContactDegree` × `NullNGM` | **All** contact data: $C^\ast$ is a fixed uniform constant $\bar c$ (§5.1), so only the transmission parameters (age-dependent susceptibility/infectivity, generation interval) drive the forecast. Stage 1 is skipped entirely. |
+
+As of 2026-07-12
 (inst/4_cut_Bayes.md) the fit is a **two-stage cut inference** (§6.0): the contact-degree likelihood
 (`model_degree`, Stage 1) and the infection likelihood (`model_transmission`, Stage 2) are **separate**
 probabilistic programs, with Stage 2 conditioning on Stage-1 draws and no feedback the other way.
@@ -556,6 +566,38 @@ $C^\ast$ is generally *not* reciprocal (it depends on the block-dependent disper
 factor) and is left un-symmetrised by design. $C^\ast$ is independent of the transmission
 parameters, so it is computed once per week and reused across the renewal recursion.
 
+The two **baseline** builders (`inst/6_null_interaction_model.md`) are:
+
+$$
+\textbf{DiagonalMeanNGM:}\quad C^\ast = \mathrm{diag}\big(\langle k\rangle_{11},\dots,\langle k\rangle_{AA}\big),
+\qquad
+\textbf{NullNGM:}\quad C^\ast_{ab} = \bar c \ \ \forall a,b .
+$$
+
+`DiagonalMeanNGM` is a **matrix-level** functional (it needs the cell index), so unlike the other
+builders it overrides `contact_star` rather than `base_contact`; it returns a *dense* matrix
+because `fit_stage2_pooled` stores $C^\ast$ into a `Vector{Matrix{Float64}}`.
+
+$\bar c$ (`null_contact_level`) is the roster-weighted mean number of **unweighted** contacts a
+participant-day reports over the origin window's 8 focal fit weeks, divided by $A$:
+
+$$
+\bar c = \frac{1}{A}\cdot
+\frac{\sum_{t\in\text{fit}}\sum_i n_{t,i}\sum_j \overline{k}^{\,\text{emp}}_{t,i,j}}
+     {\sum_{t\in\text{fit}}\sum_i n_{t,i}} ,
+$$
+
+so each row of the uniform $C^\ast$ sums to the average *total* daily contacts and
+$\gamma_{\mathrm{SAR}}$ stays on the same per-contact scale as the mean-NGM models. **The null
+model's forecasts are invariant to this convention**: $N_{ab}=\gamma_{\mathrm{SAR}}\cdot
+\text{fs}_a\cdot\bar c\cdot\mathrm{inf}_b$, so $\gamma_{\mathrm{SAR}}$ and $\bar c$ enter only as a
+product and $\gamma_{\mathrm{SAR}}$ is freely estimated — the choice only fixes what
+$\gamma_{\mathrm{SAR}}$ *means*. (Verified: scaling $\bar c$ by $10$ moves the posterior median
+$\gamma_{\mathrm{SAR}}$ by $\times0.105$ — the residual $5\%$ is the log-normal prior's pull — and
+leaves the implied $R$ unchanged to $0.3\%$.) $\bar c$ is computed **once per origin** from that
+origin's focal weeks and reused for every horizon, which is what "the used average number should be
+fixed while forecasting" requires.
+
 ---
 
 ## 6. The model (two-stage cut)
@@ -670,6 +712,25 @@ renewal, so the cut keeps them clear of the contact GP. Stage 2 returns the gene
 $(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, w_\mu, w_\sigma)$; Stage 1
 returns the raw moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_t\})$.
 
+**Fixed infectivity for the no-interaction model** (2026-07-30, `inst/6_null_interaction_model.md`).
+`model_transmission` takes the NGM builder as a trailing argument purely to consult the trait
+`fix_infectivity(nb)`. When it is `true` — only for `DiagonalMeanNGM` — the block
+
+$$\sigma_i \sim \mathcal N^+(0.5,0.25^2),\quad z_i\sim\mathcal N(0,1)^{A-1},\quad
+\text{inf} = (1, \exp(\operatorname{softclamp}(\sigma_i z_i,\cdot)))$$
+
+is **not sampled at all** and $\text{inf}\equiv \mathbf 1$. The reason is exact non-identifiability,
+not a modelling preference: with $C^\ast$ diagonal the NGM is diagonal, so
+
+$$N_{aa} = \gamma_{\mathrm{SAR}}\cdot\text{susc}_a\big(1+(F-1)A_a(t)\big)\cdot C^\ast_{aa}\cdot\text{inf}_a ,$$
+
+and $\text{susc}_a$ and $\text{inf}_a$ enter **only** through their product. Pinning
+$\text{inf}\equiv1$ puts the whole age profile in $\text{susc}$. (Leaving $\sigma_i,z_i$ in the
+program as unused latents would leave them prior-driven and pollute the Pathfinder approximation,
+so they are dropped from the parameter space rather than merely ignored.) This is *distinct* from —
+and additional to — the reference-bin normalisation $\text{susc}_1=\text{inf}_1=1$ that all
+variants share.
+
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
 only as renewal history). For each age $a$,
 
@@ -735,6 +796,16 @@ For one $(dm, nb, \text{origin}, h)$:
    $D = $ `cfg.n_stage2_draws` $= 100$ draws. The $M\times D = 10{,}000$ pooled draws
    $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, F, \sigma_{\text{inf}}, w_\mu, w_\sigma,
    \text{post\_index}, \{C^\ast_{\text{end}}\})$ are the infection predictive.
+
+**Null-model bypass.** `stage2_inputs(dm, …)` is the single fork between the two paths. When
+`needs_stage1(dm)` is `false` (i.e. `NoContactDegree`) it skips `build_degree_stats`,
+`fit_or_load_stage1` and `stage1_moment_draws` altogether and returns **one** constant-$C^\ast$
+"draw" from `null_moment_draws(\bar c, A, T_n)`, taking the full $M\times D = 10{,}000$ samples from
+that single Stage-2 fit instead of $D$ from each of $M$. $M=1$ is deliberate: the null model has no
+contact-degree uncertainty to propagate, so repeating $100$ identical Pathfinder fits would inject
+only fit-to-fit approximation noise, at $100\times$ the cost. The pooled draw count — and hence
+comparability of WIS/log score — is preserved. `prefit_stage1!` drops such degree models up front,
+so **no `8j_s1_no-contact_*` file is ever written**.
 
 The random seed is `cfg.seed = 1236` (Stage-2 draw $m$ uses `Xoshiro(seed + m)`). Fits are mutually
 independent: `prefit_stage1!` fans the Stage-1 chains out over Julia threads (BLAS pinned, warm-compile
@@ -807,6 +878,35 @@ The primary metric is the **weighted interval score (WIS)** computed by the R pa
   horizon (`res/8j_scores_by_model*.csv`).
 - A native sample **CRPS** (energy form) provides a cheap cross-check.
 
+### 9.1 Log score (2026-07-30, inst/6_null_interaction_model.md)
+
+Reported **alongside** WIS. Note the naming trap: the "log-scale WIS" above is WIS computed after a
+log *transform* of forecasts and observations; the **log score** is the logarithmic *scoring rule*
+$-\log f(y)$ of the predictive density. `scoringutils` defines it only for the **sample** forecast
+class (`as_forecast_sample` ⟹ `scoringRules::logs_sample`, a Gaussian-KDE estimate) — it is *not*
+available for the quantile class the WIS path uses — so `scoring.jl` carries a second R path:
+
+- `to_sample_long` emits one row per (age × horizon × retained draw), and `score_logs` scores
+  **one origin at a time**. `score()` returns one row per forecast unit, so the accumulated per-unit
+  table stays small while the per-origin sample table handed to R is ~$10^5$ rows; a single global
+  table would be ~$10^8$.
+- Two sanitisations, both **counted and reported** rather than silently applied: (i) non-finite
+  draws are dropped — `two_stage_forecast` deliberately keeps $\pm\infty$ draws, which the KDE
+  cannot consume, and dropping them narrows the retained fan; (ii) draws are thinned to
+  `n_sample` (default $1000$) per cell on a deterministic even grid.
+- Scored on both scales, mirroring `score_wis`'s five output frames (`res/8j_logscore_*.csv`). The
+  log-scale copy is built **explicitly** (`log(pmax(\cdot,0)+1)`) rather than with
+  `transform_forecasts(log_shift)`, because individual sample draws can be negative
+  ($\text{draw}=\hat I + \sigma\varepsilon$) and `log_shift` would return `NaN`; $\mathrm{pmax}(\cdot,0)$
+  censors at the model's support. The **headline scale is natural**, since the log-scale variant
+  additionally depends on that censoring.
+- Relative log score is reported as a **difference** vs the reference model, never a ratio: a log
+  score is not sign-stable (it goes negative wherever the predictive density exceeds 1).
+
+The relative-skill reference (`REF_MODEL`, for both relative WIS and relative log score) is the
+**no-interaction** model `unweighted-negbin|mean-diagonal`. Before it existed,
+`unweighted-negbin|mean` stood in for Munday's no-interaction reference.
+
 ---
 
 ## 10. The 8j experiment
@@ -843,12 +943,17 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   current data support (`available_forecast_origins`): bounded below by the first inc2prev week
   ($2020$-$08$-$02$) plus the 12-week fit/lag lookback, and above by the last CoMix contact week
   minus $\max h$ weeks (the iterate needs contacts out to $t_0 + 4$).
-- **Four ways.** At each origin the four combos
-  $\{$`NegBinAgePair`, `HurdleWeibullAgePair`$\} \times \{$`MeanNGM`, `NeighbourhoodDegreeNGM`$\}$
-  are fit (two-stage) and forecast $1$–$4$ weeks ahead. The run is memory-bounded and resumable: per
-  origin only that origin's four degree windows are built (reusing a single raw read of the CoMix
-  tables), Stage-1 GP chains (8 = 2 degree × 4 horizons) and Stage-2 pooled files (16 = 4 combos × 4
-  horizons) are pre-fit, forecasts are assembled, and the degree data discarded.
+- **Four ways ++ two baselines.** At each origin the four combos
+  $\{$`NegBinAgePair`, `HurdleWeibullAgePair`$\} \times \{$`MeanNGM`, `NeighbourhoodDegreeNGM`$\}$,
+  plus `NegBinAgePair`×`DiagonalMeanNGM` (no-interaction) and
+  `NoContactDegree`×`NullNGM` (null), are fit (two-stage) and forecast $1$–$4$ weeks ahead. The run
+  is memory-bounded and resumable: per origin only that origin's four degree windows are built
+  (reusing a single raw read of the CoMix tables), Stage-1 GP chains (still 8 = 2 degree × 4
+  horizons — the no-interaction model reuses the NegBin chains and the null needs none) and
+  Stage-2 pooled files (24 = 6 combos × 4 horizons) are pre-fit, forecasts are assembled, and the
+  degree data discarded. Adding the baselines therefore costs one extra model's worth of Stage-2
+  fits (no-interaction) plus 4 cheap fits per origin (null), and **invalidates no cached file** —
+  their tokens are new. The `9j_assembly_*` cache does self-invalidate on the model-label change.
 - **Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`) and diagnostic figures: WIS by
   horizon, four-ways WIS bars, WIS over the forecast period, forecast-vs-observed fans by origin,
   and fitted transmission structure (susceptibility/infectivity ratios to a reference group and the
