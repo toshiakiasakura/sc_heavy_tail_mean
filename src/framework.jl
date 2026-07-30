@@ -11,11 +11,23 @@
 abstract type ContactDegreeModel end
 struct NegBinAgePair        <: ContactDegreeModel end   # unweighted (integer counts)
 struct HurdleWeibullAgePair <: ContactDegreeModel end   # duration-weighted (hurdle)
+# NULL model (inst/6_null_interaction_model.md): no contact likelihood at all — Stage 1 is skipped
+# and C* is a fixed uniform constant (see `null_contact_level` / `null_moment_draws` in
+# joint_model.jl). Paired with `NullNGM`.
+struct NoContactDegree      <: ContactDegreeModel end   # no social contact data used
 
 is_weighted(::NegBinAgePair)        = false
 is_weighted(::HurdleWeibullAgePair) = true
+is_weighted(::NoContactDegree)      = false
 degree_label(::NegBinAgePair)        = "unweighted-negbin"
 degree_label(::HurdleWeibullAgePair) = "weighted-hweibull"
+degree_label(::NoContactDegree)      = "no-contact"
+
+"""`needs_stage1(dm)` — does this degree model require a Stage-1 (contact-degree GP) fit? `false`
+only for `NoContactDegree`, whose C* is a data-derived constant rather than a fitted quantity; the
+prefit drivers skip Stage 1 (and `build_degree_stats`) entirely for it."""
+needs_stage1(::ContactDegreeModel) = true
+needs_stage1(::NoContactDegree)    = false
 
 ##########################################################################
 # Swap axis 2: NGM builder
@@ -23,9 +35,23 @@ degree_label(::HurdleWeibullAgePair) = "weighted-hweibull"
 abstract type NGMBuilder end
 struct MeanNGM                <: NGMBuilder end   # C0 = mean degree
 struct NeighbourhoodDegreeNGM <: NGMBuilder end   # C0 = excess degree m(1+CV^2)
+# --- baseline builders (inst/6_null_interaction_model.md) ---
+struct NullNGM                <: NGMBuilder end   # C0 = a fixed uniform constant (no contact data)
+struct DiagonalMeanNGM        <: NGMBuilder end   # C0 = mean degree, off-diagonal zeroed
 
 ngm_label(::MeanNGM)                = "mean"
 ngm_label(::NeighbourhoodDegreeNGM) = "neighbourhood"
+ngm_label(::NullNGM)                = "null"
+ngm_label(::DiagonalMeanNGM)        = "mean-diagonal"
+
+"""`fix_infectivity(nb)` — pin the relative age-dependent infectivity to `inf ≡ 1` (all bins)?
+
+`true` only for `DiagonalMeanNGM` (the NO-INTERACTION model, inst/6). With a diagonal C* the NGM is
+diagonal, `N_aa = γ_SAR·susc_a·(1+(F−1)A_a)·C*_aa·inf_a`, so `susc_a` and `inf_a` enter only through
+their product and are individually non-identifiable — infectivity is fixed to 1 and the age profile
+is carried entirely by `susc`. See `model_transmission` (joint_model.jl)."""
+fix_infectivity(::NGMBuilder)      = false
+fix_infectivity(::DiagonalMeanNGM) = true
 
 ##########################################################################
 # inc2prev-aligned weekly grid (Sunday-start, anchor 2021-03-21)

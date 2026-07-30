@@ -88,6 +88,64 @@ function build_degree_stats(dm::ContactDegreeModel, apd::AgePairData, cfg::Frame
     end
 end
 
+# ======================================================================================
+# NULL model support (inst/6_null_interaction_model.md) — no contact fit at all.
+# ======================================================================================
+"""
+    null_contact_level(apd, win0)
+
+The NULL model's fixed per-cell contact level `c̄`: the roster-weighted mean number of **unweighted**
+(no duration weights) contacts a participant-day reports over `win0`'s **8 focal fit weeks**,
+divided across the `A` age bins so each row of the uniform `C*` sums to that average total —
+keeping `γ_SAR` on the same per-contact scale as the mean-NGM models.
+
+`apd.emp_mean[t,i,j]` is the mean unweighted count of bin-`i`→bin-`j` contacts per participant-day
+(zeros included) and `apd.n[t,i,j] == n_roster[t,i]` for every `j`, so
+
+    c̄ = Σ_{t∈fit, i} n[t,i] · Σ_j emp_mean[t,i,j] / Σ_{t∈fit, i} n[t,i] / A .
+
+`apd` may be ANY of the window's horizon-shifted degree windows: they all contain `win0.fit_weeks`
+(for `n_fit=8, smax=4, h≤4`), and the row-sum over `j` is invariant to the seeded contactee-bin
+draw, so `c̄` is the same whichever is passed — that is what makes the null constant **fixed while
+forecasting** (spec: "the used average number should be fixed while forecasting").
+
+NOTE the model's *forecasts* are invariant to the `/A` convention: `N_ab = γ_SAR·fs_a·c̄·inf_b`, so
+`γ_SAR` and `c̄` enter only as a product and `γ_SAR` is freely estimated. The convention only fixes
+what `γ_SAR` **means** (and where it sits under its prior).
+"""
+function null_contact_level(apd::AgePairData, win0::WeeklyWindow)
+    A  = apd.A
+    ts = findall(w -> w in win0.fit_weeks, apd.weeks)
+    isempty(ts) && error("null_contact_level: none of win0.fit_weeks are in the degree window " *
+                         "($(first(apd.weeks))–$(last(apd.weeks)))")
+    length(ts) == length(win0.fit_weeks) ||
+        @warn "null_contact_level: only $(length(ts))/$(length(win0.fit_weeks)) focal weeks present"
+    num = 0.0; den = 0.0
+    for t in ts, i in 1:A
+        n_ti = apd.n[t, i, 1]                                  # roster count (same for all j)
+        num += n_ti * sum(apd.emp_mean[t, i, j] for j in 1:A)   # total contacts of bin i that week
+        den += n_ti
+    end
+    return (den > 0 ? num / den : 0.0) / A
+end
+
+"""
+    null_moment_draws(c0, A, Tn; M=1)
+
+Stand-in for `stage1_moment_draws` on the NULL path: `M` identical "draws" whose per-week `K1` is
+the constant matrix `fill(c0, A, A)`. `NullNGM`'s `base_contact` is the identity, so
+`contact_star` returns that constant matrix for every week and every horizon. `K2`/`G` are unused
+by `NullNGM` and are filled with `0`/`1` so the NamedTuple has the same shape Stage 1 returns.
+
+`M = 1` by default: the null model has **no** contact-degree uncertainty to propagate, so repeating
+identical Pathfinder fits would only add fit-to-fit approximation noise (at 100× the cost). Draw
+parity with the other models is kept by raising `n_draw` instead (see `prefit_stage2!`).
+"""
+null_moment_draws(c0::Real, A::Int, Tn::Int; M::Int = 1) =
+    [(; K1 = [fill(float(c0), A, A) for _ in 1:Tn],
+        K2 = [zeros(A, A)           for _ in 1:Tn],
+        G  = [ones(A, A)            for _ in 1:Tn]) for _ in 1:M]
+
 # --- per-cell raw moments (⟨k⟩, ⟨k²⟩) + zero factor g, from the fitted params ---
 # g scales the neighbourhood-degree C0 to condition on non-zero contacts (inst/1c,1d):
 #   NegBin  g = 1/(1−P₀), P₀ = (φ/(φ+μ))^φ  — left-truncated fitted NegBin.
@@ -272,8 +330,13 @@ end
 # positionally aligned to `wd`). Samples the transmission latents and the renewal likelihood;
 # C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
 # secondary attack rate and reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly.
+#
+# `nb` is passed ONLY so the model can honour `fix_infectivity(nb)` (the NO-INTERACTION variant,
+# inst/6); the C* functional itself has already been applied upstream. It defaults to `MeanNGM()`
+# so older call sites keep the unconstrained behaviour.
 # ======================================================================================
-@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig)
+@model function model_transmission(Cstar_weeks, wd::WindowData, w, cfg::FrameworkConfig,
+                                   nb::NGMBuilder = MeanNGM())
     A = wd.A
     Tn = length(wd.weeks)
 
@@ -305,9 +368,18 @@ end
     z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), independent
     susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0))))  # susc[1]=1; ∈ [0.05,20]
 
-    sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
-    z_i ~ filldist(Normal(0, 1), A - 1)
-    inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0))))   # inf[1]=1;  ∈ [0.05,20]
+    # NO-INTERACTION model (inst/6): with a DIAGONAL C* the NGM is diagonal, so
+    # N_aa = γ_SAR·susc_a·(1+(F−1)A_a)·C*_aa·inf_a — susc_a and inf_a enter only through their
+    # product and are individually non-identifiable. Infectivity is therefore pinned to 1 in every
+    # bin and the whole age profile is carried by `susc`. `sig_i`/`z_i` are NOT sampled at all (an
+    # unused latent would just be prior-driven noise in the Pathfinder approximation).
+    if fix_infectivity(nb)
+        inf = ones(A)                       # plain Float64: constant, no gradient flows through it
+    else
+        sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
+        z_i ~ filldist(Normal(0, 1), A - 1)
+        inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0))))   # inf[1]=1;  ∈ [0.05,20]
+    end
 
     F ~ Beta(5, 1)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
@@ -409,6 +481,35 @@ function stage1_moment_draws(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConf
 end
 
 """
+    stage2_inputs(dm, apd_h, win0, wd0, cfg, s1_path; adtype, rng) -> (; md, n_draw, c0)
+
+The contact moments Stage 2 conditions on, plus the per-fit draw count — the ONE place the null
+path forks from the fitted path.
+
+- `needs_stage1(dm)` (the fitted degree models): load-or-fit the Stage-1 chain at `s1_path` and take
+  `cfg.n_stage1_post` moment draws, keeping `cfg.n_stage2_draws` samples from each Stage-2 fit.
+- **NULL model**: no Stage 1, no `build_degree_stats`, no chain file — a single constant-C* draw
+  from `null_moment_draws`, with the FULL `n_stage1_post × n_stage2_draws` samples taken from that
+  one fit so the pooled predictive still has 10 000 draws like every other model.
+
+`c0` is the null contact level (`NaN` on the fitted path), returned for logging/diagnostics.
+"""
+function stage2_inputs(dm::ContactDegreeModel, apd_h::AgePairData, win0::WeeklyWindow,
+                       wd0::WindowData, cfg::FrameworkConfig, s1_path::AbstractString;
+                       adtype = AutoReverseDiff(), rng = nothing)
+    Tn = length(wd0.weeks)
+    if !needs_stage1(dm)
+        c0 = null_contact_level(apd_h, win0)
+        return (; md = null_moment_draws(c0, wd0.A, Tn),
+                  n_draw = cfg.n_stage1_post * cfg.n_stage2_draws, c0 = c0)
+    end
+    ds = build_degree_stats(dm, apd_h, cfg)
+    s1 = fit_or_load_stage1(s1_path, dm, ds, wd0.pop, cfg; adtype = adtype, rng = rng)
+    md = stage1_moment_draws(dm, ds, wd0.pop, cfg, s1.chn; n_post = cfg.n_stage1_post)
+    return (; md = md, n_draw = cfg.n_stage2_draws, c0 = NaN)
+end
+
+"""
     fit_stage2_pooled(nb, moment_draws, wd, cfg; n_draw=cfg.n_stage2_draws, base_seed, max_concurrent)
 
 Cut-inference Stage 2: for EACH of the `M = length(moment_draws)` imputed Stage-1 draws, form
@@ -432,7 +533,7 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         md = moment_draws[m]
         Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tn]
         Cstar_end[m] = Cstar_m[end]
-        model = model_transmission(Cstar_m, wd, w, cfg)
+        model = model_transmission(Cstar_m, wd, w, cfg, nb)   # nb only selects `fix_infectivity`
         rng = Random.Xoshiro(base_seed + m)
         pf = adtype === nothing ? pathfinder(model; ndraws = n_draw, rng = rng) :
                                   pathfinder(model; ndraws = n_draw, rng = rng, adtype = adtype)
@@ -511,7 +612,9 @@ end
     prefit_stage1!(dms, wins, cfg; data_provider, save_dir, max_concurrent, adtype)
 
 Fit every MISSING Stage-1 chain (`8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2`) for the distinct
-degree models `dms` × origins `wins` × horizons. Origins are processed sequentially (bounded
+degree models `dms` × origins `wins` × horizons. Degree models with `needs_stage1(dm) == false`
+(the NULL model) are dropped up front — they have no contact likelihood and never produce an
+`8j_s1_*` file. Origins are processed sequentially (bounded
 memory: one origin's data held at a time via `data_provider(oi, win) → (wd0, apd_by_h)`); within an
 origin the (degree × horizon) fits fan out under `Semaphore(max_concurrent)`. Each fit gets its own
 RNG and writes a distinct file, and BLAS is pinned to one thread during the parallel region. Cached
@@ -521,6 +624,8 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                         max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
     mkpath(save_dir)
+    dms = filter(needs_stage1, collect(dms))   # the NULL degree model has no Stage 1 to fit
+    isempty(dms) && return (; fitted = 0, failed = 0, skipped = 0, concurrency = 1)
     K   = clamp(max_concurrent, 1, Threads.nthreads())
     tag = contacts_label(cfg)
     fitted  = Threads.Atomic{Int}(0)
@@ -573,7 +678,8 @@ end
 
 Fit every MISSING Stage-2 pooled result (`8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`) for
 combos × origins × horizons. Requires the matching Stage-1 chain (run `prefit_stage1!` first; a
-missing one is fit on demand). Origins are processed sequentially; within an origin the (combo ×
+missing one is fit on demand) — except for the NULL model, which has no Stage 1 and gets its
+constant C* from `stage2_inputs`. Origins are processed sequentially; within an origin the (combo ×
 horizon) cells run sequentially, each `fit_stage2_pooled` fanning out its `n_stage1_post` per-draw
 fits under `Semaphore(max_concurrent)`. Cached pooled files are skipped ⇒ resumable.
 """
@@ -594,12 +700,11 @@ function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
         wd0, apd_by_h = data_provider(oi, win_o)
         for s in todo
             try
-                ds_h = build_degree_stats(s.dm, apd_by_h[s.hi], cfg)
-                s1p  = stage1_path(s.dm, win_o.origin, s.h; contacts = tag, save_dir = save_dir)
-                s1   = fit_or_load_stage1(s1p, s.dm, ds_h, wd0.pop, cfg;
-                                          adtype = adtype, rng = Random.Xoshiro(cfg.seed))
-                md   = stage1_moment_draws(s.dm, ds_h, wd0.pop, cfg, s1.chn; n_post = cfg.n_stage1_post)
-                pooled = fit_stage2_pooled(s.nb, md, wd0, cfg; adtype = adtype,
+                s1p = stage1_path(s.dm, win_o.origin, s.h; contacts = tag, save_dir = save_dir)
+                inp = stage2_inputs(s.dm, apd_by_h[s.hi], win_o, wd0, cfg, s1p;
+                                    adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+                pooled = fit_stage2_pooled(s.nb, inp.md, wd0, cfg; n_draw = inp.n_draw,
+                                           adtype = adtype,
                                            base_seed = cfg.seed + 1000 * s.h, max_concurrent = K)
                 jldsave(s.path; pooled)
                 fitted += 1
@@ -636,7 +741,8 @@ end
 Return the Stage-2 pooled NamedTuple for `(dm, nb, origin, h)`, reloading the cached `8j_s2_*` file
 if present, else building it end-to-end: Stage-1 (load/fit on the horizon-`h` contact window ending
 at `origin+h`) → `n_stage1_post` moment draws → `fit_stage2_pooled` → save. `apd_h` is the pre-built
-`AgePairData` for that horizon window (built on demand if `nothing`).
+`AgePairData` for that horizon window (built on demand if `nothing`). For the NULL model the
+Stage-1 leg is replaced by a single constant-C* draw (see `stage2_inputs`).
 """
 function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow,
                             h::Integer; apd_h = nothing, grid = cis_age_grid(),
@@ -651,11 +757,10 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
                              horizons = cfg.horizons)
         apd_h = prepare_degree_data(win_h, cfg; grid = grid, setting = setting)
     end
-    ds_h = build_degree_stats(dm, apd_h, cfg)
-    s1p  = stage1_path(dm, win0.origin, h; contacts = tag, save_dir = save_dir)
-    s1   = fit_or_load_stage1(s1p, dm, ds_h, wd0.pop, cfg; adtype = adtype, rng = Random.Xoshiro(cfg.seed))
-    md   = stage1_moment_draws(dm, ds_h, wd0.pop, cfg, s1.chn; n_post = cfg.n_stage1_post)
-    pooled = fit_stage2_pooled(nb, md, wd0, cfg; adtype = adtype, base_seed = cfg.seed + 1000 * h)
+    s1p = stage1_path(dm, win0.origin, h; contacts = tag, save_dir = save_dir)
+    inp = stage2_inputs(dm, apd_h, win0, wd0, cfg, s1p; adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+    pooled = fit_stage2_pooled(nb, inp.md, wd0, cfg; n_draw = inp.n_draw, adtype = adtype,
+                               base_seed = cfg.seed + 1000 * h)
     jldsave(s2p; pooled)
     return pooled
 end
