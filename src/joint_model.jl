@@ -400,7 +400,8 @@ end
 # `Cstar_weeks` is one Stage-1 draw's moments run through `contact_star(nb, …)` (length Tn,
 # positionally aligned to `wd`). Samples the transmission latents and the renewal likelihood;
 # C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
-# secondary attack rate and reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly.
+# secondary attack rate and reproduces the reference cell N_{ref,ref} = susc_ref·inf_ref = γ_SAR
+# directly (ref = cfg.ref_bin, default 4 = "25-34"; formerly bin 1 = "2-10").
 #
 # `nb` is passed ONLY so the model can honour `fix_infectivity(nb)` (the NO-INTERACTION variant,
 # inst/6); the C* functional itself has already been applied upstream. It defaults to `MeanNGM()`
@@ -413,16 +414,20 @@ end
 
     # ---- transmission latents: per-contact SAR γ_SAR + relative susc/inf (analysis-plan form) ----
     # γ_SAR (per-contact secondary attack rate) carries the NGM level; inherent susceptibility &
-    # infectivity are RELATIVE, normalised so the reference bin 1 ("2-10") = 1 (bins 2..A estimated),
-    # so `z_s`/`z_i` have length A-1. NGM index convention: susc on susceptible row a, inf on
+    # infectivity are RELATIVE, normalised so the reference bin `cfg.ref_bin` (default 4 = "25-34") = 1
+    # (the other A-1 bins estimated), so `z_s`/`z_i` have length A-1 and the fixed 1 is SPLICED in at
+    # `ref_bin`. The choice of reference is a gauge (likelihood-invariant); it acts only through the
+    # priors. NGM index convention: susc on susceptible row a, inf on
     # infectious column b (Munday Eq 3).
     log_gamma_sar ~ Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2])  # centre log(0.1), LOOSENED to 90% γ_SAR∈[0.0052,1.93]
     gamma_sar = exp(_softclamp(log_gamma_sar, log(0.001), log(10.0)))       # secondary attack rate, soft-bounded to [0.001,10] (was [0.02,5]; low bound was pinning negbin|neighbourhood ~0.021)
 
-    # susc/inf are RELATIVE (bin 1 = 1). The PRIOR controls the typical age spread and the SOFT-CLAMP
-    # is a looser safety bound. The offset scale `sig ~ N⁺(0.5, 0.25²)` (LOOSENED 2026-07-13 from
-    # N⁺(0.1,0.05²), user request; marginal SD ≈ 0.5 ⇒ ±2 SD ≈ ±1.0 in log ⇒ TYPICAL susc/inf ≈
-    # [0.37, 2.7]) — wide enough to admit real age variation in inherent susceptibility/infectivity.
+    # susc/inf are RELATIVE (bin `ref` = 1). The PRIOR controls the typical age spread and the
+    # SOFT-CLAMP is a looser safety bound. The offset scale `sig ~ N⁺(0, 0.25²)` (SET 2026-07-31,
+    # user request; a mode-at-0 half-normal — the conventional weakly-informative scale, so the age
+    # profile can SHRINK to no-variation when the data are silent, rather than being asserted at ≈0.5
+    # log-SD as the previous N⁺(0.5,0.25²) did; marginal SD still ≤~0.5 ⇒ realistic susc/inf stay well
+    # inside the clamp) — admits real age variation but does not impose it.
     # The log-offset soft-clamp [log 0.05, log 20] ≈ [−3.0, +3.0] ⇒ HARD-bounds susc/inf ∈ [0.05, 20]
     # (LOOSENED 2026-07-13 from [log 0.2, log 5], user request — matching the wider prior, and now
     # re-aligned with the `-sc` cache-token docstring): the prior's ±2 SD is well interior (clamp at
@@ -436,8 +441,9 @@ end
     # calibration above is per-bin (the GP had unit diagonal ⇒ dropping it leaves per-bin SD = sig).
     # See tasks/lessons.md 2026-07-13 (and the GP→RW1→RW2→GP history before it).
     sig_s ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
-    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (bins 2..A), independent
-    susc = vcat(one(sig_s), exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0))))  # susc[1]=1; ∈ [0.05,20]
+    z_s ~ filldist(Normal(0, 1), A - 1)                    # A-1 non-reference offsets (all bins ≠ ref), independent
+    offs_s = exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0)))                  # ∈ [0.05,20]
+    susc = vcat(offs_s[1:cfg.ref_bin-1], one(sig_s), offs_s[cfg.ref_bin:end])       # susc[ref]=1; the A-1 offsets fill the other bins in order
 
     # NO-INTERACTION model (inst/6): with a DIAGONAL C* the NGM is diagonal, so
     # N_aa = γ_SAR·susc_a·(1+(F−1)A_a)·C*_aa·inf_a — susc_a and inf_a enter only through their
@@ -449,7 +455,8 @@ end
     else
         sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
         z_i ~ filldist(Normal(0, 1), A - 1)
-        inf = vcat(one(sig_i), exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0))))   # inf[1]=1;  ∈ [0.05,20]
+        offs_i = exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0)))                   # ∈ [0.05,20]
+        inf = vcat(offs_i[1:cfg.ref_bin-1], one(sig_i), offs_i[cfg.ref_bin:end])         # inf[ref]=1
     end
 
     F ~ Beta(5, 1)

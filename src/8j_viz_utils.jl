@@ -64,7 +64,7 @@ end
 
 Load the two-stage artefacts for `(lbl, origin, h)` and return per-draw transmission structure.
 The infection block (susc / inf / `gamma_sar`) comes from the **Stage-2 pooled** file — susc/inf are
-the stored `N×A` pooled draws (relative to reference bin 1 = 1), `gamma_sar` the pooled per-contact
+the stored `N×A` pooled draws (relative to the reference bin `cfg.ref_bin`, default 4 = "25-34", = 1), `gamma_sar` the pooled per-contact
 secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **Stage-1 chain**:
 `rho_diag`/`rho_gap`/`rho_time[d] = exp(softclamp(log_rho_diag|log_rho_gap|log_rho_time,…))`
 (diagonal/total-age, age-gap and — in the separable spatio-temporal regime — temporal directions;
@@ -99,15 +99,15 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
                          end) : nothing
     if chn === nothing                                                   # NULL model: no contact fit
         nan1 = fill(NaN, 1)
-        return (; susc, inf, gamma_sar, rho_diag = nan1, rho_gap = nan1, rho_time = nan1,
-                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI is Stage-2, always there
+        return (; susc, inf, gamma_sar, F = pooled.F, rho_diag = nan1, rho_gap = nan1, rho_time = nan1,
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F are Stage-2, always there
     end
     rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
     rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled
         exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0))) : fill(NaN, length(rho_diag))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
-    return (; susc, inf, gamma_sar, rho_diag, rho_gap, rho_time, w_mu, w_sigma)
+    return (; susc, inf, gamma_sar, F = pooled.F, rho_diag, rho_gap, rho_time, w_mu, w_sigma)
 end
 
 """

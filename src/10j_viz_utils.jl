@@ -1047,7 +1047,8 @@ end
     make_susc_inf_fig(combos, labels4, model_cols, origin, cfg, grid; h=1, res_dir="../res")
         -> Plots.Plot
 
-§5 — age-specific RELATIVE susceptibility and infectivity (reference bin 1 "2-10" fixed = 1) for the
+§5 — age-specific RELATIVE susceptibility and infectivity (reference bin `cfg.ref_bin`, default
+4 = "25-34", fixed = 1) for the
 four models at one forecast origin. Reloads each model's Stage-2 pooled draws
 (`load_transmission_draws`, 8j_viz_utils.jl) — `susc`/`inf` are `N×A` pooled draws relative to the
 reference bin — and plots the per-age-group median + 90% band. Two panels (susceptibility |

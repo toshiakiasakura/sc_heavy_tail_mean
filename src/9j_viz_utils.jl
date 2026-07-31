@@ -1017,15 +1017,16 @@ end
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
     collect_transmission_structure(labels4, origins; grid, h)
-        -> (; susc, inf, susc_bin, inf_bin, rho, gamma)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 two-stage artefacts: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
 (≡ 1 by construction); `susc_bin`/`inf_bin` are the same quantity at full per-age-bin
 resolution — every CIS bin against that same pop-weighted 2-15 baseline, so the super-group
 series are pop-weighted averages of these (`plot_ratio` vs `plot_ratio_bins`). Note this is a
-DIFFERENT denominator from the stored draws' own reference (bin 1 "2-10" ≡ 1, the model's
-identification, which 10j's `make_susc_inf_fig` plots against). `rho` holds the three GP
+DIFFERENT denominator from the stored draws' own reference (bin `cfg.ref_bin`, default 4 "25-34" ≡ 1,
+the model's identification, which 10j's `make_susc_inf_fig` plots against). Because these plots
+re-normalise to the 2-15 super-group, they are GAUGE-INVARIANT to the model's reference-bin choice. `rho` holds the three GP
 length-scales (col 1 ρ_diag total-age, col 2 ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks —
 `NaN` for pooled chains); `gamma` holds the per-contact secondary attack rate γ_SAR. Stores are
 `Dict(label => (med, lo, hi))` of `nO × 2` matrices for `susc`/`inf`, `nO × grid.N` for the
@@ -1038,6 +1039,7 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
                       for l in labels4)
     susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
     gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
+    F_store  = mkstore(1)                               # leaky antibody-protection factor F (scalar per draw)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
@@ -1068,6 +1070,10 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
         gamma_store[lbl].med[oi, 1] = median(γ)
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
+        Fd = d.F                                          # leaky antibody-protection factor (scalar per draw)
+        F_store[lbl].med[oi, 1] = median(Fd)
+        F_store[lbl].lo[oi, 1]  = quantile(Fd, 0.05)
+        F_store[lbl].hi[oi, 1]  = quantile(Fd, 0.95)
         # generation interval (estimated since 2026-07-30) → natural scale, DAYS. Col 1 = mean, 2 = SD.
         gm = gi_moments_days(d.w_mu, d.w_sigma)
         for (g, v) in enumerate((gm.mean_days, gm.sd_days))
@@ -1077,7 +1083,8 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
         end
     end
     return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
-              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store)
+              inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store,
+              F = F_store)
 end
 
 """
@@ -1286,6 +1293,30 @@ function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
                size = (950, 520), legend = :topright, xrotation = 45)
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
+        plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
+    end
+    return fig
+end
+
+"""
+    plot_F(store, labels4, model_cols, origins; h=1) -> Plot
+
+Antibody-protection factor **F** over the rolling forecast origins, one line per model (median + 90%
+band). `store` is the `F` field of `collect_transmission_structure` (an `nO × 1` med/lo/hi store of
+the pooled per-draw `F`). F is the LEAKY antibody-protection factor in `full_susceptibility_a(t) =
+susc_a·(1 + (F−1)·A_a(t))`: F = 0 ⇒ antibodies fully protect, F = 1 ⇒ no protection (prior
+`Beta(5,1)`, so F ∈ (0,1)). This is the direct analog of `plot_gamma` for the γ_SAR level.
+"""
+function plot_F(store, labels4, model_cols, origins; h::Integer = 1)
+    # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
+    # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
+    fig = plot(; xlabel = "forecast origin", ylabel = "F (leaky antibody-protection factor)",
+               title = "9j — antibody-protection factor F over time by model (h=$h; 90% CI)",
+               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0, 1))
+    for (ci, lbl) in enumerate(labels4)
+        m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
+        all(isnan, m) && continue
         plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
               ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
     end

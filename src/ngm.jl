@@ -3,10 +3,11 @@
 #
 #   N_ab(t) = γ_SAR · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
 #   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
-# γ_SAR is the per-contact secondary attack rate; susc/inf are RELATIVE, normalised to reference
-# bin 1 ("2-10") = 1. C* is NOT normalised (the -gnorm `C* → C*/S̄` decoupling was reverted
-# 2026-07-12, inst/4_cut_Bayes.md), so C* feeds the NGM at its raw (mean/neighbourhood-degree) level
-# and γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. See joint_model.jl
+# γ_SAR is the per-contact secondary attack rate; susc/inf are RELATIVE, normalised to the reference
+# bin `cfg.ref_bin` (default 4 = "25-34"; formerly 1 = "2-10") = 1. C* is NOT normalised (the -gnorm
+# `C* → C*/S̄` decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so C* feeds the NGM at its raw
+# (mean/neighbourhood-degree) level and γ_SAR reproduces the reference cell N_{ref,ref} = γ_SAR
+# directly. See joint_model.jl
 # and tasks/lessons.md.
 #
 # C*_ab = per-capita effective contacts from bin a to bin b (mean or excess degree).
@@ -73,7 +74,8 @@ contact_star(::DiagonalMeanNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::Abstr
 
 7×7 next-generation matrix for one week from a precomputed `C*`:
 `N_ab = γ_SAR · full_susceptibility_a · C*_ab · inf_b`. `gamma_sar` is the per-contact secondary
-attack rate (susc/inf relative to reference bin 1); `gamma_sar=1` recovers the pre-reparam form.
+attack rate (susc/inf relative to the reference bin `cfg.ref_bin`, default 4 = "25-34"); `gamma_sar=1`
+recovers the pre-reparam form.
 """
 function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
                    F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)

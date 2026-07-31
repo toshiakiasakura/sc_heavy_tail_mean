@@ -240,9 +240,9 @@ $$
 
 with $\gamma_{\mathrm{SAR}}$ the **per-contact secondary attack rate** (analysis-plan reparam; it
 carries the NGM level, and because $C^\ast$ is **not** normalised it reproduces the reference cell
-$N_{11}=\text{susc}_1\cdot\text{inf}_1=\gamma_{\mathrm{SAR}}$), $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
-and $\text{inf}_b$ the **relative** infectivity of group $b$ — both normalised so the reference bin $1$
-("2-10") is $1$ ($\text{susc}_1=\text{inf}_1=1$; bins $2..A$ estimated) — and $F \in (0,1)$ a **leaky**
+$N_{rr}=\text{susc}_r\cdot\text{inf}_r=\gamma_{\mathrm{SAR}}$, $r=\texttt{cfg.ref\_bin}$), $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
+and $\text{inf}_b$ the **relative** infectivity of group $b$ — both normalised so the reference bin $r$
+(**2026-07-31** set to $r=4$, "25-34"; formerly $r=1$, "2-10") is $1$ ($\text{susc}_r=\text{inf}_r=1$; the other $A-1$ bins estimated) — and $F \in (0,1)$ a **leaky**
 antibody-protection factor scaling
 susceptibility by the group's antibody prevalence $A_a(t)$ (at $F=1$ antibodies confer no
 protection; smaller $F$ gives stronger protection). $C^\ast_{ab}$ is the per-capita effective
@@ -667,18 +667,20 @@ $\approx[0.37,\,2.7]\times$ its block mean at $\pm2$ SD.
 
 *Stage 2 — transmission block (per-contact $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf,
 non-centred; conditions on the fixed $\{C^\ast_t\}$ of one Stage-1 draw):* susceptibility and
-infectivity are **relative** to the reference bin $1$ ("2-10"), fixed to $1$; only the $A-1$
-non-reference offsets are estimated, and the per-contact secondary attack rate $\gamma_{\mathrm{SAR}}$
+infectivity are **relative** to the reference bin $r=\texttt{cfg.ref\_bin}$ (**2026-07-31** set to
+$r=4$, "25-34"; formerly $r=1$, "2-10"), fixed to $1$; only the $A-1$
+non-reference offsets are estimated (the fixed $1$ is **spliced in at position $r$**, not prepended),
+and the per-contact secondary attack rate $\gamma_{\mathrm{SAR}}$
 carries the level (it replaces the old confounded $\mu_s,\mu_i$ pair).
 
 $$
 \begin{aligned}
 \log\gamma_{\mathrm{SAR}} &\sim \mathcal N(\log 0.1,\, 1.8^2), &&
 \gamma_{\mathrm{SAR}} = \exp(\operatorname{softclamp}(\log\gamma_{\mathrm{SAR}},\log 0.001,\log 10)),\\
-\sigma_s &\sim \mathcal N^+(0.5, 0.25^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
-\text{susc} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
-\sigma_i &\sim \mathcal N^+(0.5, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
-\text{inf} &= \big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
+\sigma_s &\sim \mathcal N^+(0, 0.25^2), & z_s &\sim \mathcal N(0,1)^{A-1}, &
+\text{susc} &= \operatorname{splice}_r\big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
+\sigma_i &\sim \mathcal N^+(0, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
+\text{inf} &= \operatorname{splice}_r\big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
 F &\sim \mathrm{Beta}(5,1), & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2), & & \\
 w_\mu &\sim \mathcal N(-0.6830,\ 0.1366^2), & w_\sigma &\sim \mathcal N^{+}(0.6931,\ 0.1386^2), &
 w &= \text{Eq. §3.1}\big(w_\mu, w_\sigma\big).
@@ -686,16 +688,27 @@ w &= \text{Eq. §3.1}\big(w_\mu, w_\sigma\big).
 $$
 
 With $C^\ast$ **un-normalised** (§3.2 update, 2026-07-12), $\gamma_{\mathrm{SAR}}$ is the per-contact
-secondary attack rate: it reproduces the reference cell $N_{11}=\text{susc}_1\cdot\text{inf}_1$
-directly and is comparable across origins. Its prior was originally calibrated by reading 18
+secondary attack rate: it reproduces the reference cell $N_{rr}=\text{susc}_r\cdot\text{inf}_r$
+directly and is comparable across origins. **The reference bin $r$ is a gauge**: the NGM likelihood is
+invariant to it (rescaling all $\text{susc}$ by $c$ and $\gamma_{\mathrm{SAR}}$ by $1/c$ leaves $N$
+unchanged), so the **2026-07-31** switch $r=1\to4$ ("2-10"$\to$"25-34", user request) acts *only*
+through the priors — which bin is pinned to 1 vs. carries the log-offset, and what
+$\gamma_{\mathrm{SAR}}=N_{rr}$ anchors to. 25-34 is a large, well-mixed, well-sampled adult group
+(Munday/Davies convention); anchoring on children (2-10) — an extreme, poorly-identified,
+antibody-sparse bin — was the weaker choice. Note the switch re-anchors $\gamma_{\mathrm{SAR}}$ to the
+25-34 cell, so its posterior is no longer directly comparable to pre-switch runs (the wide
+$\mathcal N(\log0.1,1.8^2)$ prior absorbs the level shift). Its prior was originally calibrated by reading 18
 pre-`-gnorm` `temporal` chains (both degree models × 9 origins): $\text{susc}_1\!\cdot\!\text{inf}_1$
 had median $0.33$, log-SD $0.56$ ⟹ $\mathcal N(\log 0.33, 0.56^2)$. It was **loosened twice since**
 and now stands at $\mathcal N(\log 0.1, 1.8^2)$ with softclamp $[\log 0.001,\log 10]$ — see the
 §3.2 update box (2026-07-13); the calibration above now informs only the centre. Age variation in inherent susceptibility/infectivity
 admits genuine age variation, and the **soft-clamp** is a looser safety bound: the offset scale
-$\sigma_{s,i}\sim\mathcal N^+(0.5,0.25^2)$ (**loosened 2026-07-13 from $\mathcal N^+(0.1,0.05^2)$**;
-marginal SD $\approx0.5$ ⟹ $\pm2$ SD $\approx\pm1.0$ in log ⟹ TYPICAL
-$\text{susc},\text{inf}\in[0.37,2.7]$), and each non-reference
+$\sigma_{s,i}\sim\mathcal N^+(0,0.25^2)$ (**2026-07-31 set to a mode-at-0 half-normal**, user request —
+the conventional weakly-informative scale that lets the age profile **shrink to no-variation**
+($\text{susc},\text{inf}\to1$) when the data are silent, rather than the previous
+$\mathcal N^+(0.5,0.25^2)$ which sat the mode away from 0 and *asserted* age spread; upper reach
+$\approx$ unchanged, marginal SD still $\le\!\sim0.5$ ⟹ realistic
+$\text{susc},\text{inf}$ well inside the clamp), and each non-reference
 log-offset $\sigma\,z$ is soft-clamped to $[\log 0.05,\log 20]\approx[-3,3]$ (**also loosened
 2026-07-13 from $[\log 0.2,\log 5]$**), **hard-bounding** $\text{susc},\text{inf}\in[0.05,20]$ — wide
 enough that realistic profiles never touch it (the prior's $\pm2$ SD sits at $\pm1$, clamp at
@@ -705,7 +718,8 @@ mass $\subset$ clamp ⟹ profiles interior and undistorted. The $A-1$ non-refere
 shared-length-scale squared-exponential GP over the age-bin index, $\sigma\,L_{si}z$, previously
 correlated neighbouring bins; it was **removed 2026-07-13** (user request), along with the length-scale
 latent $\rho_{si}$. Because that kernel had unit diagonal, dropping it leaves each bin's marginal SD
-$=\sigma_{s,i}$ unchanged, so the $[0.37,2.7]$ band and $[0.05,20]$ clamp are preserved — the age
+$=\sigma_{s,i}$ unchanged, so the $\sigma_{s,i}$-driven spread (now the shrink-to-1
+$\mathcal N^+(0,0.25^2)$ band) and the $[0.05,20]$ clamp are preserved — the age
 profile is simply rougher. See the GP→RW1→RW2→GP→none history in `tasks/lessons.md`.)
 The **generation-interval** latents $(w_\mu, w_\sigma)$ live here too (§3.1) — they enter only the
 renewal, so the cut keeps them clear of the contact GP. Stage 2 returns the generated quantities
@@ -716,8 +730,8 @@ returns the raw moments $(\{\langle k\rangle_t\}, \{\langle k^2\rangle_t\}, \{g_
 `model_transmission` takes the NGM builder as a trailing argument purely to consult the trait
 `fix_infectivity(nb)`. When it is `true` — only for `DiagonalMeanNGM` — the block
 
-$$\sigma_i \sim \mathcal N^+(0.5,0.25^2),\quad z_i\sim\mathcal N(0,1)^{A-1},\quad
-\text{inf} = (1, \exp(\operatorname{softclamp}(\sigma_i z_i,\cdot)))$$
+$$\sigma_i \sim \mathcal N^+(0,0.25^2),\quad z_i\sim\mathcal N(0,1)^{A-1},\quad
+\text{inf} = \operatorname{splice}_r(1, \exp(\operatorname{softclamp}(\sigma_i z_i,\cdot)))$$
 
 is **not sampled at all** and $\text{inf}\equiv \mathbf 1$. The reason is exact non-identifiability,
 not a modelling preference: with $C^\ast$ diagonal the NGM is diagonal, so
@@ -728,7 +742,7 @@ and $\text{susc}_a$ and $\text{inf}_a$ enter **only** through their product. Pin
 $\text{inf}\equiv1$ puts the whole age profile in $\text{susc}$. (Leaving $\sigma_i,z_i$ in the
 program as unused latents would leave them prior-driven and pollute the Pathfinder approximation,
 so they are dropped from the parameter space rather than merely ignored.) This is *distinct* from —
-and additional to — the reference-bin normalisation $\text{susc}_1=\text{inf}_1=1$ that all
+and additional to — the reference-bin normalisation $\text{susc}_r=\text{inf}_r=1$ that all
 variants share.
 
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
@@ -967,6 +981,13 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   the per-cell dispersion against its block mean; and *(iii)* a **$p^0$** panel (10j, weighted path)
   plotting the fitted zero probability against the empirical $n^0/n$ per cell — the check that the
   Binomial denominator is wired to the roster correctly.
+  Added 2026-07-31: an **antibody-protection factor** panel (9j, `res/9j_protection_factor_F.png`) —
+  the posterior of the leaky factor $F$ (median + 90% band) per model over the rolling origins, the
+  direct analog of the $\gamma_{\mathrm{SAR}}$-over-time figure. $F$ enters
+  $\text{full\_susceptibility}_a(t)=\text{susc}_a(1+(F-1)A_a(t))$, so $F\to0$ ⟹ antibodies fully
+  protect, $F\to1$ ⟹ no protection (prior $\mathrm{Beta}(5,1)$ ⟹ $F\in(0,1)$); it is a scalar per
+  Stage-2 draw, surfaced from the pooled artefact via `collect_transmission_structure` and drawn by
+  `plot_F`.
 - **Reproduction number** (two separate figures). *(1)* `res/9j_reproduction_number.png` — the
   "contact & transmission" $R$: the dominant (Perron) eigenvalue $\rho(N)$ of the frozen origin-week
   NGM, per origin, over the inc2prev national $R$ and the $R=1$ line. *(2)*
@@ -1032,11 +1053,13 @@ the seams at which they would be relaxed:
   certainty (cf. the $\gamma_{\mathrm{SAR}}\approx0.021$ episode, `tasks/lessons.md` 2026-07-13).
 - **Transmission block** — *partially addressed*: the level is now an explicit, data-identified
   **per-contact secondary attack rate** $\gamma_{\mathrm{SAR}}$ (un-normalised $C^\ast$) with
-  susceptibility/infectivity **relative** to the reference bin $1$ (the plan's $\gamma_{\mathrm{SAR}}$ +
-  baseline-"2-10" form), replacing the old confounded $\mu_s,\mu_i$ level pair; the block is fit as
+  susceptibility/infectivity **relative** to the reference bin $r=\texttt{cfg.ref\_bin}$ (the plan's
+  $\gamma_{\mathrm{SAR}}$ + baseline form; **2026-07-31** $r=4$ "25-34", formerly $r=1$ "2-10"),
+  replacing the old confounded $\mu_s,\mu_i$ level pair; the block is fit as
   **Stage 2** of the cut (§6.0), conditioning on Stage-1 contact draws. The relative offsets are
   **independent per age bin** — offset $\sigma\,z$, $z\sim\mathcal N(0,1)^{A-1}$ iid, with **separately
-  estimated** marginal scales $\sigma_s,\sigma_i\sim\mathcal N^+(0.5,0.25^2)$ — with **no cross-bin
+  estimated** marginal scales $\sigma_s,\sigma_i\sim\mathcal N^+(0,0.25^2)$ (**2026-07-31** mode-at-0
+  half-normal, shrink-to-reference) — with **no cross-bin
   smoothing** (the shared-length-scale squared-exponential GP $\sigma\,L_{si}z$ was removed 2026-07-13,
   user request; ending the GP→RW1→RW2→GP→none sequence), and each log-offset is soft-clamped to
   $[\log 0.05,\log 20]$ **hard-bounding** susc/inf to $[0.05,20]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
