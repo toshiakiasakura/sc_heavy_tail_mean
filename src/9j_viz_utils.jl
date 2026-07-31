@@ -64,6 +64,47 @@ function period_summary(origins)
     return tally
 end
 
+# Compact labels for the named periods, used when shading them onto a narrow date-axis panel.
+const PERIOD_ABBR = Dict(
+    "Lockdown 2"              => "L2",
+    "Lockdown 2 Easing"       => "L2 easing",
+    "Christmas"               => "Xmas",
+    "Lockdown 3"              => "L3",
+    "Lockdown 3 Schools open" => "L3 schools",
+    "Lockdown 3 Easing"       => "L3 easing",
+    "Opening up"              => "Opening up",
+)
+
+"""
+    shade_periods!(p, dmin, dmax; alpha, fontsize, labels) -> p
+
+Overlay the named UK COVID `PERIODS` (Table 2 — the same bands `plot_rwis_by_period` facets on)
+as alternating translucent vertical spans on a Date-axis panel `p`, clipped to `[dmin, dmax]`,
+each annotated (rotated 90°) with its abbreviated name near the panel top. Call this **after** the
+data series are plotted so the Date axis and y-limits are already established (a leading numeric
+overlay would collapse the date axis — see the date-axis gotcha). Bands use a low `fillalpha` so
+the lines underneath stay legible.
+"""
+function shade_periods!(p, dmin::Date, dmax::Date; alpha::Real = 0.10,
+                        fontsize::Integer = 5, labels::Bool = true)
+    yl   = Plots.ylims(p)
+    ytxt = yl[1] + 0.93 * (yl[2] - yl[1])
+    cols = (:gray, :steelblue)
+    j = 0
+    for (nm, lo, hi) in PERIODS
+        plo = max(lo, dmin); phi = min(hi, dmax)
+        plo <= phi || continue
+        j += 1
+        vspan!(p, [plo, phi]; color = cols[mod1(j, 2)], fillalpha = alpha,
+               linealpha = 0, label = "")
+        labels || continue
+        mid = plo + Day(div((phi - plo).value, 2))
+        annotate!(p, mid, ytxt,
+                  text(get(PERIOD_ABBR, nm, nm), fontsize, :center, :bottom; rotation = 90))
+    end
+    return p
+end
+
 # ── small utilities ───────────────────────────────────────────────────────────────────
 """
     pad_margins(fig; l, b) -> fig
@@ -886,7 +927,9 @@ below 0 beat `ref` cumulatively; a steadily-rising line loses a little every wee
 omitted (identically 0). `models` restricts which lines are drawn (default the two mean-NGM
 configs); each keeps its colour from its index in the full `labels` list, so colours stay
 consistent with the other figures. Contrast `plot_wis_by_horizon_over_time`, which ratios per-date
-against the global `REF_MODEL`.
+against the global `REF_MODEL`. The named UK COVID `PERIODS` (the same Table-2 bands
+`plot_rwis_by_period` facets on) are overlaid as translucent shaded spans with labels via
+`shade_periods!`, to read the cumulative gap against the epidemic timeline.
 """
 function plot_wis_diff_over_time(scores, labels, model_cols, cfg;
                                  ref::AbstractString = "weighted-hweibull|neighbourhood",
@@ -914,11 +957,67 @@ function plot_wis_diff_over_time(scores, labels, model_cols, cfg;
                   marker = :circle, ms = 2, label = m)
         end
         hline!(p, [0.0]; color = :gray, ls = :dash, label = "")  # ref = 0, after dates set
+        pdates = collect(keys(ref_by_date))              # the origins actually plotted (ref present)
+        isempty(pdates) || shade_periods!(p, minimum(pdates), maximum(pdates))  # named-period bands
         push!(panels, p)
     end
     nr, nc = panel_grid(length(cfg.horizons))
     return plot(panels...; layout = (nr, nc), size = (1150, 780),
                 plot_title = "9j — cumulative WIS difference over time, by horizon (log scale; < 0 beats $(ref))",
+                plot_titlefontsize = 11)
+end
+
+"""
+    plot_wis_diff_over_time_cumh(scores, labels, model_cols, cfg; ref, models, scale) -> Plot
+
+Horizon-**cumulative** twin of `plot_wis_diff_over_time`, matched to the M-SAP (multi-horizon
+aggregated) target. Instead of one panel *per* horizon `h`, panel `H` sums each origin's WIS over
+the horizon *set* `1:H` before differencing against `ref` — so the panels are `h=1`, `h=1:2`,
+`h=1:3`, `h=1:4` (the `h=1` panel is identical to `plot_wis_diff_over_time`'s). Within each panel
+the per-origin multi-horizon gap `Σ_{h≤H} wis − Σ_{h≤H} wis_ref` is accumulated in date order, so a
+line's endpoint = the whole-period, all-horizons-through-H WIS difference vs `ref`; < 0 ⇒ beats it
+cumulatively across both time and lead-times. Only origins with **all** `H` horizons present
+contribute (so the horizon sum is comparable origin-to-origin); the named `PERIODS` are shaded via
+`shade_periods!`. `ref`/`models`/`scale` behave as in `plot_wis_diff_over_time`.
+"""
+function plot_wis_diff_over_time_cumh(scores, labels, model_cols, cfg;
+                                      ref::AbstractString = "weighted-hweibull|neighbourhood",
+                                      models::Vector{<:AbstractString} = ["unweighted-negbin|mean",
+                                                                          "weighted-hweibull|mean"],
+                                      scale::AbstractString = WIS_SCALE)
+    bdth = @subset(scores.by_model_dt_h, :scale .== scale)
+    hs   = sort(collect(cfg.horizons))
+    panels = Plots.Plot[]
+    for (k, H) in enumerate(hs)
+        # sum WIS over the horizon set 1:H per (model, origin); keep only origins with all H present
+        sub = @subset(bdth, :horizon .<= H)
+        agg = combine(groupby(sub, [:model, :forecast_date]), :wis => sum => :wis, nrow => :nh)
+        agg = @subset(agg, :nh .== H)
+        ref_by_date = Dict(r.forecast_date => r.wis for r in eachrow(@subset(agg, :model .== ref)))
+        ttl = H == 1 ? "horizon 1 (wk ahead)" : "horizons 1–$H (cumulative)"
+        p = plot(; title = ttl, titlefontsize = 8, xlabel = "forecast origin",
+                 ylabel = "cumulative WIS diff (Σ h≤$H)", legend = (k == 1 ? :topleft : false),
+                 legendfontsize = 6, xrotation = 45)
+        for (ci, m) in enumerate(labels)
+            (m == ref || m ∉ models) && continue         # ref ≡ 0; keep only requested models
+            s = sort(@subset(agg, :model .== m), :forecast_date)
+            dts = Date[]; cum = Float64[]; acc = 0.0
+            for (w, d) in zip(s.wis, s.forecast_date)    # running sum of the per-origin multi-horizon gap
+                haskey(ref_by_date, d) || continue
+                acc += w - ref_by_date[d]
+                push!(dts, d); push!(cum, acc)
+            end
+            plot!(p, dts, cum; color = model_cols[ci], lw = 1.5,
+                  marker = :circle, ms = 2, label = m)
+        end
+        hline!(p, [0.0]; color = :gray, ls = :dash, label = "")  # ref = 0, after dates set
+        pdates = collect(keys(ref_by_date))              # origins actually plotted (ref present)
+        isempty(pdates) || shade_periods!(p, minimum(pdates), maximum(pdates))  # named-period bands
+        push!(panels, p)
+    end
+    nr, nc = panel_grid(length(cfg.horizons))
+    return plot(panels...; layout = (nr, nc), size = (1150, 780),
+                plot_title = "9j — horizon-cumulative WIS difference over time (M-SAP; log scale; < 0 beats $(ref))",
                 plot_titlefontsize = 11)
 end
 
@@ -959,6 +1058,52 @@ function plot_wis_vs_rt(scores, rt_by_week, cfg;
     return plot(panels...; layout = (nr, nc), size = (1150, 780),
                 plot_title = "9j — WIS vs England Rt at target week, by horizon (log scale)",
                 plot_titlefontsize = 11)
+end
+
+"""
+    plot_wis_scatter(scores, cfg; xmodel, ymodel, scale) -> Plot
+
+Per-origin WIS **scatter** of two models against each other, **faceted by horizon** (2×2 over
+`cfg.horizons`). Each point is one forecast origin: `x` = `xmodel`'s log-scale WIS,
+`y` = `ymodel`'s, paired on `forecast_date` from `by_model_dt_h` (age-aggregated, one WIS per
+model × origin × horizon). The dashed `y = x` line is the tie: points **below** it are origins
+where `ymodel` scored lower (= better) than `xmodel`, points above are where it did worse. Axes
+share an equal square range so the diagonal is at 45°. Default pairing is
+`weighted-hweibull|neighbourhood` (y) vs `unweighted-negbin|mean` (x).
+"""
+function plot_wis_scatter(scores, cfg;
+                          xmodel::AbstractString = "unweighted-negbin|mean",
+                          ymodel::AbstractString = "weighted-hweibull|neighbourhood",
+                          scale::AbstractString = WIS_SCALE)
+    bdth = @subset(scores.by_model_dt_h, :scale .== scale)
+    panels = Plots.Plot[]
+    for (k, h) in enumerate(cfg.horizons)
+        sub_h = @subset(bdth, :horizon .== h)
+        xby = Dict(r.forecast_date => r.wis for r in eachrow(@subset(sub_h, :model .== xmodel)))
+        yby = Dict(r.forecast_date => r.wis for r in eachrow(@subset(sub_h, :model .== ymodel)))
+        xs = Float64[]; ys = Float64[]
+        for d in sort(collect(keys(xby)))       # paired origins only (both models present)
+            haskey(yby, d) || continue
+            push!(xs, xby[d]); push!(ys, yby[d])
+        end
+        p = plot(; title = "horizon $h (wk ahead)", titlefontsize = 8,
+                 xlabel = "WIS: $(xmodel)", ylabel = "WIS: $(ymodel)",
+                 legend = (k == 1 ? :topleft : false), legendfontsize = 6,
+                 xguidefontsize = 6, yguidefontsize = 6)
+        if !isempty(xs)
+            lim = (0.0, maximum(vcat(xs, ys)) * 1.05)          # equal square range → 45° diagonal
+            plot!(p, collect(lim), collect(lim); color = :gray, ls = :dash,
+                  label = "y = x (tie)", xlims = lim, ylims = lim)
+            scatter!(p, xs, ys; label = "$(length(xs)) origins", ms = 4, msw = 0.5,
+                     color = :purple, alpha = 0.7)
+        end
+        push!(panels, p)
+    end
+    nr, nc = panel_grid(length(cfg.horizons))
+    return plot(panels...; layout = (nr, nc), size = (1150, 820),
+                plot_title = "9j — per-origin WIS: $(ymodel) vs $(xmodel), by horizon " *
+                             "($(scale) scale; below diagonal ⇒ $(ymodel) better)",
+                plot_titlefontsize = 10)
 end
 
 """
@@ -1140,19 +1285,47 @@ function plot_gen_interval(gi, labels4, origins, cfg; h::Integer = 1)
 end
 
 """
+    _median_ylims(vals; ref, pad, log) -> (lo, hi)
+
+y-limits spanning the finite `vals` (typically ratio **medians**) and the `ref` reference line,
+padded `pad` on each side. Used to scale the ratio panels to their median lines while letting wide
+90% ribbons run **off-panel** (Plots clips to `ylims`), rather than letting a single huge CI
+compress every median to a flat line. With `log = true` the padding is **multiplicative** (and
+non-positive values dropped) so the limits stay valid on a `:log10` axis. Falls back to `(0, 2)`
+(`(0.5, 2)` on log) when nothing usable is finite.
+"""
+function _median_ylims(vals; ref::Real = 1.0, pad::Real = 0.05, log::Bool = false)
+    v = filter(isfinite, vals)
+    log && (v = filter(>(0), v))                 # a log axis can't show ≤ 0
+    isempty(v) && return log ? (0.5, 2.0) : (0.0, 2.0)
+    lo = min(minimum(v), ref); hi = max(maximum(v), ref)
+    if log
+        (hi <= lo) && return (lo / 1.5, hi * 1.5)   # all-equal medians ⇒ give the flat line room
+        f = (hi / lo)^pad                           # multiplicative pad, symmetric in log
+        return (lo / f, hi * f)
+    end
+    m = pad * (hi - lo)
+    m == 0 && (m = 0.05 * max(abs(hi), 1.0))     # all-equal medians ⇒ give the flat line room
+    return (lo - m, hi + m)
+end
+
+"""
     plot_ratio(store, labels4, origins, ttl) -> Plot
 
 One panel per config of a super-group ratio-to-2-15 store from
 `collect_transmission_structure` (susceptibility or infectivity): the 16-49 and >50 series
-with 90% ribbons, referenced to 1.0 (the 2-15 baseline).
+with 90% ribbons, referenced to 1.0 (the 2-15 baseline). The shared y-limits are set from the
+**medians** only (`_median_ylims`) so a wide 90% band on one series runs off-panel instead of
+flattening every median line.
 """
 function plot_ratio(store, labels4, origins, ttl::AbstractString)
     gnames = ["16-49", ">50"]
+    yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]))
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
                  ylabel = "ratio to 2-15", legend = (k == 1 ? :topright : false),
-                 legendfontsize = 6, xrotation = 45)
+                 legendfontsize = 6, xrotation = 45, ylims = yl)
         # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis.
         # (A leading `hline!` here initialises a numeric axis and collapses the Dates.)
         plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
@@ -1174,16 +1347,19 @@ end
 One panel per config of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
 `collect_transmission_structure`) — the age-resolved refinement of `plot_ratio`, sharing its
 2-15 baseline so the two figures read against the same 1.0 reference. Median lines only: seven
-overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure.
+overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure. The y-axis is
+**log10** — the ratios are multiplicative, so a bin at 2× and one at 0.5× sit symmetrically about
+the 1.0 reference; shared limits come from the medians (`_median_ylims(; log = true)`).
 """
 function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = cis_age_grid())
     cols = palette(:viridis, grid.N)     # age is ordinal → perceptually ordered palette
+    yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]); log = true)
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "ratio to 2-15", legend = (k == 1 ? :topright : false),
+                 ylabel = "ratio to 2-15 (log)", legend = (k == 1 ? :topright : false),
                  legendfontsize = 5, background_color_legend = RGBA(1, 1, 1, 0.7),
-                 xrotation = 45)
+                 xrotation = 45, yscale = :log10, ylims = yl)
         # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
         plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
         for a in 1:grid.N
@@ -1215,13 +1391,18 @@ function plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid;
                                groups = [[1, 2], [3, 4], [5, 6, 7]])
     cols = palette(:viridis, grid.N)             # age is ordinal → perceptually ordered palette
     quantities = [("susceptibility", susc_bin), ("infectivity", inf_bin)]
+    # Figure-wide y-limits from the MEDIANS only (both quantities), on a LOG10 axis (ratios are
+    # multiplicative) so the panels stay comparable and a wide 90% ribbon runs off-panel rather
+    # than compressing every median line.
+    yl = _median_ylims(reduce(vcat, [vec(susc_bin[lbl].med), vec(inf_bin[lbl].med)]); log = true)
     panels = Plots.Plot[]
     for grp in groups                            # rows = age-bin groups; row-major fill ⇒ (sus, inf) per row
         for (qname, store) in quantities
             s = store[lbl]
             p = plot(; title = "$qname — bins $(grid.LAB[first(grp)])…$(grid.LAB[last(grp)])",
-                     titlefontsize = 8, xlabel = "forecast origin", ylabel = "ratio to 2-15",
-                     legend = :topright, legendfontsize = 6, xrotation = 45)
+                     titlefontsize = 8, xlabel = "forecast origin", ylabel = "ratio to 2-15 (log)",
+                     legend = :topright, legendfontsize = 6, xrotation = 45,
+                     yscale = :log10, ylims = yl)
             # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
             plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
             for a in grp
@@ -1282,15 +1463,17 @@ so unlike `plot_ratio` there are no per-age super-groups to facet. `store` is th
 `collect_transmission_structure` (`Dict(label => (med, lo, hi))` of `nO × 1` matrices).
 
 Under the two-stage cut, C* is NOT normalised, so γ_SAR is the per-contact secondary attack rate
-(it reproduces the reference cell N_11 = susc₁·inf₁ directly) and IS comparable across origins.
-γ_SAR has no natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
+(it reproduces the reference cell N_{ref,ref} = susc_r·inf_r directly) and IS comparable across
+origins. γ_SAR has no natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
+The y-axis is **capped at (0, 2.0)** so the neighbourhood-NGM blow-ups don't stretch the panel;
+medians/bands running past 2.0 are clipped.
 """
 function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
     fig = plot(; xlabel = "forecast origin", ylabel = "γ_SAR (per-contact secondary attack rate)",
                title = "8j — secondary attack rate γ_SAR over time by model (h=$h; 90% CI)",
-               size = (950, 520), legend = :topright, xrotation = 45)
+               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0.0, 2.0))
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
         plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
