@@ -521,6 +521,25 @@ function national_R(; path::AbstractString = _NATIONAL_EST_PATH, region::Abstrac
 end
 
 """
+    weekly_national_R(; region) -> Dict{Date,Float64}
+
+Weekly inc2prev national R keyed by `week_start` (Sunday grid key): the daily `national_R`
+median averaged over each week. Used by `plot_wis_vs_rt` to look up the Rt at a forecast
+target week. Reuses `national_R` (no second CSV path).
+"""
+function weekly_national_R(; region::AbstractString = "England")
+    natR = national_R(; region = region)
+    sums = Dict{Date,Float64}(); cnts = Dict{Date,Int}()
+    for (d, m) in zip(natR.date, natR.med)
+        (d === nothing || !isfinite(m)) && continue
+        w = week_start(d)
+        sums[w] = get(sums, w, 0.0) + m
+        cnts[w] = get(cnts, w, 0) + 1
+    end
+    return Dict(w => sums[w] / cnts[w] for w in keys(sums))
+end
+
+"""
     plot_reproduction(store, labels4, model_cols, origins; h) -> Plot
 
 Reproduction number over time. Each model's R is drawn as a **step function** (`:steppost` —
@@ -856,6 +875,93 @@ function plot_wis_by_horizon_over_time(scores, labels4, model_cols, cfg;
 end
 
 """
+    plot_wis_diff_over_time(scores, labels, model_cols, cfg; ref, scale) -> Plot
+
+**Cumulative** WIS difference over time, faceted by horizon: within each horizon the per-origin
+log-scale WIS gap `wis - wis_ref` (against a caller-chosen `ref`, default
+`weighted-hweibull|neighbourhood`) is accumulated in date order, so each line is the running total
+skill deficit/surplus and its **endpoint = the whole-period WIS difference** vs `ref`. A line ending
+below 0 beat `ref` cumulatively; a steadily-rising line loses a little every week. Origins where the
+`ref` WIS is absent are skipped (they contribute 0 to the running sum). The `ref` line itself is
+omitted (identically 0). `models` restricts which lines are drawn (default the two mean-NGM
+configs); each keeps its colour from its index in the full `labels` list, so colours stay
+consistent with the other figures. Contrast `plot_wis_by_horizon_over_time`, which ratios per-date
+against the global `REF_MODEL`.
+"""
+function plot_wis_diff_over_time(scores, labels, model_cols, cfg;
+                                 ref::AbstractString = "weighted-hweibull|neighbourhood",
+                                 models::Vector{<:AbstractString} = ["unweighted-negbin|mean",
+                                                                     "weighted-hweibull|mean"],
+                                 scale::AbstractString = WIS_SCALE)
+    bdth = @subset(scores.by_model_dt_h, :scale .== scale)
+    panels = Plots.Plot[]
+    for (k, h) in enumerate(cfg.horizons)
+        sub_h = @subset(bdth, :horizon .== h)
+        ref_by_date = Dict(r.forecast_date => r.wis for r in eachrow(@subset(sub_h, :model .== ref)))
+        p = plot(; title = "horizon $h (wk ahead)", titlefontsize = 8, xlabel = "forecast origin",
+                 ylabel = "cumulative WIS diff", legend = (k == 1 ? :topleft : false),
+                 legendfontsize = 6, xrotation = 45)
+        for (ci, m) in enumerate(labels)
+            (m == ref || m ∉ models) && continue         # ref ≡ 0; keep only requested models
+            s = sort(@subset(sub_h, :model .== m), :forecast_date)
+            dts = Date[]; cum = Float64[]; acc = 0.0
+            for (w, d) in zip(s.wis, s.forecast_date)    # running sum of the per-origin gap, in date order
+                haskey(ref_by_date, d) || continue
+                acc += w - ref_by_date[d]
+                push!(dts, d); push!(cum, acc)
+            end
+            plot!(p, dts, cum; color = model_cols[ci], lw = 1.5,
+                  marker = :circle, ms = 2, label = m)
+        end
+        hline!(p, [0.0]; color = :gray, ls = :dash, label = "")  # ref = 0, after dates set
+        push!(panels, p)
+    end
+    nr, nc = panel_grid(length(cfg.horizons))
+    return plot(panels...; layout = (nr, nc), size = (1150, 780),
+                plot_title = "9j — cumulative WIS difference over time, by horizon (log scale; < 0 beats $(ref))",
+                plot_titlefontsize = 11)
+end
+
+"""
+    plot_wis_vs_rt(scores, rt_by_week, cfg; models, scale) -> Plot
+
+Scatter of per-origin log-scale WIS against the England Rt at the forecast **target** week
+(`week_start(origin) + 7h`), one series per model in `models`, **faceted by horizon** (2×2 over
+`cfg.horizons`). Answers "does skill degrade as transmission rises?". `rt_by_week` is the Dict from
+`weekly_national_R()`. A dashed vertical line marks Rt = 1 (the growth/decline threshold).
+"""
+function plot_wis_vs_rt(scores, rt_by_week, cfg;
+                        models::Vector{<:AbstractString} = ["unweighted-negbin|mean",
+                                                            "weighted-hweibull|neighbourhood"],
+                        scale::AbstractString = WIS_SCALE)
+    palette = Dict("unweighted-negbin|mean" => :steelblue,
+                   "weighted-hweibull|neighbourhood" => :purple)
+    panels = Plots.Plot[]
+    for (k, h) in enumerate(cfg.horizons)
+        bdth = @subset(scores.by_model_dt_h, :scale .== scale, :horizon .== h)
+        p = plot(; title = "horizon $h (wk ahead)", titlefontsize = 8,
+                 xlabel = "England Rt at target week (origin + $h wk)", ylabel = "WIS (log scale)",
+                 legend = (k == 1 ? :topleft : false), legendfontsize = 6)
+        for m in models
+            s = @subset(bdth, :model .== m)
+            xs = Float64[]; ys = Float64[]
+            for r in eachrow(s)
+                tw = week_start(r.forecast_date) + Day(7h)
+                haskey(rt_by_week, tw) || continue
+                push!(xs, rt_by_week[tw]); push!(ys, r.wis)
+            end
+            scatter!(p, xs, ys; label = m, ms = 4, msw = 0.5, color = get(palette, m, :grey40))
+        end
+        vline!(p, [1.0]; color = :gray, ls = :dash, label = "Rt = 1")
+        push!(panels, p)
+    end
+    nr, nc = panel_grid(length(cfg.horizons))
+    return plot(panels...; layout = (nr, nc), size = (1150, 780),
+                plot_title = "9j — WIS vs England Rt at target week, by horizon (log scale)",
+                plot_titlefontsize = 11)
+end
+
+"""
     plot_forecast_panels(fc_store, wins, labels4, model_cols, cfg; grid, n) -> Plot
 
 Forecast vs observed at `n` evenly-spaced origins. Each panel: one observed series (the
@@ -1084,6 +1190,48 @@ function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = ci
     nr, nc = panel_grid(length(ps))
     return plot(ps...; layout = (nr, nc), size = (575 * nc, 390 * nr),
                 plot_title = ttl, plot_titlefontsize = 11)
+end
+
+"""
+    plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid; groups) -> Plot
+
+For ONE model `lbl`, a **3×2** grid of the finest age-dependent transmission structure WITH 90%
+CIs: rows = age-bin groups (default the 7 CIS bins split 2/2/3), columns = susceptibility (left)
+and infectivity (right). Each panel plots every bin in its group as a ratio to the pop-weighted
+2-15 baseline (the same denominator as `plot_ratio`/`plot_ratio_bins`) over the rolling origins —
+posterior median line + 5–95% ribbon. Splitting the bins keeps ≤3 overlapping ribbons per panel
+readable, which is exactly why `plot_ratio_bins` drew medians only. Consumes the `susc_bin`/
+`inf_bin` stores from `collect_transmission_structure` (they already carry `lo`/`hi`). A bin whose
+series is all-NaN (missing chain) is skipped.
+"""
+function plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid;
+                               groups = [[1, 2], [3, 4], [5, 6, 7]])
+    cols = palette(:viridis, grid.N)             # age is ordinal → perceptually ordered palette
+    quantities = [("susceptibility", susc_bin), ("infectivity", inf_bin)]
+    panels = Plots.Plot[]
+    for grp in groups                            # rows = age-bin groups; row-major fill ⇒ (sus, inf) per row
+        for (qname, store) in quantities
+            s = store[lbl]
+            p = plot(; title = "$qname — bins $(grid.LAB[first(grp)])…$(grid.LAB[last(grp)])",
+                     titlefontsize = 8, xlabel = "forecast origin", ylabel = "ratio to 2-15",
+                     legend = :topright, legendfontsize = 6, xrotation = 45)
+            # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
+            plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
+            for a in grp
+                m, lo, hi = s.med[:, a], s.lo[:, a], s.hi[:, a]
+                all(isnan, m) && continue
+                plot!(p, origins, m; color = cols[a], lw = 1.6, marker = :circle, ms = 1.5,
+                      markerstrokewidth = 0, label = grid.LAB[a],
+                      ribbon = (m .- lo, hi .- m), fillalpha = 0.15, fillcolor = cols[a])
+            end
+            push!(panels, p)
+        end
+    end
+    return plot(panels...; layout = (length(groups), length(quantities)),
+                size = (575 * length(quantities), 360 * length(groups)),
+                plot_title = "8j — age-dependent susceptibility & infectivity " *
+                             "(ratio to 2-15, 90% CI) — $lbl",
+                plot_titlefontsize = 11)
 end
 
 """
