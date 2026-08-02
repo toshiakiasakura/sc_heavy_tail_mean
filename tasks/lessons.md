@@ -2,6 +2,112 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## τ₀ is per-family and can only be set EMPIRICALLY 2026-08-02 (`framework.jl`, `src/tune_tau0.jl`) (user request)
+
+- **Piironen & Vehtari's τ₀ formula does not apply to this model, and reaching for it would have been
+  wrong.** `τ₀ = p₀/(D−p₀)·σ/√n` is derived for a LINEAR model: it needs a residual scale `σ` and a
+  sample size `n`. A NegBin / hurdle-Weibull likelihood on counts and duration histograms has
+  neither. The user caught this ("this is not a linear regression") before it was acted on.
+- **A prior-predictive Monte Carlo of `m_eff` is well-defined but answers the wrong question.** It
+  was cheap to build (`prior_shrinkage_reference`) and gives a clean τ₀-vs-escape curve — measured
+  E[escape] = 1.8% at τ₀=0.1, 9.8% at τ₀=0.348 — but it describes only the PRIOR. At τ₀=0.1 the
+  fitted τ came back 7–15 prior SDs out, i.e. the likelihood simply overwhelms the prior, so
+  prior-predictive escape says nothing about realised escape. **Measure it from fitted chains.**
+  Keep the prior-predictive band anyway: it is the reference `m_eff` must be read against, because
+  `shrink` is a slab-vs-spike fraction with a NON-ZERO prior baseline (≈0.998 ⇒ `m_eff` ≈ 1 of 49).
+- **One τ₀ cannot serve both degree families.** Measured at origin 2021-05-09 h1 under a shared
+  τ₀=0.1: per-cell multiplier `τ·λ̃` 1.61 (NegBin φ) vs 0.73 (Weibull κ); within-block SD of
+  log-dispersion 0.5–2.4 vs 0.05–0.42. Split into `disp_re_scale_prior_unweighted` / `_weighted` and
+  read ONLY through `disp_tau0_prior(cfg, dm)` — the two are tuned independently and diverge.
+- **The escape-fraction panels are NOT comparable across families.** `shrink = c²/(c²+τ²λ²)` is
+  relative to each fit's own slab, and `c` differed 10× (29.3 negbin vs 2.93 hweibull). So hweibull
+  showed 20× the escape while having *less than half* the absolute RE. Comparing families requires
+  the multiplier `τ·λ̃` or the within-block SD, never the escape fraction.
+- **Tuning a prior scale REQUIRES the cache token to encode it.** `contacts_label` did not, so a
+  refit at a new τ₀ writes the same filename and `fit_or_load_stage1`'s `isfile` short-circuit
+  reloads the previous step — the same footgun as γ_SAR 2026-07-13 and `stage1_pathfinder_runs`
+  2026-07-30, which is now three times. `_tau0_tag` puts both values in the token so steps are
+  non-colliding by construction and stay side by side for comparison.
+- **Knock-on: a load-time `const` token goes stale the moment a prior it encodes becomes tunable.**
+  `CONTACTS_TOKEN` is built from the DEFAULT `FrameworkConfig`, so every helper that receives a `cfg`
+  now defaults to `contacts_label(cfg)` instead; `CONTACTS_TOKEN` is only for helpers with no `cfg`
+  in scope.
+- **A docstring inserted between an existing docstring and its definition breaks the module load**
+  with "cannot document the following expression" — the first docstring binds to the second *string
+  literal*. Cost one full load cycle. When adding a documented helper near another, put it entirely
+  ABOVE the neighbouring docstring, not between it and its function.
+- **`include` in a script resolves relative to the SCRIPT's directory, not `cwd`.** A driver in the
+  scratchpad cannot `include("forecast_utils.jl")` even when run from `src/`; pass the source dir
+  explicitly (`ENV["SRCDIR"]`). Separately, the framework's data paths still require `cwd == src/`,
+  so both have to be right at once.
+
+## Regularised horseshoe on the Stage-1 dispersion RE 2026-08-02 (`joint_model.jl`, `framework.jl`, 10j/11j viz, `inst/3` §4.3) (user request)
+
+- **The composition form is an AD constraint, not style — and three of the four natural ways to write
+  it are wrong.** The RE multiplier is `τ·λ̃ = c·u/√(c²+u²)` with `u = τλ`. Measured with
+  `ReverseDiff.gradient` at the corner cases: the literal eq.-11 `c²λ²/(c²+τ²λ²)` NaNs when `λ²`
+  overflows; an `exp(_softclamp(log(u), …))` guard NaNs **in the gradient** at `u=0`
+  (`d log u/du = 1/u → ∞`) *and* floors the value at 4.7e-14 instead of 0; `c·√w` with
+  `w = u²/(c²+u²)` NaNs in the gradient at `w=0`. Only `c*u/sqrt(c^2+u^2)` is finite in value **and**
+  gradient at both ends (at `u=0`: grad `[0, 0.38, 0, 0]`).
+- **`u = 0` is the corner that matters, and it is the one a smoke test misses.** Under a working
+  horseshoe *most* cells sit at full shrinkage, so a NaN there poisons the whole gradient every
+  iteration — and both rejected guards return a perfectly finite **value** at that point. A "does the
+  model evaluate?" check passes while the fit is dead. Assert `all(isfinite, grad)`, not just
+  `isfinite(logp)`, and assert it AT the full-shrinkage corner.
+- **`_softcap(x, hi) = hi − softplus(hi − x)`, NOT `_softclamp(x, 0, hi)`.** `_softclamp` is only
+  ≈identity *deep* in the interior; near `lo = 0` it distorts —
+  `_softclamp(0.7, 0, 1e6) = softplus(0.7) = 1.10` — which would put a floor of ≈log 2 under λ and
+  destroy the shrinkage the horseshoe exists to provide. The upper-only form is exact there
+  (`1e6 − softplus(1e6 − 0.7) = 0.7`) and inherits the same Inf-safety and ReverseDiff-safety.
+- **`logpdf(TDist, x)` → −Inf once `x²` overflows (`x > 1.34e154`) — but so does `logpdf(Normal, x)`,
+  at exactly the same point.** That is upstream of the composition, shared by every `z`/`z_c`/`z_k`
+  latent already in the model, and NOT fixable by `_softcap`. Don't mistake it for a horseshoe
+  defect; the honest gate asserts the two behave identically there.
+- **A LogDensityFunction built over an UNLINKED VarInfo silently misreads an unconstrained vector.**
+  This cost a full debug cycle: `logdensity_and_gradient(f, x)` returned NaN at *every* point,
+  including a tame one, because `tau`/`c2` were being read as constrained values and landed negative.
+  The model was healthy the whole time (`logjoint` finite, priors finite, moments finite). Build it
+  as `LogDensityFunction(model, DynamicPPL.getlogjoint, link!!(VarInfo(rng, model), model); adtype)`.
+  **When every point fails, suspect the harness before the model.**
+- **`λ = 1` and `c² = s²` are the EXACT prior modes in the unconstrained coordinates**, for any ν and
+  s. For `v = log λ` under half-t_ν: `dlogp/dv = 0 ⇔ ν + e^{2v} = (ν+1)e^{2v} ⇔ λ = 1`. For
+  `w = log c²` under `InvGamma(ν/2, νs²/2)`: `dlogp/dw = 0 ⇔ e^{−w} = 1/s² ⇔ c² = s²`. So pinning
+  them in `_stage1_init` is principled, not a fudge — and it reproduces the pre-horseshoe geometry,
+  which is why the 2026-07-30 `z_init_scale = 0.1` sweep carries over unchanged.
+- **`lam` MUST NOT be initialised from its prior.** `_stage1_init`'s filter is `startswith(name, "z")`,
+  which `lam`/`c2` do not match, so they would have been prior draws. A half-t₃ over 588 cells
+  routinely yields values in the tens — several cells start *inside the slab* with a full-strength RE
+  before the likelihood has said anything. Also note index-range inits would now be doubly wrong:
+  adding `lam`/`c2` and shrinking `tau` shifts every block (`z_kappa` was 415:1002 of 1590).
+- **The tail exponent IS the restoring force — that is why half-t₃ converges better than half-Cauchy.**
+  In `v = log λ` the half-t_ν log-density behaves as `−ν·v`, so measured `dlogp/dv → −3.000` for ν=3
+  vs `−1.000` for ν=1, and `q99.99` drops from 6366 to 28 (227× lighter). Not folklore — check it
+  numerically before claiming a prior "converges better".
+- **`shrink = c²/(c²+τ²λ²)` has a NON-ZERO prior baseline (≈0.998), so `m_eff` has a prior floor of
+  order 1 per 49-cell week, not 0.** Reporting "m_eff = 3" without the prior-predictive band would
+  badly overstate how many cells escaped. `prior_shrinkage_reference` Monte-Carlos it through the
+  identical formulas; every panel draws the band. Also: this quantity is the *slab-vs-spike* fraction,
+  NOT Piironen & Vehtari's `κ_j = 1/(1+nσ⁻²τ²λ̃²)`, which is scaled by data information. Same
+  direction, different denominator — don't quote one as the other.
+- **`generated_quantities` CANNOT read a previous-token chain.** `stage1_moment_draws` runs the
+  *current* `model_degree`; against an `-hd` chain with no `lam`/`c2` and a vector `tau` it errors
+  or, worse, silently re-draws the missing latents from the prior and returns plausible numbers.
+  Every cross-generation comparison must go through the `reconstruct_*` mirrors in `10j_viz_utils.jl`,
+  which is why `_read_disp_chain` keeps an explicit `legacy` branch keyed on the presence of `c2`.
+- **Token `-hd` → `-rhs`; the old files are kept ON PURPOSE.** Both generations coexist on disk by
+  filename, which is what makes the before/after possible with zero refits of the old. Also replaced
+  the seven hard-coded token defaults across `8j`/`10j` with `CONTACTS_TOKEN`/`CONTACTS_TOKEN_HD` in
+  `framework.jl`, so the next bump lands in one place.
+- **Name collision watch:** `model_degree` already binds `c` (the GP level intercept), so the slab
+  scale is `c_slab`. Shadowing it would silently corrupt the contact mean, not error.
+- **`ETp` promotion:** `tau`/`c2` are SCALARS now, so it is `typeof(tau)`/`typeof(c2)`, not `eltype`.
+  Miss one and `K1/K2/G` are allocated `Float64`, cutting the tape for that latent — silently.
+- **Open question flagged, not resolved:** Pathfinder fits a single multivariate normal, and a
+  regularised-horseshoe posterior is spike-and-slab-shaped and heavy-tailed in `log λ` in ~1600–2200
+  dimensions. The λ draws may be closer to the approximation than to the posterior. Confirm with one
+  `cfg.stage1_use_nuts = true` run at the pilot origin before trusting the shrinkage numbers.
+
 ## scoringutils drops metric COLUMNS on drifted quantile levels — and `score_wis` was never once executed 2026-07-30 (`scoring.jl`, `CLAUDE.md`)
 
 - **Context: `score_wis` had ZERO runtime coverage.** R was installed, `scoringutils` was not, so the

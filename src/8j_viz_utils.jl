@@ -27,7 +27,7 @@ Cached Stage-1 GP-chain filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horiz
 ngm token is dropped (Stage 1 is NGM-independent), so both builders of a degree family share it.
 """
 function stage1_chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                           contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                           contacts::AbstractString = CONTACTS_TOKEN,
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, _ = split(lbl, "|")
     joinpath(save_dir, "8j_s1_$(deg)_$(contacts)_$(origin)_h$(h).jld2")
@@ -39,7 +39,7 @@ end
 Cached Stage-2 pooled-result filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horizon `h`.
 """
 function stage2_pooled_path(lbl::AbstractString, origin::Date, h::Integer;
-                            contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                            contacts::AbstractString = CONTACTS_TOKEN,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
     joinpath(save_dir, "8j_s2_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
@@ -81,7 +81,7 @@ Returns `nothing` when the **Stage-2** file is missing/unreadable (skipped origi
 inst/6) has no contact fit at all, but its infection block is still worth plotting.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                                 contacts::AbstractString = CONTACTS_TOKEN,
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     s2p = stage2_pooled_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     s1p = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)

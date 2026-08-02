@@ -43,7 +43,7 @@ Returns `nothing` when the chain file is missing.
 function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                               week_index::Union{Int,Nothing} = nothing,
                               grid,
-                              contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                              contacts::AbstractString = CONTACTS_TOKEN,
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -137,33 +137,20 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
 end
 
 """
-    reconstruct_dispersion_draws(lbl, origin, h; weighted, cfg, grid, week_index=nothing,
-                                 contacts, save_dir) -> ndraws × A × A  |  nothing
+    _read_disp_chain(lbl, origin, h; weighted, week_index, contacts, save_dir, A)
+        -> (; β, Z, Λ, τ, c_slab, wk, lo, hi, D)  |  nothing
 
-Load the cached Stage-1 chain for `(lbl, origin, h)` and rebuild the **per-cell** degree-model
-dispersion for one week, once per posterior draw — the companion to `reconstruct_mu_draws` (same
-chain, same draw order, so slice `d` pairs with μ's draw `d`).
+Shared chain reader behind `reconstruct_dispersion_draws` and `reconstruct_rhs_components`: pulls
+every latent of the dispersion hierarchy out of a cached Stage-1 chain for ONE week, without
+composing them. Split out so the two public functions cannot drift apart.
 
-Mirrors the HIERARCHICAL construction of `_cell_moments!` (joint_model.jl §4.3) exactly — this
-reconstruct-matches-model invariant is the standing rule for every viz mirror here:
-
-    log_disp[i,j] = β[bl] + τ·z[pcode],   bl = 2(block_of(i)−1)+block_of(j),  pcode = (i−1)A+j
-    disp[i,j]     = exp(softclamp(log_disp[i,j], lo, hi))
-
-`weighted` selects the parameter family and its soft-clamp bounds:
-- Weibull (`weighted=true`):  `κ = exp(softclamp(·, −5, 5))`, from `log_kappa` + `z_kappa`
-- NegBin  (`weighted=false`): `k = exp(softclamp(·, −4, 5))`, from `log_k` + `z_k`
-
-τ is the RE scale: `tau[wk]` per week (shared across blocks), or a scalar `tau` when pooled.
-Returns `ndraws × A × A` (was `ndraws × 4` while dispersion was block-only, pre-2026-07-30), so
-callers index `[:, i, j]`, not `[:, bl]`. `week_index` defaults to the last window week (the origin
-week the NGM is frozen at). Returns `nothing` when the chain file is missing.
+Returns `β` (D×4 block means), `Z` (D×A² per-cell random terms), `Λ` (D×A² horseshoe local scales),
+`τ` (D, the global scale), `c_slab` (D, `√c²`), the resolved week `wk` (`nothing` ⇒ pooled chain),
+and the soft-clamp bounds `lo`/`hi` for this degree family.
 """
-function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                      weighted::Bool, cfg, grid,
-                                      week_index::Union{Int,Nothing} = nothing,
-                                      contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
-                                      save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
+                          weighted::Bool, week_index::Union{Int,Nothing},
+                          contacts::AbstractString, save_dir::AbstractString, A::Int)
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
     chn = try
@@ -173,7 +160,6 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
         return nothing
     end
 
-    A      = grid.N
     bbase  = weighted ? "log_kappa" : "log_k"              # block-MEAN param
     zbase  = weighted ? "z_kappa"   : "z_k"                # per-ordered-cell random term
     lo, hi = weighted ? (-4.3, 5.0) : (-4.0, 5.0)          # soft-clamp bounds MIRROR _cell_moments!
@@ -203,37 +189,175 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
         end
     end
 
-    # --- RE scale τ: per-week `tau ~ filldist(HalfNormal, Tn)` ⇒ stored "tau[t]" (select week `wk`);
-    # pooled draws a scalar `tau`. Resolved AFTER `wk` is known — the two regimes store it differently. ---
-    τ = wk === nothing ? vec(Array(chn[:tau])) : vec(Array(chn[Symbol("tau[$wk]")]))
-
-    # --- per-ordered-cell random term z: D × A² ---
-    Z = Matrix{Float64}(undef, D, A * A)
-    if wk === nothing                                      # pooled: 1-D z[p]
-        zw1 = Regex("^" * zbase * raw"\[(\d+)\]$")
-        for n in pnames
-            m = match(zw1, n); m === nothing && continue
-            Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
+    # A 2-D `name[p, t]` block for week `wk`, or the 1-D `name[p]` form in the pooled regime.
+    function _cellmat(base)
+        M = Matrix{Float64}(undef, D, A * A)
+        if wk === nothing
+            w1 = Regex("^" * base * raw"\[(\d+)\]$")
+            hit = false
+            for n in pnames
+                m = match(w1, n); m === nothing && continue
+                M[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])); hit = true
+            end
+            return hit ? M : nothing
         end
-    else                                                   # per-week: z[p, wk]
-        zw = Regex("^" * zbase * raw"\[(\d+)\s*,\s*(\d+)\]$")
+        w2 = Regex("^" * base * raw"\[(\d+)\s*,\s*(\d+)\]$")
+        hit = false
         for n in pnames
-            m = match(zw, n); m === nothing && continue
-            parse(Int, m.captures[2]) == wk &&
-                (Z[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])))
+            m = match(w2, n); m === nothing && continue
+            parse(Int, m.captures[2]) == wk || continue
+            M[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])); hit = true
         end
+        return hit ? M : nothing
     end
 
-    # --- per cell: log_disp = β[bl] + τ·z[pcode], then exp∘softclamp (mirrors _cell_moments!) ---
-    disp = Array{Float64,3}(undef, D, A, A)
+    Z = _cellmat(zbase)
+    Z === nothing && (@warn "no $zbase parameters in chain" path; return nothing)
+
+    # --- Dispersion scales. Two generations coexist on disk and are told apart by `c2`:
+    #   `-rhs` (current): REGULARISED HORSESHOE — scalar `tau`, scalar `c2`, per-cell×week `lam`.
+    #   `-hd`  (legacy) : flat hierarchy — per-week `tau[t]`, no `lam`, no `c2`.
+    # The legacy branch is kept ALIVE ON PURPOSE: it is what lets 11j compare the two generations
+    # without refitting the old ones. `stage1_moment_draws` cannot do this — it runs
+    # `generated_quantities` against the CURRENT `model_degree`, which has no `lam`/`c2` to read and
+    # a scalar `tau` where the legacy chain stores a vector, so it either errors or (worse) silently
+    # re-draws the missing latents from the prior. Cross-token work must go through these mirrors. ---
+    legacy = !any(n -> n == "c2", pnames)
+    if legacy
+        # τ_t per week (`tau[wk]`), or a bare scalar in the legacy pooled regime.
+        τ = wk === nothing ? vec(Array(chn[:tau])) : vec(Array(chn[Symbol("tau[$wk]")]))
+        return (; β, Z, Λ = nothing, τ, c_slab = nothing, wk, lo, hi, D, legacy = true)
+    end
+    Λ = _cellmat("lam")
+    Λ === nothing && (@warn "chain has `c2` but no `lam` — unrecognised parameter space" path;
+                      return nothing)
+    τ      = vec(Array(chn[:tau]))
+    c_slab = sqrt.(vec(Array(chn[:c2])))
+    return (; β, Z, Λ, τ, c_slab, wk, lo, hi, D, legacy = false)
+end
+
+"""
+    _rhs_mult(τ, λ, c) -> τ·λ̃
+
+The regularised-horseshoe RE multiplier, in the SAME form `_cell_moments!` uses — the single source
+of truth for every viz mirror. Keep this and `joint_model.jl`'s composition in lockstep or the
+reconstruct-matches-model check fails.
+"""
+_rhs_mult(τ, λ, c) = (u = τ * _softcap(λ, 1.0e6); c * u / sqrt(c^2 + u^2 + _RHS_DEN_FLOOR))
+
+"""
+    reconstruct_dispersion_draws(lbl, origin, h; weighted, cfg, grid, week_index=nothing,
+                                 contacts, save_dir) -> ndraws × A × A  |  nothing
+
+Load the cached Stage-1 chain for `(lbl, origin, h)` and rebuild the **per-cell** degree-model
+dispersion for one week, once per posterior draw — the companion to `reconstruct_mu_draws` (same
+chain, same draw order, so slice `d` pairs with μ's draw `d`).
+
+Mirrors the REGULARISED-HORSESHOE construction of `_cell_moments!` (joint_model.jl §4.3) exactly —
+this reconstruct-matches-model invariant is the standing rule for every viz mirror here:
+
+    u             = τ·softcap(λ[pcode])
+    log_disp[i,j] = β[bl] + (c·u/√(c²+u²))·z[pcode],  bl = 2(block_of(i)−1)+block_of(j),
+                                                      pcode = (i−1)A+j
+    disp[i,j]     = exp(softclamp(log_disp[i,j], lo, hi))
+
+`weighted` selects the parameter family and its soft-clamp bounds:
+- Weibull (`weighted=true`):  `κ = exp(softclamp(·, −4.3, 5))`, from `log_kappa` + `z_kappa`
+- NegBin  (`weighted=false`): `k = exp(softclamp(·, −4, 5))`, from `log_k` + `z_k`
+
+Returns `ndraws × A × A` (was `ndraws × 4` while dispersion was block-only, pre-2026-07-30), so
+callers index `[:, i, j]`, not `[:, bl]`. `week_index` defaults to the last window week (the origin
+week the NGM is frozen at). Returns `nothing` when the chain file is missing.
+
+**Reads BOTH cache generations.** For a legacy `-hd` chain (`CONTACTS_TOKEN_HD`) the multiplier is
+the flat `τ_t` of that model instead of `τ·λ̃`; everything downstream is identical. That is what
+makes the 11j old-vs-new comparison possible with no refit.
+"""
+function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
+                                      weighted::Bool, cfg, grid,
+                                      week_index::Union{Int,Nothing} = nothing,
+                                      contacts::AbstractString = contacts_label(cfg),
+                                      save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    r = _read_disp_chain(lbl, origin, h; weighted = weighted, week_index = week_index,
+                         contacts = contacts, save_dir = save_dir, A = grid.N)
+    r === nothing && return nothing
+    A = grid.N
+    disp = Array{Float64,3}(undef, r.D, A, A)
     for i in 1:A, j in 1:A
         bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
         pcode = (i - 1) * A + j
-        for d in 1:D
-            disp[d, i, j] = exp(_softclamp(β[d, bl] + τ[d] * Z[d, pcode], lo, hi))
+        for d in 1:r.D
+            mt = r.legacy ? r.τ[d] : _rhs_mult(r.τ[d], r.Λ[d, pcode], r.c_slab[d])
+            disp[d, i, j] = exp(_softclamp(r.β[d, bl] + mt * r.Z[d, pcode], r.lo, r.hi))
         end
     end
     return disp
+end
+
+"""
+    reconstruct_rhs_components(lbl, origin, h; weighted, cfg, grid, week_index=nothing,
+                               contacts, save_dir)
+        -> (; disp, delta, mult, shrink, tau, c_slab)  |  nothing
+
+Every piece of the regularised-horseshoe dispersion RE for one week, per posterior draw. `disp`,
+`delta`, `mult` and `shrink` are `ndraws × A × A`; `tau` and `c_slab` are length-`ndraws` vectors.
+
+- `disp`   — the per-cell dispersion, identical to `reconstruct_dispersion_draws`
+- `delta`  — the RE deviation `δ = (τλ̃)·z`, i.e. cell log-dispersion MINUS its block mean
+- `mult`   — the RE multiplier `τ·λ̃ ∈ [0, c]`; the cell's effective prior SD in log
+- `shrink` — the **shrinkage factor**
+
+      shrink = c²/(c² + τ²λ²) = 1 − (τλ̃/c)²  ∈ [0,1]
+
+  1 ⇒ the cell is fully shrunk onto its block mean; 0 ⇒ it has escaped into the slab.
+
+⚠ `shrink` is the *model-internal* analogue of Piironen & Vehtari's κ_j, **not** the same number.
+The paper's `κ_j = 1/(1 + nσ⁻²τ²λ̃_j²)` measures shrinkage against the DATA information `nσ⁻²`,
+which needs a Gaussian-likelihood approximation this model does not have; ours measures it against
+the SLAB scale `c²`, which is exact and requires no approximation. Both run 0→1 in the same
+direction, so they read the same way, but do not quote one as the other. To relate `shrink` to the
+data, plot it against the per-cell sample size (`plot_shrinkage_vs_n`, 11j_viz_utils.jl).
+
+⚠ `shrink` has a **non-zero prior baseline** — it is ≈0.998 at the prior medians, so
+`m_eff = Σ(1−shrink)` is ≈1 per 49-cell week under the prior alone, not 0. Never read it without
+the prior-predictive reference band (`prior_shrinkage_reference`, 11j_viz_utils.jl).
+
+Returns `nothing` for a missing file or a legacy `-hd` chain — that model has no local scale or
+slab, so `mult`/`shrink` are undefined for it (`reconstruct_dispersion_draws` still reads it).
+"""
+function reconstruct_rhs_components(lbl::AbstractString, origin::Date, h::Integer;
+                                    weighted::Bool, cfg, grid,
+                                    week_index::Union{Int,Nothing} = nothing,
+                                    contacts::AbstractString = contacts_label(cfg),
+                                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    r = _read_disp_chain(lbl, origin, h; weighted = weighted, week_index = week_index,
+                         contacts = contacts, save_dir = save_dir, A = grid.N)
+    r === nothing && return nothing
+    if r.legacy
+        @warn "reconstruct_rhs_components: legacy `-hd` chain has no local scale/slab — \
+               there is no shrinkage to decompose" lbl origin contacts
+        return nothing
+    end
+    A = grid.N
+    disp   = Array{Float64,3}(undef, r.D, A, A)
+    delta  = similar(disp)
+    mult   = similar(disp)
+    shrink = similar(disp)
+    for i in 1:A, j in 1:A
+        bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
+        pcode = (i - 1) * A + j
+        for d in 1:r.D
+            c  = r.c_slab[d]
+            mt = _rhs_mult(r.τ[d], r.Λ[d, pcode], c)
+            δ  = mt * r.Z[d, pcode]
+            mult[d, i, j]   = mt
+            delta[d, i, j]  = δ
+            # = c²/(c²+u²), written via `mult` so it cannot drift from the composition above.
+            shrink[d, i, j] = 1 - (mt / c)^2
+            disp[d, i, j]   = exp(_softclamp(r.β[d, bl] + δ, r.lo, r.hi))
+        end
+    end
+    return (; disp, delta, mult, shrink, tau = r.τ, c_slab = r.c_slab)
 end
 
 """
@@ -250,7 +374,7 @@ track closely wherever the roster count is large, which is the check that the Bi
 """
 function reconstruct_p0_draws(lbl::AbstractString, origin::Date, h::Integer; grid,
                               week_index::Union{Int,Nothing} = nothing,
-                              contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                              contacts::AbstractString = CONTACTS_TOKEN,
                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -290,13 +414,18 @@ end
 """
     reconstruct_tau_draws(lbl, origin, h; contacts, save_dir) -> ndraws × Tn  |  nothing
 
-The dispersion random-effect scale τ_t for EVERY window week (`tau[t]`, one per week, shared
-across the four child/adult blocks — §4.3). Half-Normal, so it is stored untransformed: no
+The dispersion random-effect **global** scale τ. Half-Normal, so it is stored untransformed: no
 exp/softclamp mirror needed here, unlike `reconstruct_dispersion_draws`.
-Returns `nothing` if the chain is missing, or a `ndraws × 1` matrix for a pooled chain (scalar τ).
+
+⚠ The shape tells you which cache generation you are holding:
+- `ndraws × 1` — a current `-rhs` chain. τ is ONE scalar for the whole window; the per-cell,
+  per-week adaptivity lives in `lam` instead (`reconstruct_rhs_components`).
+- `ndraws × Tn` — a legacy `-hd` chain (`CONTACTS_TOKEN_HD`), which stored `tau[t]` per week.
+
+Both are returned as matrices so callers need not branch. Returns `nothing` if the chain is missing.
 """
 function reconstruct_tau_draws(lbl::AbstractString, origin::Date, h::Integer;
-                               contacts::AbstractString = "temporal-gsar-cut-sc-hd-p0-gi",
+                               contacts::AbstractString = CONTACTS_TOKEN,
                                save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
     isfile(path) || return nothing
@@ -323,20 +452,28 @@ end
     plot_tau_over_weeks(lbl, origin, cfg, weeks; h=1, save_dir) -> Plots.Plot | nothing
 
 Posterior median + 90% band of the dispersion RE scale τ_t across the window weeks, against its
-`N⁺(0, cfg.disp_re_scale_prior[2])` prior band (grey).
+`N⁺(0, 0.5)` prior band (grey) — the scale those `-hd` chains were actually fit under, hard-coded
+here rather than read from `cfg`, whose τ₀ has since moved twice and is now per-family.
 
-Read it as the "is the hierarchy earning its place?" check: **τ_t hugging the prior across all
-weeks means the data are not informing the per-cell spread** — the random term is then just prior
-noise flowing into ⟨k²⟩ (and amplified by the neighbourhood NGM). The documented fallbacks are a
-tighter prior scale (0.109, the 2026-07-11 value) or a single scalar τ for the whole window.
-τ_t → 0 recovers the block-only dispersion exactly.
+⚠ **LEGACY PANEL.** Under the regularised horseshoe τ is a single window-level scalar, so there is
+no week axis to plot and this returns `nothing` for a current `-rhs` chain. It is kept because it
+still reads the `-hd` chains on disk, and running it on those answers a question the horseshoe's
+design depends on: *did τ_t actually vary week to week?* If it did, a scalar τ is forcing individual
+cells to absorb a week-level effect, and a `τ_t·λ̃_{ij,t}` (per-week global scale) variant should be
+considered. Use `plot_rhs_globals` for current chains.
 """
 function plot_tau_over_weeks(lbl::AbstractString, origin::Date, cfg, weeks;
                              h::Integer = 1,
-                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    τ = reconstruct_tau_draws(lbl, origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
-    τ === nothing && (@warn "no Stage-1 chain for τ panel" lbl origin; return nothing)
-    Tn  = size(τ, 2)
+                             contacts::AbstractString = CONTACTS_TOKEN_HD,
+                             save_dir::AbstractString = CONTACTS_SAVE_DIR_HD)
+    τ = reconstruct_tau_draws(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    τ === nothing && (@warn "no Stage-1 chain for τ panel" lbl origin contacts; return nothing)
+    Tn = size(τ, 2)
+    if Tn == 1
+        @warn "plot_tau_over_weeks: τ is a scalar in this chain (regularised horseshoe) — \
+               no week axis to plot. Use plot_rhs_globals." lbl contacts
+        return nothing
+    end
     wks = length(weeks) == Tn ? collect(weeks) : collect(1:Tn)
     # `view(...)` function form, NOT the space-form `@view`: in an argument list with further args
     # the macro greedily swallows them (`quantile(@view τ[:, t], 0.05)` → "Invalid use of @view
@@ -344,19 +481,91 @@ function plot_tau_over_weeks(lbl::AbstractString, origin::Date, cfg, weeks;
     med = [median(view(τ, :, t)) for t in 1:Tn]
     lo  = [quantile(view(τ, :, t), 0.05) for t in 1:Tn]
     hi  = [quantile(view(τ, :, t), 0.95) for t in 1:Tn]
-    # half-Normal N⁺(0,σ) prior quantiles: q(p) = σ·Φ⁻¹((1+p)/2)
-    σp  = cfg.disp_re_scale_prior[2]
+    # half-Normal N⁺(0,σ) prior quantiles: q(p) = σ·Φ⁻¹((1+p)/2). The `-hd` chains were fit under
+    # the OLD prior scale 0.5, not the current cfg value — hard-code it so the band is honest.
+    σp  = 0.5
     pri = (med = σp * 0.6744897501960817, lo = σp * 0.06270677794321385, hi = σp * 1.959963984540054)
-    p = plot(; title = "$lbl — dispersion RE scale τ_t (origin $origin, h=$h)", titlefontsize = 9,
-             xlabel = "window week", ylabel = "τ  (log-scale SD of the per-cell RE)",
+    p = plot(; title = "$lbl — LEGACY per-week dispersion RE scale τ_t (origin $origin, h=$h)",
+             titlefontsize = 9,
+             xlabel = "window week", ylabel = "τ_t  (log-scale SD of the per-cell RE)",
              legend = :topright, legendfontsize = 6, xrotation = 45, ylims = (0, max(σp * 2.5, maximum(hi) * 1.1)))
     # Date-valued series FIRST — a leading hline!/hspan! locks a numeric axis and mangles date ticks.
     plot!(p, wks, med; lw = 2, marker = :circle, ms = 3, markerstrokewidth = 0,
           ribbon = (med .- lo, hi .- med), fillalpha = 0.18, label = "posterior median & 90%")
-    plot!(p, wks, fill(pri.med, Tn); lw = 1.2, ls = :dot, color = :grey40, label = "prior median & 90%",
+    plot!(p, wks, fill(pri.med, Tn); lw = 1.2, ls = :dot, color = :grey40, label = "prior median & 90% (σ=0.5)",
           ribbon = (fill(pri.med - pri.lo, Tn), fill(pri.hi - pri.med, Tn)),
           fillalpha = 0.08, fillcolor = :grey60)
     return p
+end
+
+"""
+    plot_rhs_globals(lbl, origin, cfg; h=1, weighted=false, contacts, save_dir) -> Plots.Plot | nothing
+
+The two **window-level** scales of the regularised horseshoe, each as a posterior median + 90%
+interval against its prior: the global shrinkage scale **τ** (`N⁺(0, τ₀)` for THIS family, via
+`disp_tau0_prior`) and the slab scale **c = √c²** (the push-forward of `InverseGamma(ν/2, ν·s²/2)`).
+
+⚠ `weighted` selects the family and therefore the τ prior band — τ₀ is per-family since 2026-08-02.
+Passing the wrong one draws the wrong band and the "is τ being outbid?" read silently inverts. The
+function takes `lbl::String` rather than `dm`, so it cannot infer it; callers loop over `dm` and
+should pass `weighted = is_weighted(dm)`.
+
+The "is the horseshoe earning its place?" check, but note the reading differs from the `-hd` τ_t
+panel it replaces:
+
+- **τ near its prior is expected and harmless.** τ is the *spike* width — the deviation a cell gets
+  when it does NOT escape — and the data have little to say about a width of ≈0.05 in log. The
+  informative quantity is `m_eff` (11j), not τ.
+- **c near its prior means nothing has escaped.** c is informed *only* through escaped cells: while
+  `τλ ≪ c` the multiplier is just `τλ` and does not involve c at all. c on its prior together with
+  `m_eff` on its prior band ⇒ the horseshoe has collapsed to block-only-plus-noise; raise this
+  family's τ₀.
+- **Either posterior pinned at a bound with a tight CI is clamp compression, not certainty** — the
+  γ_SAR≈0.021 episode (`tasks/lessons.md` 2026-07-13) is the precedent.
+
+Returns `nothing` for a missing chain or a legacy `-hd` one (which has no slab).
+"""
+function plot_rhs_globals(lbl::AbstractString, origin::Date, cfg;
+                          h::Integer = 1, weighted::Bool = false,
+                          contacts::AbstractString = contacts_label(cfg),
+                          save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(path) || (@warn "no Stage-1 chain for the globals panel" lbl origin path; return nothing)
+    chn = try
+        load(path, "result")
+    catch err
+        @warn "could not load chain" path err
+        return nothing
+    end
+    pnames = string.(names(chn, :parameters))
+    any(n -> n == "c2", pnames) ||
+        (@warn "chain has no `c2` — legacy `-hd`, no slab to plot" lbl contacts; return nothing)
+    τ = vec(Array(chn[:tau]))
+    c = sqrt.(vec(Array(chn[:c2])))
+
+    q(v) = (median(v), quantile(v, 0.05), quantile(v, 0.95))
+    # half-Normal N⁺(0,σ) prior quantiles: q(p) = σ·Φ⁻¹((1+p)/2)
+    σp = (weighted ? cfg.disp_re_scale_prior_weighted : cfg.disp_re_scale_prior_unweighted)[2]
+    τpri = (σp * 0.6744897501960817, σp * 0.06270677794321385, σp * 1.959963984540054)
+    dslab = InverseGamma(cfg.disp_rhs_slab_df / 2,
+                         cfg.disp_rhs_slab_df * cfg.disp_rhs_slab_scale^2 / 2)
+    cpri = (sqrt(median(dslab)), sqrt(quantile(dslab, 0.05)), sqrt(quantile(dslab, 0.95)))
+
+    function panel(title, post, pri, ylab)
+        pm, plo, phi = post; rm, rlo, rhi = pri
+        pl = plot(; title = title, titlefontsize = 9, ylabel = ylab, legend = :topright,
+                  legendfontsize = 6, xticks = ([1, 2], ["posterior", "prior"]), xlims = (0.5, 2.5))
+        plot!(pl, [1], [pm]; yerror = ([pm - plo], [phi - pm]), seriestype = :scatter,
+              ms = 6, color = :steelblue, markerstrokewidth = 1, label = "median & 90%")
+        plot!(pl, [2], [rm]; yerror = ([rm - rlo], [rhi - rm]), seriestype = :scatter,
+              ms = 6, color = :grey50, markerstrokewidth = 1, label = "")
+        return pl
+    end
+    p1 = panel("global shrinkage scale τ", q(τ), τpri, "τ (log-scale)")
+    p2 = panel("slab scale c = √c²", q(c), cpri, "c (log-scale)")
+    return plot(p1, p2; layout = (1, 2), size = (900, 380),
+                plot_title = "$lbl — horseshoe window-level scales (origin $origin, h=$h)",
+                plot_titlefontsize = 9, left_margin = 5Plots.mm, bottom_margin = 5Plots.mm)
 end
 
 """
