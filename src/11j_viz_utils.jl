@@ -72,10 +72,13 @@ Reads the cached Stage-1 chain `8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2`; i
 emits a warning and returns a single blank panel (graceful, like the other read-only 10j helpers).
 Saves `11j_moment_timeline_<degree>_contactee<lab>_<origin>.png` to `res_dir` and returns the figure.
 `logy=true` switches to a log10 y-axis (offered because the size-biased neighbourhood mean ≥ mean).
+`show_n=true` (default) overlays, on a secondary right axis in each panel, the per-cell sample size
+`n_pos = n_roster·(1−p⁰)` (positive contacts in cell (i,j) per week) as faint gray bars — so the CI
+width can be read against the informative sample size (thin bars under a wide ribbon ⇒ sample-starved).
 """
 function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, cfg::FrameworkConfig,
                               grid, raw, wd; h::Integer = 1, res_dir::AbstractString = "../res",
-                              logy::Bool = false)
+                              logy::Bool = false, show_n::Bool = true)
     A   = grid.N
     lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))     # ngm token irrelevant to Stage 1
     s1p = stage1_chain_path(lbl, origin, h; contacts = contacts_label(cfg))
@@ -106,6 +109,17 @@ function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, 
         plot!(pnl, xdate, nmed; ribbon = (nmed .- nlo, nhi .- nmed), color = :darkorange, lw = 2,
               marker = :circle, ms = 2, fillalpha = 0.12, label = "neighbourhood ⟨k^2⟩/⟨k⟩")
         vline!(pnl, [week_mid(origin)]; color = :gray, ls = :dash, lw = 1, label = "")   # origin t₀
+        if show_n
+            # Per-cell sample size behind the ribbons, on a secondary right axis: n_pos = number of
+            # POSITIVE contacts in cell (i,j) that week = n_roster·(1−p⁰). This is the genuinely
+            # per-cell (j-varying) informative count the second moment — hence the neighbourhood CI —
+            # is estimated from; thin bars under a wide ribbon = the identifiability being sample-starved.
+            npos = [round(Int, apd_h.n[t, i, j] * (1 - apd_h.p0[t, i, j])) for t in 1:length(st.weeks)]
+            ax2  = twinx(pnl)
+            bar!(ax2, xdate, npos; color = :gray, fillalpha = 0.15, linewidth = 0, label = "",
+                 legend = false, ylabel = "n_pos", yguidefontsize = 6, ytickfontsize = 5,
+                 ylims = (0, max(1, maximum(npos)) * 1.05))
+        end
         push!(panels, pnl)
     end
     push!(panels, plot(; framestyle = :none))                     # 8th blank cell fills the 2×4 grid
@@ -113,7 +127,8 @@ function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, 
     fig = plot(panels...; layout = (2, 4), size = (1400, 700),
                left_margin = 6Plots.mm, bottom_margin = 12Plots.mm,
                plot_title = "11j — weekly mean vs neighbourhood degree, contactee $(grid.LAB[j]) — " *
-                            "$(degree_label(dm)) (origin $(origin); h$(h) chain; 90% CI)",
+                            "$(degree_label(dm)) (origin $(origin); h$(h) chain; 90% CI; " *
+                            "gray bars = n_pos = positive contacts/cell/week)",
                plot_titlefontsize = 9)
     savefig(fig, joinpath(res_dir,
             "11j_moment_timeline_$(degree_label(dm))_contactee$(grid.LAB[j])_$(origin).png"))
