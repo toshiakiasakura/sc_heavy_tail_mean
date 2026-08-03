@@ -1,5 +1,5 @@
 # 11j_viz_utils.jl — weekly identifiability of contactee mean vs neighbourhood-mean degree,
-#                    and how the dispersion random term SHRINKS under the regularised horseshoe.
+#                    and the within-block spread of the degree model's dispersion.
 #
 # Read-only diagnostic (no refit, no Stage 2). Two families of figure:
 #
@@ -13,10 +13,9 @@
 #     wobble/CI of the *neighbourhood* line (driven by the second moment, hence by the dispersion
 #     random term) against the *mean* line (level only) isolates that term's contribution.
 #
-# (2) SHRINKAGE. Since 2026-08-02 the dispersion RE is a REGULARISED HORSESHOE (§4.3):
-#         log d_{ij,t} = β[bl,t] + τ·λ̃_{ij,t}·z_{ij,t},   λ̃² = c²λ²/(c² + τ²λ²)
-#     with a window-global τ, a per-cell-per-week local scale λ ~ half-t₃, and a slab c. These panels
-#     show WHERE the shrinkage acts, for BOTH degree families — the NegBin dispersion φ and the
+# (2) DISPERSION SPREAD. Since 2026-08-02 the dispersion is block-linear × week with NO per-cell
+#     term, `log d_{ij,t} = β[bl,t]` (§4.3). `plot_within_block_sd` compares that against the
+#     retained `-hd` chains, for BOTH degree families — the NegBin dispersion φ and the
 #     hurdle-Weibull shape κ (κ is that path's overdispersion parameter: SMALLER κ = heavier tail =
 #     MORE dispersion, so the two families read in opposite directions).
 #
@@ -25,7 +24,7 @@
 # `reconstruct_*` mirrors in 10j_viz_utils.jl, which carry an explicit legacy branch.
 #
 # Companion to 11j_weekly_identifiability.ipynb. Requires 8j_viz_utils.jl (`stage1_chain_path`) and
-# 10j_viz_utils.jl (`reconstruct_rhs_components`, `reconstruct_dispersion_draws`) loaded first, and
+# 10j_viz_utils.jl (`reconstruct_dispersion_draws`) loaded first, and
 # the forecast preamble (`forecast_utils.jl`) for the framework symbols.
 
 using Statistics, Dates, Random
@@ -146,342 +145,58 @@ function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, 
                             "gray bars = n_pos = positive contacts/cell/week)",
                plot_titlefontsize = 9)
     savefig(fig, joinpath(res_dir,
-            "11j_moment_timeline_$(degree_label(dm))$(_tau_tag(cfg, dm))_contactee$(grid.LAB[j])_$(origin).png"))
+            "11j_moment_timeline_$(degree_label(dm))_contactee$(grid.LAB[j])_$(origin).png"))
     return fig
 end
 
 # ======================================================================================
-# Shrinkage of the dispersion random term under the regularised horseshoe (§4.3)
+# Dispersion of the degree model — is there any within-block structure left?
 # ======================================================================================
+#
+# The per-cell dispersion random effect was REMOVED on 2026-08-02 (see joint_model.jl §4.3), so the
+# shrinkage panels that lived here — escape fraction, m_eff, ranked RE, escape-vs-n_pos, and the
+# prior-predictive reference — no longer have a quantity to plot: with `log d_{ij,t} = β[bl,t]` there
+# is no `τ`, no `λ`, no slab `c`, and no deviation `δ` to shrink. They were deleted rather than left
+# returning `nothing`, and are recoverable from commit 7cd11c2.
+#
+# `plot_within_block_sd` below survives them, and is now the VERIFICATION that the RE really is gone:
+# the current generation's within-block SD of log-dispersion must be identically 0.
 
 """
-    _tau_tag(cfg, dm) -> String
+    cell_npos(apd) -> A×A (or Tn×A×A)
 
-Filename suffix naming this figure's τ₀ tuning step, e.g. `"_tau0.005"`. Without it every step
-overwrites the previous one's PNGs and the whole point of a sweep — comparing steps side by side —
-is lost. Mirrors what `_tau0_tag` does for the chain filenames.
-"""
-_tau_tag(cfg::FrameworkConfig, dm::ContactDegreeModel) = string("_tau", disp_tau0_prior(cfg, dm)[2])
-
-"""
-    cell_npos(apd) -> Tn × A × A
-
-Per-cell **informative sample size**: `n_pos = n_roster·(1−p⁰)`, the number of participant-days in
-cell `(i,j)` that week which recorded at least one contact. This is the count the cell's dispersion
-— and hence the second moment `⟨k²⟩` the neighbourhood NGM divides by `⟨k⟩` — is actually estimated
-from, so it is the right x-axis for every "is the shrinkage data-driven?" question.
-
-⚠ `apd.n[t,i,j]` is the ROSTER count and is **invariant in `j`** (`null_contact_level`'s docstring
-states `apd.n[t,i,j] == n_roster[t,i]`), so all of the `j`-variation here enters through the
-empirical zero fraction `(1−p⁰)`. `apd.p0` is the EMPIRICAL zero fraction, not the weighted path's
-fitted `p0f`, so this quantity is identical for both degree models — which is what makes it a fair
-common x-axis for comparing them.
+Per-cell count of participant-days with at least one contact, `n·(1−p⁰)` — the sample size that
+actually informs a cell's dispersion, as opposed to the roster count `n` (which includes the
+all-zero participant-days absorbed by the hurdle). Kept as the natural x-axis for any per-cell
+diagnostic scatter.
 """
 cell_npos(apd) = apd.n .* (1 .- apd.p0)
-
-"""
-    prior_shrinkage_reference(cfg, dm; A=7, nsim=20_000, rng=Random.Xoshiro(1236))
-        -> (; shrink_q, meff_q, mult_q)
-
-Prior-predictive distribution of the shrinkage statistics for ONE degree family (τ₀ is per-family
-since 2026-08-02, via `disp_tau0_prior`), by drawing `τ ~ N⁺(0,τ₀)`,
-`c² ~ InverseGamma(ν/2, νs²/2)` and `λ ~ half-t_df` and pushing them through the *same* formulas the
-posterior panels use. Returns `(median, q05, q95)` triples for the per-cell `shrink`, the per-cell
-multiplier `τλ̃`, and `m_eff = Σ_{ij}(1 − shrink)` over an `A²`-cell week.
-
-**This is not optional decoration.** `shrink = c²/(c²+τ²λ²)` is a slab-vs-spike fraction, so its
-baseline is NOT zero: at the prior medians a typical cell already sits at `shrink ≈ 0.998`, which
-leaves `m_eff` with a prior floor of order 1 per 49-cell week. Reporting "m_eff = 3" without this
-band would badly overstate how many cells have genuinely escaped. Every `m_eff`/`shrink` panel here
-draws it.
-
-⚠ This is the PRIOR only. It cannot be used to *set* τ₀ against an escape target: the fitted
-posterior overwhelmed this prior by 7–15 SDs at τ₀=0.1 (measured 2026-08-02), and Piironen &
-Vehtari's analytic `τ₀ = p₀/(D−p₀)·σ/√n` does not apply here — it assumes a linear model with a
-residual scale σ and sample size n, neither of which a NegBin / hurdle-Weibull likelihood on counts
-and durations has. To choose τ₀, MEASURE the realised escape from fitted chains (`src/tune_tau0.jl`).
-
-Cheap — no chain, no data, milliseconds.
-"""
-function prior_shrinkage_reference(cfg::FrameworkConfig, dm::ContactDegreeModel; A::Int = 7,
-                                   nsim::Int = 20_000, rng = Random.Xoshiro(1236))
-    t0 = disp_tau0_prior(cfg, dm)
-    dτ = truncated(Normal(t0[1], t0[2]); lower = 0)
-    dc = InverseGamma(cfg.disp_rhs_slab_df / 2, cfg.disp_rhs_slab_df * cfg.disp_rhs_slab_scale^2 / 2)
-    dλ = truncated(TDist(cfg.disp_rhs_local_df); lower = 0)
-    ncell = A * A
-    shr  = Vector{Float64}(undef, nsim * ncell)
-    mul  = similar(shr)
-    meff = Vector{Float64}(undef, nsim)
-    k = 0
-    for s in 1:nsim
-        τ = rand(rng, dτ); c = sqrt(rand(rng, dc)); acc = 0.0
-        for _ in 1:ncell
-            λ  = rand(rng, dλ)
-            mt = _rhs_mult(τ, λ, c)                 # the SAME helper the mirrors use
-            sh = 1 - (mt / c)^2
-            k += 1; shr[k] = sh; mul[k] = mt; acc += 1 - sh
-        end
-        meff[s] = acc
-    end
-    q(v) = (median(v), quantile(v, 0.05), quantile(v, 0.95))
-    return (; shrink_q = q(shr), meff_q = q(meff), mult_q = q(mul))
-end
-
-"""
-    _rhs_all_weeks(dm, origin, cfg, grid; h, contacts, save_dir)
-        -> (; shrink, delta, mult, disp, tau, c_slab, Tn) | nothing
-
-`reconstruct_rhs_components` over EVERY window week, stacked as `Tn`-vectors of `D×A×A` arrays.
-`Tn = cfg.smax + cfg.n_fit` by construction (`WeeklyWindow`), so no data reload is needed.
-"""
-function _rhs_all_weeks(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
-                        h::Integer = 1, contacts::AbstractString = contacts_label(cfg),
-                        save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
-    Tn  = cfg.smax + cfg.n_fit
-    out = [reconstruct_rhs_components(lbl, origin, h; weighted = is_weighted(dm), cfg = cfg,
-                                      grid = grid, week_index = t, contacts = contacts,
-                                      save_dir = save_dir) for t in 1:Tn]
-    any(isnothing, out) && return nothing
-    return (; shrink = [o.shrink for o in out], delta = [o.delta for o in out],
-              mult = [o.mult for o in out], disp = [o.disp for o in out],
-              tau = out[1].tau, c_slab = out[1].c_slab, Tn)
-end
-
-_blank(msg) = plot(; framestyle = :none, title = msg, titlefontsize = 9)
-
-"""
-    plot_shrinkage_cells(dm, origin, cfg, grid; h=1, week_index=nothing, contacts, save_dir, res_dir)
-
-7×7 heatmap of the median **escape fraction** `1 − shrink` per ordered cell for one week, with the
-child/adult block boundary drawn — the same geometry as `plot_dispersion_cells` (10j) so the two can
-be read side by side.
-
-Bright = the cell has escaped the global shrinkage into the slab and carries its own dispersion;
-dark = it has been pulled onto its block mean. A uniformly dark grid is the horseshoe's DESIGNED
-default (the spike shrinks everything), so the signal here is a small number of individually bright
-cells — not overall brightness. Contrast with the old flat hierarchy, where within-block variation
-was uniform by construction.
-"""
-function plot_shrinkage_cells(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
-                              h::Integer = 1, week_index::Union{Int,Nothing} = nothing,
-                              contacts::AbstractString = contacts_label(cfg),
-                              save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                              res_dir::AbstractString = "../res")
-    lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
-    wk  = week_index === nothing ? cfg.smax + cfg.n_fit : week_index
-    r = reconstruct_rhs_components(lbl, origin, h; weighted = is_weighted(dm), cfg = cfg,
-                                   grid = grid, week_index = wk, contacts = contacts,
-                                   save_dir = save_dir)
-    r === nothing && return _blank("no horseshoe chain: $(degree_label(dm)) @ $origin")
-    A   = grid.N
-    esc = [median(view(r.shrink, :, i, j)) for i in 1:A, j in 1:A]
-    esc = 1 .- esc
-    sym = is_weighted(dm) ? "κ" : "φ"
-    p = heatmap(1:A, 1:A, esc; c = :viridis, yflip = true, clims = (0, 1),
-                xticks = (1:A, grid.LAB), yticks = (1:A, grid.LAB), xrotation = 45,
-                xlabel = "contactee age group j", ylabel = "participant age group i",
-                title = "$(degree_label(dm)) — escape fraction 1−shrink for $sym (week $wk, origin $origin)",
-                titlefontsize = 9, size = (700, 560), right_margin = 5Plots.mm)
-    # child/adult block boundary (bins 1..cfg.child_bins are "child")
-    b = cfg.child_bins + 0.5
-    vline!(p, [b]; color = :white, lw = 2, label = "")
-    hline!(p, [b]; color = :white, lw = 2, label = "")
-    savefig(p, joinpath(res_dir, "11j_shrinkage_cells_$(degree_label(dm))$(_tau_tag(cfg, dm))_$(origin)_wk$(wk).png"))
-    return p
-end
-
-# Fixed y-range for the escape-fraction panels: 1e-4 … 1, decade ticks. Shared by every τ₀ step so
-# the figures from a sweep can be laid side by side (user request 2026-08-02).
-const _ESC_YLIM   = (1e-4, 1.0)
-# ASCII tick labels on purpose: GR's default font has no glyphs for Unicode superscripts, so
-# "10⁻⁴" renders as tofu boxes in the PNG. Same reason the title below says "tau0", not "τ₀" —
-# the subscript ₀ is missing too, although plain τ/κ/φ/⟨k⟩ render fine.
-const _ESC_YTICKS = ([1e-4, 1e-3, 1e-2, 1e-1, 1e0],
-                     ["10^-4", "10^-3", "10^-2", "10^-1", "10^0"])
-
-"""
-    plot_shrinkage_vs_n(dm, origin, cfg, grid, raw; h=1, contacts, save_dir, res_dir)
-
-**The headline check.** Median escape fraction `1 − shrink` (log y) against the per-cell informative
-sample size `n_pos` (log x) over all `A²×Tn` cell-weeks, coloured by child/adult block, with the
-prior-predictive median drawn as a dashed rule.
-
-If the shrinkage is data-driven the cloud rises with `n_pos`: sample-starved cells sit at the prior
-level (fully shrunk onto their block mean), well-sampled cells escape. **Escape concentrated at LOW
-`n_pos` is the warning sign** — the horseshoe letting prior noise through exactly where there is no
-data, which then flows into `⟨k²⟩` and gets amplified by the neighbourhood NGM. That is the
-pathology 11j exists to detect.
-
-The y-axis is pinned to `1e-4 … 1` with decade ticks across every τ₀ step, so panels from a tuning
-sweep are directly comparable; points below the floor are clamped to it and counted in the title.
-"""
-function plot_shrinkage_vs_n(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid, raw;
-                             h::Integer = 1, contacts::AbstractString = contacts_label(cfg),
-                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                             res_dir::AbstractString = "../res")
-    st = _rhs_all_weeks(dm, origin, cfg, grid; h = h, contacts = contacts, save_dir = save_dir)
-    st === nothing && return _blank("no horseshoe chain: $(degree_label(dm)) @ $origin")
-    apd_h = prepare_degree_data(WeeklyWindow(origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
-                                             horizons = cfg.horizons), cfg;
-                                grid = grid, setting = :all,
-                                df_part_raw = raw.df_part, craw_raw = raw.craw)
-    NP = cell_npos(apd_h)
-    A  = grid.N
-    xs = Dict(b => Float64[] for b in 1:4); ys = Dict(b => Float64[] for b in 1:4)
-    for t in 1:st.Tn, i in 1:A, j in 1:A
-        bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
-        # 0.5 floor so fully-empty cells stay visible on a log axis rather than dropping out
-        push!(xs[bl], max(NP[t, i, j], 0.5))
-        push!(ys[bl], max(1 - median(view(st.shrink[t], :, i, j)), 1e-6))
-    end
-    pri = prior_shrinkage_reference(cfg, dm; A = A)
-    lab = ["child→child", "child→adult", "adult→child", "adult→adult"]
-    col = [:steelblue, :darkorange, :seagreen, :purple]
-    sym = is_weighted(dm) ? "κ" : "φ"
-    # FIXED y-range 1e-4 … 1 with decade ticks. The escape fraction moves by orders of magnitude as
-    # τ₀ is tuned, so an auto-scaled axis silently rescales between steps and makes two figures from
-    # a sweep look alike when they are not — pinning the decades is what makes them comparable.
-    # Points below the floor are CLAMPED to it (so they stay visible at the bottom edge) and COUNTED
-    # in the title rather than silently dropped off-axis.
-    nclip = sum(count(<(_ESC_YLIM[1]), ys[b]) for b in 1:4)
-    for b in 1:4
-        ys[b] = max.(ys[b], _ESC_YLIM[1])
-    end
-    p = plot(; xscale = :log10, yscale = :log10, legend = :bottomright, legendfontsize = 6,
-             xlabel = "n_pos = informative participant-days in cell (log)",
-             ylabel = "escape fraction 1 − shrink (log)",
-             ylims = _ESC_YLIM, yticks = _ESC_YTICKS,
-             title = "$(degree_label(dm)) — $sym escape vs sample size, all $(A*A)×$(st.Tn) cell-weeks " *
-                     "(origin $origin, tau0=$(disp_tau0_prior(cfg, dm)[2])" *
-                     (nclip > 0 ? "; $nclip pts clamped to the 1e-4 floor)" : ")"),
-             titlefontsize = 9, size = (900, 600))
-    for b in 1:4
-        isempty(xs[b]) && continue
-        scatter!(p, xs[b], ys[b]; ms = 3, msw = 0, alpha = 0.55, color = col[b], label = lab[b])
-    end
-    hline!(p, [max(1 - pri.shrink_q[1], _ESC_YLIM[1])]; color = :grey30, ls = :dash, lw = 1.5,
-           label = "prior median escape")
-    savefig(p, joinpath(res_dir, "11j_shrinkage_vs_n_$(degree_label(dm))$(_tau_tag(cfg, dm))_$(origin).png"))
-    return p
-end
-
-"""
-    plot_re_ranked(dm, origin, cfg, grid; h=1, week_index=nothing, contacts, save_dir, res_dir)
-
-The 49 ordered cells' RE deviation `δ = τ·λ̃·z` (posterior median + 90%) for one week, **ranked by
-|median|**, with the slab ceiling `±c` and the spike level `±median(τλ̃)` drawn as reference rules.
-
-This is the spike-and-slab signature: a working regularised horseshoe shows a **flat floor of cells
-pinned near 0 and a handful of spikes reaching toward the ceiling**. A smooth staircase across all 49
-means it has degenerated into a plain hierarchical random effect with no selection. The subtitle
-reports how many cells' 90% CI excludes 0.
-"""
-function plot_re_ranked(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
-                        h::Integer = 1, week_index::Union{Int,Nothing} = nothing,
-                        contacts::AbstractString = contacts_label(cfg),
-                        save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        res_dir::AbstractString = "../res")
-    lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
-    wk  = week_index === nothing ? cfg.smax + cfg.n_fit : week_index
-    r = reconstruct_rhs_components(lbl, origin, h; weighted = is_weighted(dm), cfg = cfg,
-                                   grid = grid, week_index = wk, contacts = contacts,
-                                   save_dir = save_dir)
-    r === nothing && return _blank("no horseshoe chain: $(degree_label(dm)) @ $origin")
-    A = grid.N
-    med = Float64[]; lo = Float64[]; hi = Float64[]; nm = String[]
-    for i in 1:A, j in 1:A
-        v = view(r.delta, :, i, j)
-        push!(med, median(v)); push!(lo, quantile(v, 0.05)); push!(hi, quantile(v, 0.95))
-        push!(nm, "$(grid.LAB[i])→$(grid.LAB[j])")
-    end
-    ord = sortperm(abs.(med); rev = true)
-    med, lo, hi, nm = med[ord], lo[ord], hi[ord], nm[ord]
-    nsig  = count(k -> lo[k] > 0 || hi[k] < 0, eachindex(med))
-    cmed  = median(r.c_slab)
-    spike = median(r.mult)                       # typical τλ̃ across cells & draws
-    sym   = is_weighted(dm) ? "κ" : "φ"
-    p = plot(; legend = :topright, legendfontsize = 6, xrotation = 90, xtickfontsize = 5,
-             xticks = (1:length(med), nm), xlabel = "ordered cell i→j (ranked by |median δ|)",
-             ylabel = "δ = log $sym − block mean",
-             title = "$(degree_label(dm)) — RE deviation ranked, week $wk (origin $origin); " *
-                     "$nsig/$(length(med)) cells' 90% CI excludes 0",
-             titlefontsize = 9, size = (1200, 600), bottom_margin = 14Plots.mm)
-    plot!(p, 1:length(med), med; yerror = (med .- lo, hi .- med), seriestype = :scatter,
-          ms = 3, msw = 0.6, color = :steelblue, label = "median & 90%")
-    hline!(p, [0]; color = :black, lw = 1, label = "")
-    hline!(p, [cmed, -cmed]; color = :firebrick, ls = :dash, lw = 1.2, label = "slab ceiling ±c")
-    hline!(p, [spike, -spike]; color = :grey40, ls = :dot, lw = 1.2, label = "spike ±median(τλ̃)")
-    savefig(p, joinpath(res_dir, "11j_re_ranked_$(degree_label(dm))$(_tau_tag(cfg, dm))_$(origin)_wk$(wk).png"))
-    return p
-end
-
-"""
-    plot_meff_over_weeks(dm, origin, cfg, grid; h=1, contacts, save_dir, res_dir)
-
-Effective number of **unshrunk** cells per window week, `m_eff,t = Σ_{ij}(1 − shrink_{ij,t})`, as a
-posterior median + 90% band over the grey **prior-predictive** band from
-`prior_shrinkage_reference`, against the `A²`-cell ceiling.
-
-The compact "how sparse is the dispersion?" summary. Above the prior band ⇒ the data have genuinely
-singled out cells. Inside it ⇒ the horseshoe has collapsed to block-only-plus-noise and is not
-earning its place (documented fallback: raise this family's τ₀ via `disp_tau0_prior`).
-"""
-function plot_meff_over_weeks(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
-                              h::Integer = 1, contacts::AbstractString = contacts_label(cfg),
-                              save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                              res_dir::AbstractString = "../res")
-    st = _rhs_all_weeks(dm, origin, cfg, grid; h = h, contacts = contacts, save_dir = save_dir)
-    st === nothing && return _blank("no horseshoe chain: $(degree_label(dm)) @ $origin")
-    A = grid.N; D = size(st.shrink[1], 1)
-    med = Float64[]; lo = Float64[]; hi = Float64[]
-    for t in 1:st.Tn
-        me = [sum(1 - st.shrink[t][d, i, j] for i in 1:A, j in 1:A) for d in 1:D]
-        push!(med, median(me)); push!(lo, quantile(me, 0.05)); push!(hi, quantile(me, 0.95))
-    end
-    pri = prior_shrinkage_reference(cfg, dm; A = A)
-    sym = is_weighted(dm) ? "κ" : "φ"
-    p = plot(; legend = :topright, legendfontsize = 6,
-             xlabel = "window week index (1 = earliest lag week)",
-             ylabel = "m_eff = Σ(1 − shrink)",
-             title = "$(degree_label(dm)) — effective unshrunk $sym cells per week (origin $origin, h=$h)",
-             titlefontsize = 9, size = (900, 500))
-    plot!(p, 1:st.Tn, med; ribbon = (med .- lo, hi .- med), lw = 2, marker = :circle, ms = 3,
-          markerstrokewidth = 0, color = :steelblue, fillalpha = 0.18, label = "posterior median & 90%")
-    plot!(p, 1:st.Tn, fill(pri.meff_q[1], st.Tn);
-          ribbon = (fill(pri.meff_q[1] - pri.meff_q[2], st.Tn),
-                    fill(pri.meff_q[3] - pri.meff_q[1], st.Tn)),
-          lw = 1.2, ls = :dot, color = :grey40, fillalpha = 0.10, fillcolor = :grey60,
-          label = "prior-predictive median & 90%")
-    hline!(p, [A * A]; color = :firebrick, ls = :dash, lw = 1, label = "ceiling = $(A*A) cells")
-    savefig(p, joinpath(res_dir, "11j_meff_$(degree_label(dm))$(_tau_tag(cfg, dm))_$(origin).png"))
-    return p
-end
 
 """
     plot_within_block_sd(dm, origin, cfg, grid; h=1, tokens, save_dirs, res_dir)
 
 **Old vs new.** Per week and per child/adult block, the SD of `log(dispersion)` ACROSS the cells of
 that block (posterior median + 90%), one line per cache generation — the flat `-hd` hierarchy versus
-the regularised horseshoe.
+the current no-random-effect model.
 
-This is the direct measurement of what the horseshoe changed: it should COMPRESS within-block spread
-everywhere except in blocks containing a genuinely escaped cell. It works with no refit because both
-generations sit on disk and `reconstruct_dispersion_draws` reads both — this is exactly why that
-function keeps its legacy branch. (It cannot be done through `stage1_moment_draws`, which runs
-`generated_quantities` against the current model only.)
+**This is the verification that the per-cell RE is gone.** The current generation's line must be
+**identically 0** at every week in every block, because `log d_{ij,t} = β[bl,t]` gives every cell in
+a block the same value by construction; the `-hd` line shows the spread the RE used to produce.
+Anything non-zero on the current line means a per-cell term survived the 2026-08-02 revert.
 
-⚠ The two generations differ in **both** token and directory: the `-hd` chains were moved to
+It works with no refit because both generations sit on disk and `reconstruct_dispersion_draws` reads
+both — this is exactly why that function keeps its legacy branch. (It cannot be done through
+`stage1_moment_draws`, which runs `generated_quantities` against the current model only.)
+
+⚠ The two generations differ in **both** token and directory: the `-hd` chains live in
 `dt_intermediate_hierarchical/`. `save_dirs` is parallel to `tokens` for that reason — passing the
 old token against the current `save_dir` silently finds nothing. A missing generation degrades to a
 warning plus that line being omitted.
 
 ⚠ The current-generation token comes from `contacts_label(cfg)`, NOT the `CONTACTS_TOKEN` const.
-Since the token encodes τ₀, the const (built from the DEFAULT `FrameworkConfig` at load time) points
-at whatever τ₀ the default happens to carry — which during tuning is not the step the caller pinned.
-Using it here silently dropped the `-rhs` line from every panel while leaving the `-hd` line intact,
-so the figure looked plausible and merely showed no shrinkage at all.
+Using the const here once silently dropped the current line from every panel while leaving the `-hd`
+line intact, so the figure still rendered with a legend and merely appeared to show no spread at all.
+Keep it as `contacts_label(cfg)`.
 """
 function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
                               h::Integer = 1,
@@ -492,7 +207,7 @@ function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::Framewo
     lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
     A   = grid.N; Tn = cfg.smax + cfg.n_fit
     cols = (:grey40, :steelblue)
-    nice = ("-hd (flat τ_t)", "-rhs (horseshoe)")
+    nice = ("-hd (flat τ_t·z RE)", "current (block only)")
     blab = ["child→child", "child→adult", "adult→child", "adult→adult"]
     panels = Any[]
     for bl in 1:4
@@ -527,8 +242,8 @@ function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::Framewo
     fig = plot(panels...; layout = (2, 2), size = (1100, 700),
                left_margin = 6Plots.mm, bottom_margin = 8Plots.mm,
                plot_title = "$(degree_label(dm)) — within-block spread of log $sym, " *
-                            "flat hierarchy vs regularised horseshoe (origin $origin, h=$h)",
+                            "flat hierarchy vs no random effect (origin $origin, h=$h)",
                plot_titlefontsize = 9)
-    savefig(fig, joinpath(res_dir, "11j_within_block_sd_$(degree_label(dm))$(_tau_tag(cfg, dm))_$(origin).png"))
+    savefig(fig, joinpath(res_dir, "11j_within_block_sd_$(degree_label(dm))_$(origin).png"))
     return fig
 end

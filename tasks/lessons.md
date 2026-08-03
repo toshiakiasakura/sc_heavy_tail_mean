@@ -2,7 +2,69 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## `Meta.parseall` does NOT throw on a syntax error 2026-08-02 (verification tooling)
+
+- Used as a cheap "does this file still parse?" gate after bulk edits, `Meta.parseall(read(f,String))`
+  is **worthless on its own**: it returns an `Expr(:toplevel, …)` whose args contain
+  `Expr(:error, ParseError(...))` nodes, and *returns normally*. Two files with a stray `"""` sailed
+  through a `Meta.parseall(...); println("parses OK")` check and only failed later at `include` time —
+  the same class of false-pass as the scoringutils column check (`nrow > 0` passing with every metric
+  gone). **Assert on the parsed content, not on the absence of an exception:**
+
+  ```julia
+  ex = Meta.parseall(read(f, String))
+  any(a -> a isa Expr && a.head in (:error, :incomplete), ex.args) && error("parse error in $f")
+  ```
+- The bug both times was the same mechanical one: a scripted block replacement whose replacement text
+  ended with `"""` while the retained text began with `"""`, producing an empty docstring `"""\n"""`
+  followed by an orphaned signature line. When splicing around Julia docstrings by line range, check
+  the boundary lines of BOTH the removed and the retained text.
+
+## The per-cell dispersion RE was REMOVED — it is not identifiable here 2026-08-02 (`joint_model.jl` §4.3) (user request)
+
+**Do not re-add a per-age-pair-cell dispersion random effect without reading this.** It has now been
+implemented and withdrawn THREE times (2026-07-11 add+revert same day; 2026-07-30 `-hd` flat
+hierarchy; 2026-08-02 `-rhs` regularised horseshoe). The current model is block-linear × week only,
+`log d_{ij,t} = β[bl,t]`.
+
+- **The horseshoe's τ₀ response is a CLIFF, not a gradient.** Measured at origin 2021-05-09 h1, one
+  fit per step: τ₀=0.1 ⇒ τ posterior 7–15 prior SDs out, slab inflated to c=29.3/2.93 until it never
+  bound, λ never left its init (a plain hierarchical RE wearing horseshoe clothes). τ₀=0.01 ⇒ nominal
+  scale cut ≈4× but realised within-block spread cut only ≈5–12%, because the posterior routes around
+  τ₀ through `z` (implied sd(z) rose 0.55→2.13 negbin, 0.31→1.08 hweibull — `δ = τλ̃z` and `z ~ N(0,1)`
+  is free). τ₀=0.005 ⇒ monotone but modest (−48% c→c to −15% a→a). τ₀=0.001 ⇒ RE extinguished
+  outright (within-block SD 0.000, m_eff 0.00, τ back inside its prior). **There is no setting that
+  selects a few informed cells and shrinks the rest** — which is the entire point of a horseshoe.
+- **The cause is identifiability, not tuning.** 49 ordered cells per week, many of them empty (the
+  per-week hurdle-Weibull cells are frequently p⁰=1 throughout). The data do not inform a per-cell
+  dispersion; the block mean is what the window supports. Reaching for a different prior family, or a
+  per-block/per-week scale, does not change that.
+- **A shrinkage diagnostic that looks reasonable can still be measuring nothing.** The 11j panels
+  rendered fine at every τ₀ — legends, bands, sensible-looking ranked-δ staircases. What exposed the
+  degeneracy was comparing the *realised* within-block SD against the previous generation's, not the
+  shrinkage statistics computed from the fitted horseshoe's own parameters.
+- **The verification that the RE is gone is `plot_within_block_sd`.** The current generation's
+  within-block SD of log-dispersion must be **identically 0** (block-constant by construction), with
+  the retained `-hd` line non-zero beside it. A cheap structural assertion beats eyeballing a map.
+- **Reverting the hierarchy is NOT the same as returning to the pre-hierarchy model.** Commit
+  `9a801db` bundled three independent changes under one token bump — `-hd` (the hierarchy), `-p0`
+  (fitted hurdle p⁰, +588 latents and a Binomial roster term, weighted path only) and `-gi` (the
+  generation interval became sampled `w_mu`/`w_sigma` in Stage 2) — and `0e56fc7` then changed
+  `ref_bin` 1→4 and `susc_inf_sd_prior` **without bumping the token at all**. Only `p0` and `gi` are
+  reflected in the current token `temporal-gsar-cut-sc-p0-gi`. Consequence for the `dt_intermediate_old/`
+  cache (token `temporal-gsar-cut-sc`, a complete 63-origin × 4-horizon × 2-family grid): its
+  **unweighted-negbin Stage 1 targets the same posterior** as the reverted model (NegBin has no
+  hurdle, and its clamp [-4,5] never moved — verified by comparing latent sets, which are identical),
+  but its **hurdle-Weibull Stage 1 does not** (no `p0f`, κ clamp was [-3,3]) and **none of its Stage 2
+  does** (no `w_mu`/`w_sigma`, old `ref_bin`, old prior). Check the parameter names in the chain, not
+  the filename token, when asking whether a cached fit matches the current model.
+- **Bundling unrelated changes into one token bump is the root cause of that mess.** One token
+  component per independent change, and bump it whenever the posterior moves.
+
+
 ## τ₀ is per-family and can only be set EMPIRICALLY 2026-08-02 (`framework.jl`, `src/tune_tau0.jl`) (user request)
+
+> **SUPERSEDED 2026-08-02 (same day):** the horseshoe was removed entirely and `src/tune_tau0.jl` deleted — see the dispersion-RE entry at the top. The methodological point (measure shrinkage from fitted chains; P&V's τ₀ formula does not transfer to a non-linear likelihood) still stands and is why the removal was justified rather than assumed.
 
 - **Piironen & Vehtari's τ₀ formula does not apply to this model, and reaching for it would have been
   wrong.** `τ₀ = p₀/(D−p₀)·σ/√n` is derived for a LINEAR model: it needs a residual scale `σ` and a
@@ -42,6 +104,8 @@ Accumulated gotchas so the same mistake isn't repeated. Newest first.
   so both have to be right at once.
 
 ## Regularised horseshoe on the Stage-1 dispersion RE 2026-08-02 (`joint_model.jl`, `framework.jl`, 10j/11j viz, `inst/3` §4.3) (user request)
+
+> **SUPERSEDED 2026-08-02 (same day):** the horseshoe is no longer in the model — see the dispersion-RE entry at the top. Kept because the AD findings below are general (they apply to ANY global×local×slab composition, and to `_softclamp` vs `_softcap` generally), and because the code is recoverable from commit 7cd11c2.
 
 - **The composition form is an AD constraint, not style — and three of the four natural ways to write
   it are wrong.** The RE multiplier is `τ·λ̃ = c·u/√(c²+u²)` with `u = τλ`. Measured with

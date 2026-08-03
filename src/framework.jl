@@ -117,53 +117,12 @@ Base.@kwdef struct FrameworkConfig
     n_stage2_draws::Int   = 100       # Stage-2 samples kept per Stage-1 draw (the "100 samples each")
     stage1_use_nuts::Bool = false     # Stage-1 sampler: false = Pathfinder (preliminary), true = NUTS (later)
     stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode the sampler, so changing this alone will silently reuse existing chains — delete them if you change it outside a token bump.
-    stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`, and `z_kappa`/`z_k`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (588 + 336 of 1580/2168 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02 (user request): this is the z's OWN PRIOR, so the init is now a draw from the prior like every other latent rather than a deliberately shrunken one. WHY IT CHANGED: at τ₀=0.001 the fitted dispersion block came back with λ median 1.000, c 0.9995 and z SD 0.07 — i.e. every coordinate still sitting at its 0.1-scaled starting point, which is consistent with the RE being genuinely unidentifiable at that τ₀ but INDISTINGUISHABLE from Pathfinder never moving in those coordinates. Starting at the prior scale separates the two: if the RE still collapses from a diffuse start, the collapse is real. PRIOR VALUE 0.1 and its rationale (2026-07-30 sweep): a diffuse start costs DISTANCE — 588 coordinates each up to |2| from neutral under the old `UniformSampler(2)` default — which lengthens the path and lets early LBFGS steps swing τ before the likelihood constrains it; the observed failure then was τ collapsing to exactly 0. Non-centred parameterisation makes z=0 the exactly-neutral start (no RE at all), so a small σ was a mild perturbation off neutral and the RE had to be EARNED. That reasoning still stands as the risk of 1.0 — watch for τ→0 collapse. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting (as was done for the τ₀=0.001 pair on 2026-08-02).
+    stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (336 of 402/990 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
     gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
     gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
-    # --- hierarchical contact-degree dispersion: block mean + REGULARISED HORSESHOE cell RE (§4.3) ---
-    # τ₀ IS PER DEGREE FAMILY (2026-08-02, user request). The two families' dispersion RE sit at very
-    # different scales — measured at origin 2021-05-09 h1 under τ₀=0.1: per-cell multiplier τ·λ̃ was
-    # 1.61 (NegBin φ) vs 0.73 (Weibull κ), and within-block SD of log-dispersion 0.5–2.4 vs 0.05–0.42
-    # — so one shared τ₀ cannot be right for both. Read them via `disp_tau0_prior(cfg, dm)`, never
-    # directly, so the branch lives in exactly one place. Both are `N⁺(mean,sd)` for the GLOBAL
-    # horseshoe scale τ (`tau ~ truncated(Normal(mean,sd); lower=0)`); half-Normal ⇒ already ≥0, so no
-    # exp/softclamp transform. τ is ONE SCALAR FOR THE WHOLE FITTING WINDOW (it was one τ_t per week
-    # before 2026-08-02 — a per-week scale is re-estimated 12× from 49 cells each and lands on
-    # optimiser-path luck; tasks/lessons.md 2026-07-30) and is SHARED across the four child/adult
-    # blocks (a per-block scale sees only that block's cells, and child→child has just 2×2=4).
-    #
-    # TUNING HISTORY (all measured at origin 2021-05-09 h1 via `src/tune_tau0.jl`; pre-horseshoe was
-    # 0.5). Reported as multiplier τ·λ̃ = the per-cell RE size in log, and the within-block SD of
-    # log-dispersion for adult→adult, which is what the RE actually delivers:
-    #   τ₀=0.1   negbin τ·λ̃ 1.588, SD 0.877 | hweibull τ·λ̃ 0.724, SD 0.225
-    #   τ₀=0.01  negbin τ·λ̃ 0.390, SD 0.830 | hweibull τ·λ̃ 0.195, SD 0.211
-    # i.e. a 10× tighter τ₀ cut the nominal scale ≈4× but the REALISED spread only ≈5–12%: the
-    # posterior routes around τ₀ through `z` (implied z SD rose 0.55→2.13 negbin, 0.31→1.08 hweibull),
-    # since δ = τ·λ̃·z and z ~ N(0,1) is free. At τ₀=0.1 the z's were UNDER-dispersed (0.3–0.55) so
-    # their own prior was not resisting at all; by 0.01 they sit at ≈1–2, i.e. the z prior has just
-    # begun to bind. SET TO 0.001 (2026-08-02, user) to push well past that knee — at this scale
-    # holding the same δ needs z ≈ 4–20, which its unit-normal prior charges tens to hundreds of nats
-    # per cell across 588 cells, so this is where the RE should finally give way if it is going to.
-    # WHY 0.1 was abandoned — measured, not assumed: at τ₀=0.1 the posterior τ came back at 1.57
-    # (negbin) / 0.73 (hweibull), i.e. 7–15 prior SDs out, the slab inflated to c=29.3/2.93 until it
-    # never bound, λ never left its init, and the within-block spread was essentially unchanged from
-    # the pre-horseshoe flat hierarchy. The prior was simply being outbid: a posterior τ of 0.73 costs
-    # ≈27 nats at τ₀=0.1 but ≈2665 nats at τ₀=0.01, so 0.01 should actually bite.
-    #
-    # ⚠ τ₀ CANNOT be set from Piironen & Vehtari's τ₀ = p₀/(D−p₀)·σ/√n — that is derived for a LINEAR
-    # model with a residual scale σ and sample size n, neither of which exists for a NegBin /
-    # hurdle-Weibull likelihood on counts and durations. A prior-predictive Monte Carlo of m_eff is
-    # well-defined but describes only the PRIOR, and the pilot showed the likelihood overwhelming the
-    # prior by 7–15 SDs. THE ESCAPE RATE MUST BE MEASURED FROM FITTED CHAINS — use `src/tune_tau0.jl`.
-    # τ→0 recovers the block-only model exactly.
-    disp_re_scale_prior_unweighted::Tuple{Float64,Float64} = (0.0, 0.001) # NegBinAgePair — dispersion φ
-    disp_re_scale_prior_weighted::Tuple{Float64,Float64}   = (0.0, 0.001) # HurdleWeibullAgePair — Weibull shape κ
-    disp_rhs_local_df::Float64 = 3.0   # degrees of freedom of the LOCAL scale's half-Student-t prior, `lam ~ truncated(TDist(df); lower=0)` (scale 1), one per ordered cell × week. SET TO 3, NOT the horseshoe's canonical 1 (= half-Cauchy), on user request 2026-08-02 for Pathfinder/NUTS convergence. The two differ only in tail weight, and the tail is where the sampler geometry is decided: in the unconstrained coordinate y = log λ the restoring gradient is EXACTLY −df (measured: −3.000 for df=3, −1.000 for df=1, at y = 5/10/20), so df=3 pulls a runaway local scale back 3× as hard, and the extreme tail is 227× lighter (q99.99 = 28 vs 6366). This is what stops the large-λ region becoming the flat, gradient-free trap that the κ soft-clamp created on 2026-07-30. Lowering this to 1 restores the textbook horseshoe and its sparser selection, at the cost of that geometry.
-    disp_rhs_slab_scale::Float64 = 1.0 # slab scale `s` in `c² ~ InverseGamma(df/2, df·s²/2)`. SET TO 1 (user, 2026-08-02). This is the CAP on how far an escaped cell's log-dispersion may sit from its block mean: the RE multiplier τ·λ̃ = c·u/√(c²+u²) (u = τλ) is bounded above by c, so |δ| ≤ c·|z| exactly. With s=1 a fully escaped cell at |z|=2 deviates ≈±2.2 in log — a factor ≈9 — which stays well inside the composed value's soft-clamp ([-4.3,5] for log κ, [-4,5] for log φ). That bound is the reason the clamp no longer binds the way it did before the horseshoe (tasks/lessons.md 2026-07-30).
-    disp_rhs_slab_df::Float64  = 4.0   # slab degrees of freedom `ν` in `c² ~ InverseGamma(ν/2, ν·s²/2)` (Piironen & Vehtari 2017 eq. 11); the marginal for a fully ESCAPED cell is t_ν(0, s). 4 is the paper's own default (user-confirmed 2026-08-02). ν→∞ pins c² at s² (a fixed slab, fewest moving parts, no slab-width learning); ν=1 gives a Cauchy slab that barely regularises. NOTE `c² = sqrt`'d in the model without an epsilon — safe because InverseGamma's exp(−νs²/2c²) factor gives an unbounded restoring gradient as c²→0 (in y = log c², dlogp/dy = −ν/2·2 + … → +∞), so c² cannot reach the sqrt's infinite-derivative point. Verify rather than assume: check c²'s 1st percentile in the 10j/11j globals panel.
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
     # --- independent per-bin marginal SD of the relative susc/inf age profile (Stage-2 transmission block; NO cross-bin smoothing) ---
@@ -171,26 +130,6 @@ Base.@kwdef struct FrameworkConfig
     # --- susc/inf reference age bin (the gauge: susc[ref]=inf[ref]≡1, only the A-1 other bins estimated) ---
     ref_bin::Int = 4 # index of the CIS age bin fixed to 1 in the relative susc/inf profile. SET 2026-07-31 to 4 = "25-34" (user request), moved off the former 1 = "2-10": children are an extreme, poorly-identified, antibody-sparse anchor, whereas 25-34 is a large well-mixed adult group (Munday/Davies convention). The NGM likelihood is GAUGE-INVARIANT to this choice (rescaling all susc by c and γ_SAR by 1/c leaves N unchanged), so switching the reference acts ONLY through the priors — which bin is pinned vs. carries the log-offset, and what γ_SAR = N_{ref,ref} anchors to. Because it changes the Stage-2 posterior but the `contacts_label` cache token does not encode it, stale `8j_s2_*` chains must be regenerated after a change (Stage 1 is unaffected — it has no susc/inf).
 end
-
-"""
-    disp_tau0_prior(cfg, dm) -> (mean, sd)
-
-The `N⁺(mean, sd)` prior for the horseshoe's global scale τ, for THIS degree family. The single
-access point for `disp_re_scale_prior_unweighted` / `_weighted` — the model, the 10j/11j prior bands
-and the tuning harness all go through it, so the family branch exists once. Reading the fields
-directly is a bug waiting to happen: the two are tuned independently and diverge.
-"""
-disp_tau0_prior(cfg::FrameworkConfig, dm::ContactDegreeModel) =
-    is_weighted(dm) ? cfg.disp_re_scale_prior_weighted : cfg.disp_re_scale_prior_unweighted
-
-# τ₀ formatted for the cache token. `contacts_label` does not otherwise encode the dispersion priors,
-# so WITHOUT this a tuning refit of the same family writes the SAME filename and
-# `fit_or_load_stage1`'s `isfile` short-circuit silently reloads the stale chain — the exact footgun
-# tasks/lessons.md records twice (γ_SAR 2026-07-13, stage1_pathfinder_runs 2026-07-30). Encoding both
-# values makes every tuning step non-colliding by construction and keeps prior steps side by side on
-# disk for comparison. Dots are fine in these filenames (they already end `.jld2`).
-_tau0_tag(cfg::FrameworkConfig) =
-    string(cfg.disp_re_scale_prior_unweighted[2], "-", cfg.disp_re_scale_prior_weighted[2])
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains. The suffix is a running version
@@ -223,42 +162,47 @@ though `-gi` is a Stage-2-only change. Regenerate the derived 9j caches (`9j_rt_
 `9j_obsrt_*`) and any stored forecast assembly too: the forecast itself changed (per-draw `w`,
 antibody at t₀+h) independently of the chains.
 
-`-hd` → `-rhs` (2026-08-02, user request — the **r**egularised **h**orse**s**hoe). The Stage-1
-dispersion RE keeps its non-centred block-mean + per-cell form but its scale is rebuilt as
-Piironen & Vehtari (2017) eq. 11: `tau` collapses from a length-`Tn` per-week vector to a SINGLE
-window-level scalar, and two new latents appear — `lam` (the per-ordered-cell × week local scale,
-`A²×Tn`, half-t₃) and `c2` (the scalar slab, `InverseGamma(ν/2, νs²/2)`). Stage 1's unconstrained
-dimension goes 1002→1580 (NegBin) and 1590→2168 (hurdle-Weibull). Stage 2 is untouched, but shares
-the token, so its chains are re-keyed too.
+`-hd` → `-rhs` → **NO SUFFIX** (2026-08-02). The per-cell dispersion random effect was briefly a
+regularised horseshoe (`-rhs`, Piironen & Vehtari 2017 eq. 11: window-global `tau`, per-cell-per-week
+`lam`, scalar slab `c2`) and has now been REMOVED ENTIRELY, along with the flat `-hd` hierarchy that
+preceded it. Dispersion is back to the plain block-linear × week array `log_k`/`log_kappa` (`4×Tn`),
+with NO per-cell term: `log d_{ij,t} = β[bl,t]`. Why: measured at origin 2021-05-09 h1 across
+τ₀ ∈ {0.1, 0.01, 0.005, 0.001}, the horseshoe either had its prior outbid by the likelihood (τ landing
+7–15 prior SDs out, the slab inflating until it never bound, λ never leaving its init) or, at 0.001,
+extinguished the RE outright — a cliff rather than a usable shrinkage dial. Stage 1's unconstrained
+dimension goes 1580→402 (NegBin) and 2168→990 (hurdle-Weibull). The token drops `-rhs<τ₀>` and keeps
+`-p0-gi`, which is what distinguishes it from the pre-2026-07-30 `…-sc` generation: the fitted hurdle
+p⁰ and the sampled generation interval are BOTH retained (see `inst/3` §4.2 and the `-gi` note above),
+so `temporal-gsar-cut-sc-p0-gi` is NOT the same model as `temporal-gsar-cut-sc`.
 
-**The `-hd-` artefacts are deliberately RETAINED, in `dt_intermediate_hierarchical/`** (2022 files:
-504 `8j_s1_*`, 1512 `8j_s2_*`, plus the derived `9j_*` caches). Unlike previous bumps this is not a
-"delete the stale files" migration: `src/11j_viz_utils.jl` reads both generations side by side to
-compare the half-Normal RE against the horseshoe. Note they differ in BOTH token and directory, so a
-cross-generation read needs `CONTACTS_TOKEN_HD` **and** `CONTACTS_SAVE_DIR_HD` — passing the token
-alone against the default `save_dir` silently finds nothing. Existing WIS/log scores continue to
-describe the `-hd-` chains until a full refit is run; as of the 2026-08-02 pilot only origin
-2021-05-09 h1 exists under `-rhs`, in `dt_intermediate/`."""
+**Both older generations are RETAINED on disk**: `-hd` in `dt_intermediate_hierarchical/` (2022 files)
+and the pre-hierarchy `…-sc` in `dt_intermediate_old/` (1520 files). The `-hd` set is still read by
+`src/10j_viz_utils.jl`/`11j_viz_utils.jl` to compare "flat hierarchy" against "no hierarchy"; it needs
+`CONTACTS_TOKEN_HD` **and** `CONTACTS_SAVE_DIR_HD` together, since token and directory both differ.
+The `dt_intermediate_old/` set is NOT reusable here even though its Stage 1 also has no RE — its
+hurdle-Weibull Stage 1 lacks `p0f` and used the old κ clamp [-3,3], and all of its Stage 2 predates
+`w_mu`/`w_sigma`, `ref_bin=4` and the `susc_inf_sd_prior` change."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-rhs" * _tau0_tag(cfg) * "-p0-gi"
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi"
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`
 (`stage1_chain_path`, `reconstruct_p0_draws`, `reconstruct_tau_draws`, …), so a token bump lands in
 one place instead of the seven hard-coded copies that previously had to be edited in lockstep.
 Resolves to the per-week (`constant_contacts=false`) regime — the setting every notebook uses.
 
-⚠ It is a load-time constant built from the **default** `FrameworkConfig`, and since 2026-08-02 the
-token encodes τ₀ (`_tau0_tag`). So during τ₀ tuning it goes stale the moment you construct a `cfg`
-with non-default τ₀. Every helper that takes a `cfg` therefore defaults to `contacts_label(cfg)`
-instead of this — prefer that. Use this only where no `cfg` is in scope, and pass `contacts = …`
-explicitly when tuning (see `CONTACTS_TOKEN_HD` for the previous generation)."""
+It is a load-time constant built from the **default** `FrameworkConfig`. The token no longer encodes
+any dispersion prior (it did while the horseshoe's τ₀ was being tuned), so it is stable again — but
+helpers that take a `cfg` still default to `contacts_label(cfg)` rather than this, which stays the
+right habit for any future field that does enter the token. Use this only where no `cfg` is in scope
+(see `CONTACTS_TOKEN_HD` for the previous generation)."""
 const CONTACTS_TOKEN = contacts_label(FrameworkConfig(constant_contacts = false))
 
 """The PREVIOUS generation's token (`-hd`, 2026-07-30 → 2026-08-02): flat hierarchical dispersion
-with a per-week half-Normal τ_t and no horseshoe. Those chains are still on disk and are read side
-by side with `CONTACTS_TOKEN` by the 11j old-vs-new shrinkage comparison, so this is a live constant,
-not a historical note. Only the dispersion mirrors understand it — `stage1_moment_draws` does NOT
-(see `_read_disp_chain`)."""
+with a per-week half-Normal τ_t (and, briefly after it, the `-rhs` horseshoe). Those chains are still
+on disk and are read side by side with `CONTACTS_TOKEN` by `plot_within_block_sd`, which is now the
+"did the RE actually go away" check — the current model's within-block SD of log-dispersion must be
+identically 0 against a non-zero `-hd` line. So this is a live constant, not a historical note. Only
+the dispersion mirrors understand it — `stage1_moment_draws` does NOT (see `_read_disp_chain`)."""
 const CONTACTS_TOKEN_HD = "temporal-gsar-cut-sc-hd-p0-gi"
 
 """Where the `-hd` generation's chains live. They were moved out of `dt_intermediate/` into

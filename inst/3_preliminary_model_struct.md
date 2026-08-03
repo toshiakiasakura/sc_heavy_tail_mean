@@ -375,168 +375,99 @@ case — the guard is still required for $n = 0$ rows, where $p^0$ can reach $1$
 > such. The unweighted NegBin path (§4.1) is untouched — it is not a hurdle, and models its zeros
 > directly.
 
-### 4.3 Dispersion/shape parameterisation (**regularised horseshoe**, 2026-08-02)
+### 4.3 Dispersion/shape parameterisation (**block-linear × week**, reverted 2026-08-02)
 
-The dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) is a **per-age-pair-cell** quantity
-drawn from a **child/adult block** distribution — the analysis plan's
-$\log k^{t}_{xy} \sim \mathcal N\big(\mu^{t}_{k,XY},\ (\sigma^{t}_{k,XY})^2\big)$
-(`inst/analysis_plan_heavy_tail_mean.md`, "Unweighted contact degree distribution estimation"; the
-hand-drawn `inst/media/image4.png`, *"variance is hierarchical"*). Writing $d$ for either family's
-log-parameter, for every ordered cell $(i,j)$ and week $t$:
+The dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) is a **per-child/adult-block**
+quantity, estimated separately each window week. Writing $d$ for either family's log-parameter, for
+every ordered cell $(i,j)$ and week $t$:
 
 $$
-\log d_{ij,t} \;=\; \underbrace{m_{\ell(i,j),\,t}}_{\text{block mean}}
-\;+\; \underbrace{\tau}_{\text{global}} \cdot
-\underbrace{\tilde\lambda_{ij,t}}_{\text{local, regularised}} \cdot
-\underbrace{z_{ij,t}}_{\text{per-cell}},
+\log d_{ij,t} \;=\; m_{\ell(i,j),\,t},
 \qquad
-\tilde\lambda^2_{ij,t} \;=\; \frac{c^2\,\lambda^2_{ij,t}}{c^2 + \tau^2\lambda^2_{ij,t}},
-\qquad z_{ij,t} \sim \mathcal N(0,1),
+m_{\ell,t} \sim \mathcal N(0,\sigma_m^2),
+\qquad
+\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\},
 $$
 
-with the block-linear code $\ell = 2(\beta(i)-1) + \beta(j) \in \{1,2,3,4\}$ (contactor block
-$\times$ contactee block), and
+with the block-linear code $\ell$ running over contactor block $\times$ contactee block, and
+$\sigma_m = 1.0$ for the NegBin dispersion, $0.5$ for the Weibull shape. In code this is
+`log_k ~ filldist(Normal(0, 1.0), 4, Tn)` / `log_kappa ~ filldist(Normal(0, 0.5), 4, Tn)` — a
+$4\times T_n$ array, two-dimensional so `generated_quantities` can reconstruct it (a 3-D `filldist`
+cannot be).
 
-$$
-\lambda_{ij,t} \sim \text{half-}t_{\nu_\lambda}(0,1),\qquad
-c^2 \sim \text{Inv-Gamma}\!\left(\tfrac{\nu_c}{2},\ \tfrac{\nu_c s^2}{2}\right),\qquad
-\tau \sim \mathcal N^{+}(0, \tau_0^2),
-$$
+**All 49 ordered cells inside a block share one value each week.** The index $\ell$ is *directional*
+(child$\to$adult $\ne$ adult$\to$child) and self-pairs $(i,i)$ are included, so the four blocks
+partition the $A^2 = 49$ ordered pairs, not the 28 unordered ones. (Contrast the contact **mean**,
+§5, whose reciprocity construction *is* defined on the 28 unordered pairs.)
 
-with $(\nu_\lambda,\ \nu_c,\ s) = (3,\ 4,\ 1)$ and $\tau_0$ set **per degree family** —
-`cfg.disp_rhs_local_df`, `cfg.disp_rhs_slab_df`, `cfg.disp_rhs_slab_scale`, and
-`disp_tau0_prior(cfg, dm)` selecting `cfg.disp_re_scale_prior_unweighted` (NegBin $\phi$) or
-`cfg.disp_re_scale_prior_weighted` (Weibull $\kappa$). Both are **0.01** as of 2026-08-02; the
-remaining fields are shared. This is the **regularised
-horseshoe** of Piironen & Vehtari (2017, [arXiv:1707.01694](https://arxiv.org/pdf/1707.01694),
-eq. 11): $\tau$ shrinks every cell onto its block mean by default, $\lambda_{ij,t}$ lets an
-individually well-evidenced cell escape, and the slab $c$ caps how far it can go.
+> **This departs from the analysis plan, deliberately.** The plan specifies a per-cell hierarchical
+> variance, $\log k^{t}_{xy} \sim \mathcal N\big(\mu^{t}_{k,XY},\ (\sigma^{t}_{k,XY})^2\big)$
+> (`inst/analysis_plan_heavy_tail_mean.md`, "Unweighted contact degree distribution estimation"; the
+> hand-drawn `inst/media/image4.png`, *"variance is hierarchical"*). It was implemented twice and
+> withdrawn twice — see below. The block mean is what the data actually support.
 
-- **Level 1 — one random term per age-pair cell.** The index runs over the $A^2 = 49$ **ordered**
-  pairs, $p = (i-1)A + j$, not the 28 unordered ones: the four blocks are *directional*
-  (child$\to$adult $\ne$ adult$\to$child), and self-pairs $(i,i)$ are included. (Contrast the contact
-  **mean**, §5, whose reciprocity construction is defined on the 28 *unordered* pairs.) Each cell
-  carries its **own** local scale $\lambda_{ij,t}$, one per cell **per week** — 49 $\times$ $T$.
-- **Level 2 — block mean per block, global scale shared.** The mean $m_{\ell,t}$ is indexed by the
-  block pair (still $4\times T$, unchanged priors), so the four blocks have separately estimated
-  centres. The global scale $\tau$ is **one scalar for the whole fitting window** (8 fit + 4 lag =
-  12 weeks), shared by all four blocks and all weeks.
-- **No level 3.** The block means, $\tau$ and $c^2$ are top-level latents with fixed priors; there is
-  **no** overall hyperprior pooling them.
-- **Non-centred.** The composition above is written out in the model body from a standard-normal
-  $z$; the centred form $\log d \sim \mathcal N(m, (\tau\tilde\lambda)^2)$ is *not* used. The centred
-  version puts a sharp funnel between the scales and their 49 cells, which the Pathfinder/LBFGS path
-  negotiates badly (and NUTS, the intended Stage-1 refinement, worse).
+#### Why the per-cell random effect was removed
 
-Storage shapes are kept $\le$ 2-D — $m$ is $4\times T$, $z$ is $A^2\times T$, $\lambda$ is
-$A^2\times T$, $\tau$ and $c^2$ are scalars — because DynamicPPL's `generated_quantities` cannot
-reconstruct a 3-D `filldist` (see `tasks/lessons.md`). $\tau$ is drawn from a **half-Normal**, so it
-is already non-negative and needs no exponential/soft-clamp transform.
+A per-cell term $\delta_{ij,t}$ lived here from 2026-07-30 to 2026-08-02, in two forms:
 
-Stage-1 unconstrained dimension: **1580** (NegBin) and **2168** (hurdle-Weibull), from
-1002/1590 before ($+588$ for $\lambda$, $+1$ for $c^2$, $-11$ as $\tau$ collapses $T\to1$).
+1. **Flat non-centred hierarchy** (`-hd`, 2026-07-30): $\delta_{ij,t} = \tau_t\,z_{ij,t}$ with one
+   half-Normal scale $\tau_t$ **per week**, shared across blocks, $z \sim \mathcal N(0,1)$.
+2. **Regularised horseshoe** (`-rhs`, 2026-08-02): $\delta_{ij,t} = \tau\,\tilde\lambda_{ij,t}\,z_{ij,t}$
+   with $\tilde\lambda^2 = c^2\lambda^2/(c^2+\tau^2\lambda^2)$, a **window-global** $\tau \sim
+   \mathcal N^+(0,\tau_0^2)$, per-cell-per-week $\lambda \sim \text{half-}t_3(0,1)$ and slab
+   $c^2 \sim \text{Inv-Gamma}(2,2)$ — Piironen & Vehtari (2017,
+   [arXiv:1707.01694](https://arxiv.org/pdf/1707.01694) eq. 11).
 
-> **Why $\tau$ moved from per-week to per-window (2026-08-02, user).** Under the previous
-> `-hd` hierarchy $\tau_t$ was estimated afresh each of the 12 weeks from that week's 49 cells.
-> `tasks/lessons.md` 2026-07-30 records the result: $\tau_t$ medians $\approx 2$ against a prior
-> median of $0.34$, every fitted $\kappa$ pinned on its clamp, and — decisively — a four-way sweep of
-> the $\tau$ prior that came out **non-monotone**, which is optimiser-path luck rather than a
-> posterior. `framework.jl` already named *"a single scalar $\tau$ for the window"* as the documented
-> fallback. The per-cell, per-week adaptivity that $\tau_t$ was carrying now lives in
-> $\lambda_{ij,t}$, where it is a *local* scale that must be earned cell by cell rather than a global
-> width applied to all 49 at once.
->
-> **The assumption is testable and the evidence is already on disk.** The `-hd` chains are retained,
-> and 11j's final cell plots their $\tau_t$ across the window. If $\tau_t$ varies materially week to
-> week, a scalar $\tau$ is forcing individual cells to absorb a *week*-level effect, and a
-> $\tau_t\cdot\tilde\lambda_{ij,t}$ variant (per-week global scale) should be reconsidered.
+The horseshoe was introduced because the flat hierarchy did not shrink: $\tau_t$ was re-estimated 12
+times from 49 cells each and landed on optimiser-path luck (1.59–2.54 for NegBin, 0.62–1.14 for
+hurdle-Weibull at origin 2021-05-09). It was then tuned by **measuring** the realised escape from
+fitted chains across $\tau_0 \in \{0.1,\ 0.01,\ 0.005,\ 0.001\}$ — the analytic route is unavailable
+here, since Piironen & Vehtari's $\tau_0 = p_0/(D-p_0)\cdot\sigma/\sqrt n$ assumes a linear model with
+a residual scale $\sigma$ and sample size $n$, and a NegBin / hurdle-Weibull likelihood on counts and
+durations has neither. What the sweep showed:
 
-> **Why half-$t_3$ and not the canonical half-Cauchy (2026-08-02, user).** The textbook horseshoe
-> uses $\lambda \sim C^{+}(0,1) = $ half-$t_1$. Degrees of freedom 3 keeps the same spike-and-slab
-> shape with a lighter tail, for Pathfinder/NUTS geometry. The tail exponent *is* the restoring
-> force: in the unconstrained coordinate $v = \log\lambda$ the half-$t_\nu$ log-density behaves as
-> $-\nu\cdot v$, so **measured** $d\log p/dv \to -3.000$ for $\nu=3$ versus $-1.000$ for
-> $\nu=1$ — three times the pull-back against a runaway — and the extreme tail is 227$\times$
-> lighter ($q_{99.99} = 28$ vs $6366$). This is what keeps the large-$\lambda$ region
-> *prior-dominated* rather than the flat, gradient-free trap the $\kappa$ soft-clamp created.
+| $\tau_0$ | outcome |
+|---|---|
+| 0.1 | $\tau$ posterior 1.57 / 0.73 — **7–15 prior SDs out**; slab inflated to $c = 29.3/2.93$ until it never bound; $\lambda$ never left its init. Degenerate: a plain hierarchical RE wearing horseshoe clothes. |
+| 0.01 | nominal scale cut $\approx 4\times$, realised within-block spread cut only $\approx 5$–$12\%$: the posterior routed around $\tau_0$ through $z$ (implied $\mathrm{sd}(z)$ rose $0.55\to2.13$ / $0.31\to1.08$). |
+| 0.005 | monotone but modest: within-block SD $-48\%$ (c$\to$c) to $-15\%$ (a$\to$a) for hurdle-Weibull. |
+| 0.001 | RE **extinguished** — within-block SD 0.000, $m_{\text{eff}} = 0.00$, $\tau$ back inside its prior. |
 
-> **The slab is what un-binds the $\kappa$ clamp.** Because $\tau\tilde\lambda = c\,u/\sqrt{c^2+u^2}
-> \le c$ (with $u = \tau\lambda$), the deviation obeys $|\delta| \le c\,|z|$ **exactly**. With
-> $s = 1$ a fully escaped cell at $|z| = 2$ sits $\approx\pm2.2$ in log from its block mean — a
-> factor $\approx 9$ — comfortably inside $[-4.3, 5]$. Prior-implied multiplier $\tau\tilde\lambda$ at
-> the $\lambda$ quantiles $q_{50}/q_{90}/q_{99}/q_{99.99}$ (with $c$, $\tau$ at their prior medians
-> $1.09$, $0.067$): $\approx 0.052 / 0.157 / 0.371 / 0.945$. So the default is *hard* shrinkage
-> ($0.05$ in log $\Rightarrow$ within $\pm10\%$ of the block mean) and an escapee reaches $\approx
-> 0.37$, comparable to the **old** $\tau$ prior's *median*.
+So the response to $\tau_0$ is a **cliff, not a gradient**: there is no setting at which the horseshoe
+selects a few genuinely-informed cells and shrinks the rest. The underlying reason is
+identifiability, not tuning — with 49 ordered cells per week and many of them empty (the per-week
+hurdle-Weibull cells are frequently $p^0 = 1$ throughout), the per-cell dispersion is simply not
+informed by the data. Both forms were therefore removed and the model returned to the block mean.
 
-> **$\tau_0$ is PER FAMILY, and it cannot be set analytically (2026-08-02).**
-> The two families' dispersion REs live at very different scales — measured at origin 2021-05-09 h1
-> under a shared $\tau_0 = 0.1$, the per-cell multiplier $\tau\tilde\lambda$ was $1.61$ (NegBin
-> $\phi$) against $0.73$ (Weibull $\kappa$), and the within-block SD of log-dispersion $0.5$–$2.4$
-> against $0.05$–$0.42$ — so one shared value cannot suit both. `disp_tau0_prior(cfg, dm)` is the
-> single access point; reading the two fields directly is a bug, since they are tuned independently.
->
-> Piironen & Vehtari's $\tau_0 = \frac{p_0}{D-p_0}\cdot\frac{\sigma}{\sqrt n}$ **does not apply
-> here**: it is derived for a linear model with a residual scale $\sigma$ and sample size $n$, and a
-> NegBin / hurdle-Weibull likelihood on counts and durations has neither. A prior-predictive Monte
-> Carlo of $m_{\text{eff}}$ (`prior_shrinkage_reference`) is well-defined but describes only the
-> *prior*, and the pilot showed the likelihood overwhelming that prior by 7–15 SDs. **The realised
-> escape rate must be measured from fitted chains** — `src/tune_tau0.jl` fits one origin per
-> $\tau_0$ step and reports $\tau$, $c$, $\lambda$, the multiplier, escape, $m_{\text{eff}}$,
-> within-block SD and the count of cells whose $\delta$ CI excludes 0.
->
-> Because `contacts_label` now encodes both $\tau_0$ values (`_tau0_tag`), successive tuning steps
-> write distinct filenames and stay side by side on disk — without that, `fit_or_load_stage1`'s
-> `isfile` short-circuit would silently reload the previous step's chain.
+Consequences worth knowing:
 
-#### Numerical form (AD-load-bearing)
+- Stage 1's unconstrained dimension drops to **402** (NegBin) and **990** (hurdle-Weibull), from
+  1580 / 2168 under the horseshoe and 1002 / 1590 under the flat hierarchy.
+- The `-hd` chains are **retained** in `dt_intermediate_hierarchical/` and are still read by
+  `plot_within_block_sd` and `plot_tau_over_weeks` (10j/11j) to document what was given up. The
+  current model's within-block SD of $\log d$ must be **identically 0** — that is the standing
+  verification that the RE is gone.
+- The fitted hurdle $p^0$ (§4.2) and the sampled generation interval (§3.1) were introduced in the
+  *same* commit as the flat hierarchy but are **independent of it and retained**. This is why the
+  cache token is `…-sc-p0-gi` and not the pre-hierarchy `…-sc`: `dt_intermediate_old/` is a genuinely
+  different model, not the same one.
+- The $\kappa$ soft-clamp stays at $[-4.3, 5]$ (see below) even though it was widened *because* of
+  the RE — it is a numerical guard, and its lower bound is a hard floor regardless of what feeds it.
 
-The multiplier is computed as $\tau\tilde\lambda = c\,u/\sqrt{c^2+u^2}$ with
-$u = \tau\cdot\texttt{\_softcap}(\lambda, 10^6)$. This is not a stylistic choice. Measured with
-`ReverseDiff.gradient` at the corner cases ($\checkmark$ = value **and** all partials finite):
+#### Soft-clamping the composed value
 
-| candidate | $u = 0$ exactly | $\lambda = 10^{200}$ | typical |
-|---|---|---|---|
-| $c^2\lambda^2/(c^2+\tau^2\lambda^2)$ — literal eq. 11 | $\checkmark$ | **NaN** ($\infty/\infty$) | $\checkmark$ |
-| $\exp(\texttt{softclamp}(\log u))$ guard | **NaN grad** ($1/u\to\infty$); value floors at $4.7\times10^{-14}$, not 0 | $\checkmark$ | $\checkmark$ |
-| $c\sqrt{w}$, $w = u^2/(c^2+u^2)$ | **NaN grad** ($d\sqrt{w}/dw\to\infty$) | $\checkmark$ | $\checkmark$ |
-| **$c\,u/\sqrt{c^2+u^2}$ + `_softcap`** | $\checkmark$ | $\checkmark$ | $\checkmark$ |
+The log-parameter is soft-clamped (`_softclamp`, not `clamp` — ReverseDiff-safe), keeping the mode
+interior and avoiding Weibull/exponential underflow: $\log\kappa \in [-4.3,5]$, i.e.
+$\kappa \in [0.0136,148]$; $\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$.
 
-The $u = 0$ corner is the one that matters most: under a working horseshoe *most* cells sit there, so
-a NaN at full shrinkage would poison the entire gradient every iteration — and the two rejected
-guards return a perfectly finite **value** there, failing only in the reverse pass. `_softcap(x, hi)
-= hi - \texttt{softplus}(hi - x)` is `_softclamp`'s upper half; the two-sided
-`_softclamp(λ, 0, hi)` must **not** be used, because near $lo = 0$ it distorts
-($\texttt{softclamp}(0.7,0,10^6) = \texttt{softplus}(0.7) = 1.10$), putting a floor of $\approx\log 2$
-under $\lambda$ and destroying the shrinkage.
-
-$c = \sqrt{c^2}$ is taken without an epsilon: Inv-Gamma's $e^{-\nu s^2/2c^2}$ factor gives an
-unbounded restoring gradient as $c^2\to0$, so it cannot reach the `sqrt`'s infinite-derivative point.
-This is asserted in the pilot verification, not assumed.
-
-Note `logpdf(TDist, x)` returns $-\infty$ once $x^2$ overflows ($x > 1.34\times10^{154}$) — but so
-does `logpdf(Normal, x)`, the prior on every existing $z$ latent, at exactly the same point. That is
-upstream of the composition, shared by the whole model, and not something `_softcap` can address.
-
-**Pathfinder initialisation.** `_stage1_init` pins $\lambda = 1$ and $c^2 = s^2$ rather than drawing
-them from their priors. These are the **exact prior modes in the unconstrained coordinates**
-Pathfinder optimises, for any $\nu$ and $s$: for $v = \log\lambda$, $\ d\log p/dv = 0
-\Leftrightarrow \nu + e^{2v} = (\nu+1)e^{2v} \Leftrightarrow \lambda = 1$; for $w = \log c^2$,
-$\ d\log p/dw = 0 \Leftrightarrow e^{-w} = 1/s^2 \Leftrightarrow c^2 = s^2$. A *prior draw* of
-$\lambda$ would be far worse than merely diffuse: half-$t_3$ over 588 cells routinely yields values
-in the tens, putting several cells straight into the slab with a full-strength random effect before
-the likelihood has constrained anything.
-
-The **composed** value is soft-clamped (not the block mean alone), keeping the mode interior and
-avoiding Weibull/exponential underflow: $\log\kappa \in [-4.3,5]$, i.e. $\kappa \in [0.0136,148]$;
-$\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$.
-
-> **$\kappa$ clamp WIDENED $[-3,3]\to[-4.3,5]$, 2026-07-30.** With the per-cell random effect added,
-> the old bound bound *hard*: every fitted $\kappa$ sat exactly on $0.0498$ — the clamp-compression
-> signature — and the flat region it creates let the Stage-1 LBFGS path run away, producing block
-> means near $-441$ (≈900 prior SDs from $\mathcal N(0,0.5)$, i.e. a diverged optimiser rather than a
-> posterior). Widening moves the flat region far enough out that the likelihood keeps steering.
-> The horseshoe's $|\delta| \le c|z|$ bound now keeps the composed value away from it structurally.
+> **$\kappa$ clamp WIDENED $[-3,3]\to[-4.3,5]$ on 2026-07-30, and RETAINED after the RE was removed.**
+> With the per-cell random effect added, the old bound bound *hard*: every fitted $\kappa$ sat exactly
+> on $0.0498$ — the clamp-compression signature — and the flat region it creates let the Stage-1 LBFGS
+> path run away, producing block means near $-441$ (≈900 prior SDs from $\mathcal N(0,0.5)$, i.e. a
+> diverged optimiser rather than a posterior). Widening moves the flat region far enough out that the
+> likelihood keeps steering. It is kept at $[-4.3,5]$ now that the RE is gone because the clamp is a
+> **numerical guard**, not part of the RE, and the floor below binds regardless of what feeds
+> $\log d$; narrowing it back would only re-introduce a binding bound for no benefit.
 >
 > **The floor is $\approx-4.446$, set by $\Gamma(1+2/\kappa)$ — not by $\lambda$.** $\Gamma$ overflows
 > above argument $\approx 171.6$. There are **two** $\Gamma$ calls on this path and the *second* is
@@ -553,51 +484,13 @@ $\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$.
 > The NegBin $\phi$ clamp has no such constraint (its moments are polynomial in $1/\phi$) and is
 > unchanged at $[-4,5]$.
 
-#### Reading the shrinkage (11j)
-
-Per cell and week, the **shrinkage factor** is
-
-$$\text{shrink}_{ij,t} = \frac{c^2}{c^2+\tau^2\lambda^2_{ij,t}} = 1 - \Big(\frac{\tau\tilde\lambda}{c}\Big)^2 \in [0,1],
-\qquad m_{\text{eff},t} = \sum_{ij}\big(1-\text{shrink}_{ij,t}\big),$$
-
-1 meaning fully shrunk onto the block mean and 0 meaning escaped into the slab.
-
-> ⚠ This is the *model-internal* analogue of the paper's $\kappa_j$, **not** the same number. Piironen
-> & Vehtari's $\kappa_j = 1/(1+n\sigma^{-2}\tau^2\tilde\lambda_j^2)$ measures shrinkage against the
-> **data** information $n\sigma^{-2}$, which requires a Gaussian-likelihood approximation this model
-> does not have; ours measures it against the **slab** scale $c^2$, which is exact. Both run 0→1 in
-> the same direction; do not quote one as the other.
-
-> ⚠ **`shrink` has a non-zero prior baseline** ($\approx 0.998$ at the prior medians), so
-> $m_{\text{eff}}$ has a prior floor of order 1 per 49-cell week, **not** 0. `prior_shrinkage_reference`
-> (11j) Monte-Carlos the prior-predictive band through the identical formulas, and every
-> $m_{\text{eff}}$ panel draws it. Quoting $m_{\text{eff}}$ in absolute terms would badly overstate how
-> many cells have genuinely escaped.
-
-11j's panels: the window-level scales vs their priors (`plot_rhs_globals`, 10j); $m_{\text{eff}}$ per
-week vs the prior band (`plot_meff_over_weeks`); the 7$\times$7 escape map
-(`plot_shrinkage_cells`); the ranked RE deviation with the $\pm c$ ceiling (`plot_re_ranked`); escape
-vs per-cell sample size (`plot_shrinkage_vs_n` — the headline check, since escape concentrated at
-*low* $n_{\text{pos}}$ is prior noise leaking in where there is no data); and the old-vs-new
-within-block SD (`plot_within_block_sd`), which reads both cache generations off disk.
-
 > **Deliberate override of the docx.** The plan specifies $\mu_{k,XY} \sim \mathrm{Gamma}(2,1/4)$ and
 > $\sigma_{k,XY} \sim \mathrm{Gamma}(2,1/2)$ — a per-block mean *and* a per-block SD, both with
-> positive support. Three departures: **(i)** the Gamma on the mean would force the block **mean of
-> $\log k$** above zero, i.e. $k > 1$, against the fitted values ($\phi \approx 0.28$,
-> $\kappa \approx 0.9$–$1.0$; `tasks/lessons.md`), so the block means keep their existing Normal
-> priors; **(ii)** the scale is shared across blocks rather than per-block — a per-block scale is
-> estimated from that block's cells alone, and child$\to$child holds only $2\times2 = 4$ ordered
-> cells; **(iii)** the shared scale is a *regularised horseshoe* (global $\times$ local $\times$ slab)
-> rather than a single half-Normal SD. This overrides the usual "docx wins" rule and is recorded as
-> such.
-
-> **Relation to the earlier generations.** A hierarchical dispersion was added on 2026-07-11 and
-> reverted the same day, then restored on 2026-07-30 as the `-hd` model: a per-week half-Normal
-> $\tau_t$ shared across blocks, prior $\mathcal N^{+}(0,0.5^2)$. That generation is the *previous*
-> one, not the current model; its chains remain on disk under `CONTACTS_TOKEN_HD` for the 11j
-> comparison. The slab scale $s = 1$ deliberately reproduces roughly that generation's RE width — but
-> now only for the escaped minority, with everyone else shrunk hard.
+> positive support. Two departures survive the revert: **(i)** the Gamma on the mean would force the
+> block **mean of $\log k$** above zero, i.e. $k > 1$, against the fitted values ($\phi \approx 0.28$,
+> $\kappa \approx 0.9$–$1.0$; `tasks/lessons.md`), so the block means keep Normal priors; **(ii)**
+> there is now no per-block SD at all, the per-cell variation it would govern having been shown
+> unidentifiable. This overrides the usual "docx wins" rule and is recorded as such.
 
 
 ## 5. The contact mean: structural reciprocity and spatio-temporal-GP smoothing
@@ -794,12 +687,11 @@ $r_{p,t} = c_t + R_{p,t}$ (§5), the contact-degree log-likelihood of §4 inject
 $C^\ast_t = $ `contact_star`$(nb, \langle k\rangle_t, \langle k^2\rangle_t, g_t)$. The dispersion is
 **hierarchical per week** (§4.3): the block mean $m_{\ell,t}$ (a $4\times T$ array) and the shared
 scale $\tau_t$ (length $T$) combine with the per-cell standard-normal $z^{d}_{p,t}$ (an $A^2\times T$
-array) as $\log d_{ij,t} = m_{\ell,t} + \tau_t\,z^{d}_{p,t}$, $\ell = 2(\beta(i)-1)+\beta(j)$,
-$p = (i-1)A+j$ — non-centred, and re-drawn each week with **no** temporal smoothing (unlike the mean
-field). The block-mean priors $\mathcal N(0,\sigma_d^2)$ are unchanged from the block-only model, so
-$\tau_t\to 0$ recovers it exactly; the scale takes the half-Normal $\mathcal N^{+}(0,0.5^2)$
-(`disp_re_scale_prior`), whose marginal RE SD of $\approx 0.5$ in log puts a typical cell within
-$\approx[0.37,\,2.7]\times$ its block mean at $\pm2$ SD.
+array) as $\log d_{ij,t} = m_{\ell,t}$, $\ell = 2(\beta(i)-1)+\beta(j)$ — re-drawn each week with
+**no** temporal smoothing (unlike the mean field), and with **no per-cell term**: every ordered cell
+in a block shares that week's value. The block priors are $\mathcal N(0,\sigma_d^2)$ with
+$\sigma_d = 1.0$ (NegBin $\phi$) or $0.5$ (Weibull $\kappa$). A per-cell random effect existed here
+between 2026-07-30 and 2026-08-02 and was removed as unidentifiable (§4.3).
 
 *Stage 2 — transmission block (per-contact $\gamma_{\mathrm{SAR}}$ + reference-normalised susc/inf,
 non-centred; conditions on the fixed $\{C^\ast_t\}$ of one Stage-1 draw):* susceptibility and
@@ -1073,12 +965,12 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
   $\log\gamma_{\mathrm{SAR}}\sim\mathcal N(\log0.1,1.8^2)$ (`gamma_sar_prior`; loosened 2026-07-13 to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$, 90% $\in[0.0052,1.93]$, softclamp $[\log0.001,\log10]$),
-  **hierarchical per-week dispersion** (block mean + shared per-week scale
-  `disp_re_scale_prior` $=\mathcal N^{+}(0,0.5^2)$ + per-cell random term, §4.3),
+  **block-linear per-week dispersion** (a $4\times T_n$ array of block means, no per-cell random
+  term, §4.3),
   **fitted hurdle zero probability** $p^0 \sim \mathrm{Beta}(1,1)$ per cell × week on the weighted
   path (§4.2),
   and **per-week temporally-smoothed contact estimation** (one separable spatio-temporal age-pair GP
-  across the window weeks). The chain-cache `contacts_label` is `"temporal-gsar-cut-sc-hd-p0-gi"` — the
+  across the window weeks). The chain-cache `contacts_label` is `"temporal-gsar-cut-sc-p0-gi"` — the
   `-gsar-cut` tag marks the **two-stage cut** split with per-contact $\gamma_{\mathrm{SAR}}$ and
   **un-normalised** $C^\ast$ (the S̄-normalising `-gnorm` chains, differently-scaled `log_gamma`, are
   disjoint and left on disk); `-sc` the Stage-2 susc/inf soft-clamp; and, added 2026-07-30, `-hd` the

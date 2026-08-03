@@ -33,24 +33,6 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
 _softclamp(x, lo, hi) = lo + _softplus((hi - _softplus(hi - x)) - lo)
 
-# UPPER-ONLY soft bound — `_softclamp`'s outer half, for quantities that are already ≥0 by
-# construction and only need protecting from overflow at the top (the horseshoe local scale `lam`).
-# Inherits both of `_softclamp`'s properties: ReverseDiff-safe (`_softplus` branches on a value,
-# fine on an uncompiled tape) and Inf-safe (`_softplus(-Inf) = 0` ⇒ returns `hi`, never `Inf−Inf`).
-# Its derivative is `σ(hi−x) ∈ (0,1]` — finite everywhere and exactly 1.0 in the interior.
-#
-# ⚠ Do NOT substitute `_softclamp(x, 0, hi)` here. `_softclamp` is only ≈identity *deep* in the
-# interior; near `lo = 0` it distorts badly (`_softclamp(0.7, 0, 1e6) = softplus(0.7) = 1.10`),
-# which would put a floor of ≈log 2 under `lam` and destroy the shrinkage the horseshoe exists to
-# provide. The upper-only form is exact there: `1e6 − softplus(1e6 − 0.7) = 0.7`.
-_softcap(x, hi) = hi - _softplus(hi - x)
-
-# Denominator floor for the regularised-horseshoe multiplier (see `_cell_moments!`). `floatmin`
-# rather than an arbitrary epsilon: it is the smallest normal Float64, so it is the largest value
-# that is guaranteed not to perturb any representable sum of squares, while still making
-# `sqrt(0 + 0 + floor) > 0` so the 0/0 case resolves to 0 instead of NaN.
-const _RHS_DEN_FLOOR = floatmin(Float64)
-
 # Element type of the fitted hurdle p⁰ block, for the `ETp` promotion in `model_degree`.
 # The NegBin path has no p⁰ (it models its zeros directly) and passes `nothing`; `Bool` is the
 # identity for `promote_type` (`promote_type(T, Bool) == T` for every numeric T), so the NegBin
@@ -251,66 +233,41 @@ end
     # per-cell moments (⟨k⟩, ⟨k²⟩, zero factor g) + contact log-likelihood for one week's
     # μ matrix. `didx` indexes the (possibly weekly) degree arrays.
     #
-    # DISPERSION IS HIERARCHICAL WITH A REGULARISED HORSESHOE (§4.3, 2026-08-02). `βv` is the
-    # length-4 block-linear MEAN, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`; `zv` is the per-ordered-cell
-    # random term, indexed `pcode = (i−1)A+j ∈ 1..A²`; `lamv` is that cell's LOCAL scale (half-t₃);
-    # `τ` is the GLOBAL scale, ONE SCALAR for the whole window, shared across blocks AND weeks;
-    # `c_slab = √c²` is the slab scale. Per cell (Piironen & Vehtari 2017, arXiv:1707.01694 eq. 11):
+    # DISPERSION IS BLOCK-LINEAR × WEEK, WITH NO PER-CELL TERM (§4.3). `dispv` is the length-4
+    # block-linear log-dispersion for this week, indexed `bl = 2(bi−1)+bj ∈ {1,2,3,4}`, so every
+    # ordered cell in a child/adult block shares one value:
     #
-    #     λ̃² = c²λ²/(c² + τ²λ²)      log_disp_{ij} = βv[bl] + (τ·λ̃)·zv[pcode]
+    #     log_disp_{ij,t} = dispv[bl(i,j)]
     #
-    # still NON-CENTRED (never `log_disp ~ Normal(β, τλ̃)`: that funnels the scales against their 49
-    # cells and wrecks Pathfinder/NUTS). The global scale shrinks every cell onto its block mean by
-    # default; a cell with enough data raises its own λ to escape; the slab caps how far it can go.
-    # τ is scalar rather than per-week for identifiability — a per-week τ_t is re-estimated 12× from
-    # 49 cells each and landed at ≈2 vs a prior median of 0.34 with a non-monotone response to its own
-    # prior (tasks/lessons.md 2026-07-30). Likewise the scale is shared across blocks, not per-block:
-    # child→child holds only 2×2 = 4 ordered cells.
-    #
-    # ⚠ THE COMPOSITION FORM BELOW IS AD-LOAD-BEARING, NOT COSMETIC. Writing `u = τλ`, the multiplier
-    # is `τ·λ̃ = c·u/√(c²+u²)` — bounded by `c` (so |δ| ≤ c·|z| exactly, which is why the composed
-    # value no longer reaches the soft-clamp) and finite in BOTH value and gradient at `u = 0`, where
-    # a working horseshoe puts most of its cells. Measured with ReverseDiff at the corner cases, the
-    # algebraically-equivalent alternatives are NOT:
-    #     c²λ²/(c²+τ²λ²)        (literal eq. 11) → NaN at λ² overflow (Inf/Inf)
-    #     exp(_softclamp(log u)) guard           → NaN GRADIENT at u=0 (d log u/du = 1/u → ∞),
-    #                                              and the value floors at 4.7e-14 instead of 0
-    #     c·√w, w = u²/(c²+u²)                   → NaN GRADIENT at w=0 (d√w/dw → ∞)
-    # The last two return a perfectly finite VALUE at that corner and fail only in the reverse pass,
-    # so a "does the model evaluate?" smoke test does not catch them. `_softcap` (not `_softclamp` —
-    # see its own comment) guards the remaining hazard: `u²` overflows Float64 above λ = 1.34e154.
-    # The SOFT-CLAMP is still applied to the COMPOSED value, not to βv alone.
+    # A per-cell random effect lived here from 2026-07-30 to 2026-08-02 — first a flat non-centred
+    # hierarchy (`τ_t·z_{ij,t}`), then a regularised horseshoe (Piironen & Vehtari 2017 eq. 11,
+    # `τ·λ̃_{ij,t}·z_{ij,t}`). Both were REMOVED: measured across τ₀ ∈ {0.1, 0.01, 0.005, 0.001} at
+    # origin 2021-05-09 h1, the horseshoe's global scale was simply outbid by the likelihood (τ
+    # landing 7–15 prior SDs out, the slab inflating until it never bound, λ never leaving its init)
+    # until τ₀ = 0.001, where the RE vanished outright — a cliff, not a usable shrinkage dial. With
+    # 49 ordered cells per week and many of them empty, the per-cell dispersion was never identified
+    # by the data; the block mean is what the window actually supports. See tasks/lessons.md.
     #
     # `p0v` (weighted path only; `nothing` for NegBin) is the per-cell FITTED hurdle zero
-    # probability, replacing the empirical `ds.p0` plug-in (§4.2).
+    # probability, replacing the empirical `ds.p0` plug-in (§4.2) — this is RETAINED.
     #
-    # All of βv/zv/lamv/p0v are ≤ 2-D `filldist` slices (`4×Tn`, `A²×Tn`, `A²×Tn`, `A²×Tn`) so
-    # `generated_quantities` can reconstruct them — a 3-D `filldist` cannot be (see build sites).
-    # `τ` and `c_slab` are plain scalars.
-    function _cell_moments!(K1, K2, G, μ, didx, βv, zv, τ, lamv, c_slab, p0v)
-        ll = zero(eltype(K1))                     # NOT eltype(μ): μ carries none of τ/λ/c/p0's types
+    # `dispv` and `p0v` are ≤ 2-D `filldist` slices (`4×Tn`, `A²×Tn`) so `generated_quantities` can
+    # reconstruct them — a 3-D `filldist` cannot be (see build sites).
+    function _cell_moments!(K1, K2, G, μ, didx, dispv, p0v)
+        ll = zero(eltype(K1))                     # NOT eltype(μ): μ carries none of p0's type
         for i in 1:A, j in 1:A
             bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
             pcode = (i - 1) * A + j                        # ordered/directional, self-pairs included
-            u     = τ * _softcap(lamv[pcode], 1.0e6)       # τ·λ, overflow-guarded (identity for λ≪1e6)
-            # `+ _RHS_DEN_FLOOR` is the UNDERFLOW guard, and it is load-bearing. When `c_slab` and
-            # `u` BOTH underflow to 0 the bare form is `0*0/sqrt(0+0)` = 0/0 = **NaN**, and a NaN
-            # here propagates to `κ = exp(_softclamp(NaN, …))` = NaN and aborts the whole fit with
-            # `Weibull: α > 0 not satisfied`. That is reachable: at small τ₀ both `τ = exp(y_τ)` and
-            # `c² = exp(y_c)` underflow to exactly 0 once the LBFGS path drives either log below
-            # ≈−745, which is what killed the hurdle-Weibull fit at τ₀=0.001 (2026-08-02). Adding
-            # floatmin makes the limit come out at the correct value 0 (numerator underflows first),
-            # costs nothing at normal magnitudes (2.2e-308 against an O(1) sum), needs no branch, and
-            # stays AD-clean. The earlier claim that InverseGamma's exp(−νs²/2c²) barrier keeps c²
-            # away from 0 holds in exact arithmetic but NOT in floating point, where exp underflows.
-            mult  = c_slab * u / sqrt(c_slab^2 + u^2 + _RHS_DEN_FLOOR)   # = τ·λ̃ ∈ [0, c_slab]
-            logd  = βv[bl] + mult * zv[pcode]              # block mean + horseshoe-shrunk cell RE
+            logd  = dispv[bl]                              # block-linear × week; no per-cell term
             if is_weighted(dm)
                 # WIDENED 2026-07-30 from [-3,3] (κ∈[0.05,20]) to [-4.3,5] (κ∈[0.0136,148]).
                 # The old bound was binding hard once the per-cell RE was added: every κ sat
                 # exactly on 0.0498, which is the clamp-compression signature, and the flat
                 # region it creates let the LBFGS path run away (block means reached −441, ~900
-                # prior SDs). See tasks/lessons.md 2026-07-30.
+                # prior SDs). See tasks/lessons.md 2026-07-30. RETAINED when the per-cell RE was
+                # removed on 2026-08-02: the clamp is a numerical guard, not part of the RE, and
+                # (b) below is a hard floor regardless of what feeds `logd`. Widening it back would
+                # only re-introduce a binding bound for no benefit.
                 #
                 # ⚠ THE LOWER BOUND IS NUMERICALLY LOAD-BEARING AND −4.45 IS THE HARD FLOOR.
                 # It guards TWO different overflows, and the SECOND one binds much earlier — the
@@ -360,32 +317,21 @@ end
         # pooled: one latent field, one moment set reused for every renewal week.
         c ~ Normal(c0, 3.0)
         z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
-        # REGULARISED-HORSESHOE dispersion scale (§4.3). Global τ: Half-Normal ⇒ already ≥0, so no
-        # exp/softclamp transform, τ = tau directly. Local λ per ordered cell (1-D here — the pooled
-        # regime has no week axis) and one scalar slab c². Same three latents as the per-week branch.
-        _t0 = disp_tau0_prior(cfg, dm)                    # per-family τ₀ (§4.3) — never read the fields directly
-        tau ~ truncated(Normal(_t0[1], _t0[2]); lower = 0)
-        lam ~ filldist(truncated(TDist(cfg.disp_rhs_local_df); lower = 0), A * A)
-        c2  ~ InverseGamma(cfg.disp_rhs_slab_df / 2,
-                           cfg.disp_rhs_slab_df * cfg.disp_rhs_slab_scale^2 / 2)
-        c_slab = sqrt(c2)                                 # hoisted out of the 49-cell loop
+        # Dispersion: block-linear only, no per-cell term (§4.3).
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape MEAN by child/adult block
-            z_kappa ~ filldist(Normal(0, 1), A * A)       # per-ordered-cell shape random term
+            log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
             p0f ~ filldist(Beta(1.0, 1.0), A * A)         # fitted hurdle zero prob (weighted path only)
-            β_disp = vec(log_kappa); z_disp = z_kappa; p0v = p0f
+            β_disp = vec(log_kappa); p0v = p0f
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion MEAN by block
-            z_k ~ filldist(Normal(0, 1), A * A)           # per-ordered-cell dispersion random term
-            β_disp = vec(log_k); z_disp = z_k; p0v = nothing   # NegBin models its zeros directly
+            log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
+            β_disp = vec(log_k); p0v = nothing            # NegBin models its zeros directly
         end
         μ = _mu_matrix(c .+ η .* (Lp * z))
-        ETp = promote_type(eltype(μ), typeof(tau), eltype(lam), typeof(c2), _p0_eltype(p0v))
+        ETp = promote_type(eltype(μ), eltype(β_disp), _p0_eltype(p0v))
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         # vec(2×2)→bl is column-major (off-diagonal blocks bl=2/3 labelled by that order); harmless
-        # as the block-mean prior is exchangeable, and this regime is inactive. See §4.3.
-        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, β_disp, z_disp, tau, lam,
-                                           c_slab, p0v)
+        # as the block prior is exchangeable, and this regime is inactive. See §4.3.
+        Turing.@addlogprob! _cell_moments!(K1, K2, G, μ, nothing, β_disp, p0v)
         K1w = [K1 for _ in 1:Tn]; K2w = [K2 for _ in 1:Tn]; Gw = [G for _ in 1:Tn]
         return (; K1 = K1w, K2 = K2w, G = Gw)
     else
@@ -413,39 +359,28 @@ end
         c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
 
         z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
-        # HIERARCHICAL dispersion with a REGULARISED HORSESHOE (§4.3): block MEAN β (4×Tn,
-        # block-linear rows × week) + per-ordered-cell random term z_disp (A²×Tn), scaled by
-        # τ·λ̃[pcode,t] — a GLOBAL scalar τ (whole window, all blocks, all weeks) times the cell's
-        # own local scale λ, regularised by the slab c². Non-centred:
-        #     log_disp_{ij,t} = β[bl,t] + τ·λ̃[pcode,t]·z_disp[pcode,t]
-        # Everything ≤2-D so generated_quantities can reconstruct it (a 3-D filldist can't be);
-        # `tau` and `c2` are scalars. Dispersion stays per-week iid — it is NOT temporally smoothed,
-        # unlike the mean field, but τ and c² now pool ACROSS weeks, which is what makes the local
-        # scales identifiable from 49×Tn cells rather than 49 per week.
-        _t0 = disp_tau0_prior(cfg, dm)                     # per-family τ₀ (§4.3) — never read the fields directly
-        tau ~ truncated(Normal(_t0[1], _t0[2]); lower = 0)
-        lam ~ filldist(truncated(TDist(cfg.disp_rhs_local_df); lower = 0), A * A, Tn)
-        c2  ~ InverseGamma(cfg.disp_rhs_slab_df / 2,
-                           cfg.disp_rhs_slab_df * cfg.disp_rhs_slab_scale^2 / 2)
-        c_slab = sqrt(c2)                                  # hoisted out of the per-week 49-cell loop
+        # Dispersion: block-linear × week, NO per-cell term (§4.3). `log_k`/`log_kappa` is a 4×Tn
+        # array (block-linear rows × week), so every ordered cell in a child/adult block shares that
+        # week's value:  log_disp_{ij,t} = β[bl,t]. It is per-week iid — NOT temporally smoothed,
+        # unlike the mean field. Everything ≤2-D so generated_quantities can reconstruct it (a 3-D
+        # filldist can't be). The per-cell RE that sat here from 2026-07-30 to 2026-08-02 (flat
+        # hierarchy, then regularised horseshoe) was removed — see `_cell_moments!`.
         if is_weighted(dm)
-            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape MEAN by block-linear × week
-            z_kappa ~ filldist(Normal(0, 1), A * A, Tn)        # per-ordered-cell shape RE × week
+            log_kappa ~ filldist(Normal(0.0, 0.5), 4, Tn)      # shape by block-linear × week
             p0f ~ filldist(Beta(1.0, 1.0), A * A, Tn)          # fitted hurdle zero prob (weighted path only)
-            β_disp = log_kappa; z_disp = z_kappa; p0m = p0f
+            β_disp = log_kappa; p0m = p0f
         else
-            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion MEAN by block-linear × week
-            z_k ~ filldist(Normal(0, 1), A * A, Tn)            # per-ordered-cell dispersion RE × week
-            β_disp = log_k; z_disp = z_k; p0m = nothing        # NegBin models its zeros directly
+            log_k ~ filldist(Normal(0.0, 1.0), 4, Tn)          # dispersion by block-linear × week
+            β_disp = log_k; p0m = nothing                      # NegBin models its zeros directly
         end
         # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
         # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
         # already carries η; don't re-apply it below.
         Fld = η .* (Lp * z * Lt')                          # P×Tn
-        # `tau`/`c2` are SCALARS ⇒ typeof, not eltype. Miss any of these and K1/K2/G are allocated
-        # as Float64, which silently cuts the AD tape for that latent.
-        ETp = promote_type(typeof(c), eltype(Fld), typeof(tau), eltype(lam), typeof(c2),
-                           _p0_eltype(p0m))
+        # Miss any of these and K1/K2/G are allocated as Float64, which silently cuts the AD tape
+        # for that latent. `β_disp` reaches K1/K2/G only through `_cell_moments!`, whose own
+        # `zero(eltype(K1))` then has to carry it — so it must be in this promotion too.
+        ETp = promote_type(typeof(c), eltype(Fld), eltype(β_disp), _p0_eltype(p0m))
         K1w = Vector{Matrix{ETp}}(undef, Tn)               # per-week raw moments (NGM applied downstream)
         K2w = Vector{Matrix{ETp}}(undef, Tn)
         Gw  = Vector{Matrix{ETp}}(undef, Tn)
@@ -455,8 +390,7 @@ end
             μ = _mu_matrix(c_vec[t] .+ @view Fld[:, t])
             # `view(...)` (function form), NOT a space-form `@view a, @view b`: in an argument
             # list the macro greedily swallows the following args ("Invalid use of @view macro").
-            ll += _cell_moments!(K1, K2, G, μ, t, view(β_disp, :, t), view(z_disp, :, t),
-                                 tau, view(lam, :, t), c_slab,
+            ll += _cell_moments!(K1, K2, G, μ, t, view(β_disp, :, t),
                                  p0m === nothing ? nothing : view(p0m, :, t))
             K1w[t] = K1; K2w[t] = K2; Gw[t] = G           # fresh matrices per week (not reused buffers)
         end
@@ -594,27 +528,22 @@ stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
 
 Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vector.
 
-Every latent is drawn from its prior *except*:
+Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
+variable whose name starts with `z` (`z`, `z_c`) — which are drawn from `N(0, z_scale²)` instead of
+`N(0,1)`. These dominate the parameter space (336 of 402/990 unconstrained coordinates) and are only
+weakly identified, so where the path starts largely decides where it ends.
 
-- the standard-normal non-centred random terms — any variable whose name starts with `z` (`z`,
-  `z_c`, `z_kappa`/`z_k`) — which are drawn from `N(0, z_scale²)` instead of `N(0,1)`;
-- the **regularised-horseshoe scales** `lam` and `c2` (§4.3), which are PINNED at their neutral
-  values (`lam = 1`, the half-t's own scale; `c2 = s²`, the slab's centre) rather than prior-drawn.
-  This is not tidying: `lam`'s prior is a half-t₃, so a diffuse draw hands LBFGS 588 local scales
-  spanning several orders of magnitude before the likelihood has constrained anything — the same
-  "where the path STARTS largely decides where it ends" failure `stage1_z_init_scale` exists to
-  prevent, but worse because the tail is heavy. Starting at `λ = 1` with `z ≈ 0` makes the RE
-  approximately neutral in every cell, so any escape has to be EARNED from the data.
+The name filter is a **prefix**, not a fixed list, so it automatically covers any future `z*` block;
+it also covered the dispersion RE's `z_kappa`/`z_k` while that existed (2026-07-30 → 2026-08-02).
 
-Returns `nothing` when `z_scale ≤ 0`, which leaves Pathfinder on its own `UniformSampler(2)`
-default (and with it the heavy-tailed `lam` draw — so `z_scale ≤ 0` is now a strictly worse start
-than it was before the horseshoe, not merely a more diffuse one).
+Returns `nothing` when `z_scale ≤ 0`, which leaves Pathfinder on its own `UniformSampler(2)` default
+(U(-2,2) per unconstrained coordinate).
 
 Built by round-tripping a `NamedTuple` through `InitFromParams` + `link!!` rather than by writing
-into index ranges of the flat vector. The ranges are contiguous today (measured: `z_kappa` is
-415:1002 of 1590) but that is an implementation detail of DynamicPPL's variable ordering — it would
-shift the moment a latent is added, reordered, or made conditional, and silently initialise the
-wrong block. The named round-trip cannot go wrong that way.
+into index ranges of the flat vector. The ranges happen to be contiguous, but that is an
+implementation detail of DynamicPPL's variable ordering — it would shift the moment a latent is
+added, reordered, or made conditional, and silently initialise the wrong block. The named round-trip
+cannot go wrong that way.
 
 Note these `z`s are identity-transformed under `link!!` (a standard Normal is already
 unconstrained), so the requested SD is the SD *in the space Pathfinder optimises*, not merely on
@@ -627,11 +556,6 @@ function _stage1_init(model, z_scale::Real, rng, cfg::FrameworkConfig)
     zk = filter(k -> startswith(string(k), "z"), keys(nt))
     isempty(zk) && return nothing
     vals = NamedTuple{Tuple(zk)}(Tuple(z_scale .* randn(rng, size(nt[k])) for k in zk))
-    # Horseshoe scales pinned to neutral (see docstring). Guarded by `haskey` so this function still
-    # works against a model without them (the pre-2026-08-02 parameter space, and any future
-    # dispersion variant) rather than throwing.
-    haskey(nt, :lam) && (vals = merge(vals, (; lam = fill!(similar(nt[:lam]), one(eltype(nt[:lam]))))))
-    haskey(nt, :c2)  && (vals = merge(vals, (; c2 = cfg.disp_rhs_slab_scale^2)))
     _, vi2 = DynamicPPL.init!!(rng, model, DynamicPPL.VarInfo(),
                                DynamicPPL.InitFromParams(merge(nt, vals)))
     # `collect(Float64, …)` is REQUIRED, not tidying: the InitFromParams round-trip yields a
@@ -701,8 +625,8 @@ Uses **multi-path** Pathfinder when `cfg.stage1_pathfinder_runs > 1` (see `_fit_
 so the NUTS-init branch below is unaffected.
 
 Single-path additionally starts from an explicit `_stage1_init(model, z_init_scale, rng, cfg)`: all
-latents drawn from their priors except the non-centred `z*` blocks, drawn from `N(0, z_init_scale²)`,
-and the horseshoe scales `lam`/`c2`, pinned to neutral (see `_stage1_init`).
+latents drawn from their priors except the non-centred `z*` blocks, drawn from `N(0, z_init_scale²)`
+(see `_stage1_init`).
 Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` default. The init is
 `rng`-dependent, so distinct seeds still explore distinct starting points.
 """
