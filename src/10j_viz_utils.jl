@@ -1163,7 +1163,7 @@ function make_susc_inf_fig(combos, labels4, model_cols, origin::Date, cfg, grid;
                layout = (1, 2), size = (1150, 500),
                left_margin = 9Plots.mm, bottom_margin = 12Plots.mm,
                plot_title = "10j — relative age-specific susceptibility & infectivity " *
-                            "(ref bin \"$(grid.LAB[1])\" = 1), median + 90%, origin $(origin) (h$(h))",
+                            "(ref bin \"$(grid.LAB[cfg.ref_bin])\" = 1), median + 90%, origin $(origin) (h$(h))",
                plot_titlefontsize = 10)
     savefig(fig, joinpath(res_dir, "10j_susc_inf_$(origin).png"))
     return fig

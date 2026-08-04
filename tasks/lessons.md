@@ -1036,3 +1036,47 @@ hierarchy; 2026-08-02 `-rhs` regularised horseshoe). The current model is block-
   **Pearson ≈ 0.36–0.40 / Spearman ≈ 0.36–0.44** (n=63 origins, h=1) — and the RAW observed weekly means score
   the same (0.359), so that ceiling is the contact data's, not any modelling choice's. Contacts swing 0.5–2.8×
   while R stays in 0.75–1.33; the gaps line up with Alpha, Delta and the vaccine rollout.
+
+## Two "reference age bins" coexisted — the model gauge and a viz renormalisation 2026-08-04 (9j)
+
+- **"Change the reference age bin from 2-15 to 25-34" was already half-done, in a different place.** The
+  *estimation* reference has been `cfg.ref_bin = 4` = `"25-34"` since 2026-07-31 (`framework.jl`,
+  applied at `joint_model.jl` `susc = vcat(offs_s[1:ref-1], one(sig_s), offs_s[ref:end])`). The `2-15`
+  the user was reading off the figures was a **separate post-hoc renormalisation living only in
+  `collect_transmission_structure`**, which divided every draw by the pop-weighted `(2-10, 11-15)`
+  super-group. Before touching anything, check whether the name in the request refers to the model or to
+  the plot — the two had drifted apart and the docstring at the division site was the only thing
+  recording it.
+- **The renormalisation was deliberately gauge-invariant, and the fix knowingly gives that up.** Dividing
+  by the 2-15 super-group made the figures independent of `ref_bin`; dividing by `V[:, ref_bin]` makes
+  them *be* the gauge. Since `V[:, ref_bin] ≡ 1` exactly in the stored draws, the division is the
+  identity — the "ratio" store is now literally the raw pooled draws, and 9j's per-bin medians equal
+  10j's `make_susc_inf_fig` medians to 0.0. That equality is the cheapest end-to-end check that the
+  rewiring landed; assert it.
+- **Deleting a docstring claim is part of the change.** The old text advertised "GAUGE-INVARIANT to the
+  model's reference-bin choice". Left in place it would have been actively false and would have sent the
+  next reader looking for a bug. Same for the notebook's `2-15` comment block.
+- **Viz-layer only ⇒ no cache invalidation.** `contacts_label` does not encode `ref_bin`, so a change to
+  the *model* reference would silently reuse stale `8j_s2_*` chains — but a change to the *plot*
+  denominator touches nothing. Verified: 0 of 2016 `8j_s[12]_*` artefacts modified by the rerun. Always
+  confirm which side of that line a "reference" change falls on.
+- **A super-group decomposition has to be rebuilt around the new reference.** With `2-15` as baseline the
+  other groups were `16-49`/`>50`; with `25-34` the reference sits *inside* `16-49`. `supergroup_split`
+  now splits whichever base group contains `ref_bin` into (before, [ref], after) — for the default grid
+  `((1,2),(3,),(4,),(5,),(6,7))` = `2-15 / 16-24 / 25-34 / 35-49 / 50+`. Group names are rebuilt from
+  `grid.LO`/`grid.HI` mirroring `cis_age_grid`'s own `LAB` construction, so a singleton group reproduces
+  `grid.LAB[i]` exactly (and the last group is now `"50+"`, not the hand-written `">50"`).
+- **Don't plot the reference group as a series.** It is identically 1.0 with a zero-width ribbon. The
+  dashed grey 1.0 line already *is* that group — give it the label (`"25-34 (ref)"`) and skip the series.
+- **A `$(…)` inside a `"""docstring"""` is interpolated at parse time.** Documenting the name-construction
+  rule as `"$(LO[first])-$(HI[last])"` threw `UndefVarError: LO not defined` on include — the file parsed
+  fine, so the parse-check passed and it only surfaced under the full stack. Write such examples with
+  placeholder brackets, or escape the `$`.
+- **`plot_title` costs one extra subplot.** `length(fig.subplots)` is panels + 1 whenever `plot_title` is
+  set: a 3×2 figure reports 7. I asserted `== 6` against correct code. Same family as the
+  `marker = :circle` doubling of `series_list` noted above — never assert on raw Plots container counts
+  without accounting for these.
+- Stale-label bug found in passing and fixed: `10j_viz_utils.jl`'s susc/inf figure title hard-coded
+  `grid.LAB[1]`, so it printed `ref bin "2-10" = 1` over a figure whose 1.0 line had been bin 4 since
+  2026-07-31. `cfg` was already in scope. `inst/analysis_plan_heavy_tail_mean.md` still names `(2-10)` as
+  the baseline age group — left alone (the docx is source of truth), but it is stale.

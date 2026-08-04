@@ -1161,28 +1161,42 @@ end
 
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
-    collect_transmission_structure(labels4, origins; grid, h)
-        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F)
+    collect_transmission_structure(labels4, origins, cfg; grid, h)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F, sg_names, ref_lab)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
-two-stage artefacts: `susc`/`inf` are ratios of the 16-49 and >50 super-groups to 2-15
-(≡ 1 by construction); `susc_bin`/`inf_bin` are the same quantity at full per-age-bin
-resolution — every CIS bin against that same pop-weighted 2-15 baseline, so the super-group
-series are pop-weighted averages of these (`plot_ratio` vs `plot_ratio_bins`). Note this is a
-DIFFERENT denominator from the stored draws' own reference (bin `cfg.ref_bin`, default 4 "25-34" ≡ 1,
-the model's identification, which 10j's `make_susc_inf_fig` plots against). Because these plots
-re-normalise to the 2-15 super-group, they are GAUGE-INVARIANT to the model's reference-bin choice. `rho` holds the three GP
-length-scales (col 1 ρ_diag total-age, col 2 ρ_gap age-gap, both age-yrs; col 3 ρ_time weeks —
-`NaN` for pooled chains); `gamma` holds the per-contact secondary attack rate γ_SAR. Stores are
-`Dict(label => (med, lo, hi))` of `nO × 2` matrices for `susc`/`inf`, `nO × grid.N` for the
-`*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing artefacts leave `NaN` gaps.
-Reuses `load_transmission_draws` + `aggregate_supergroups`.
+two-stage artefacts. `susc`/`inf` are pop-weighted age super-group values, `susc_bin`/`inf_bin` the
+same at full per-age-bin resolution, both divided per draw by the **model's own reference bin**
+`cfg.ref_bin` (default 4 = "25-34"). That is the gauge the transmission block is identified in —
+`model_transmission` splices an exact `1.0` in at `ref_bin` (joint_model.jl) — so this is the SAME
+baseline 10j's `make_susc_inf_fig` plots against, and the per-bin stores are in fact the raw pooled
+draws (the division is the identity). Bin `cfg.ref_bin` is therefore a flat 1.0 with a zero-width
+band in every per-bin figure.
+
+CHANGED 2026-08-04 (user request): the denominator was the pop-weighted 2-15 super-group, chosen so
+the figures were gauge-invariant to `ref_bin`. That invariance is deliberately given up in exchange
+for reading against the estimation procedure's own reference. `supergroup_split` accordingly splits
+the super-group containing `ref_bin` so the reference is a group of its own — `sg_names` carries the
+resulting names (`2-15 / 16-24 / 25-34 / 35-49 / 50+` for the default grid) and `ref_lab =
+grid.LAB[cfg.ref_bin]` the reference label, both threaded into the plot functions rather than
+re-derived there.
+
+`rho` holds the three GP length-scales (col 1 ρ_diag total-age, col 2 ρ_gap age-gap, both age-yrs;
+col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the per-contact secondary attack rate
+γ_SAR. Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
+`susc`/`inf`, `nO × grid.N` for the `*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing
+artefacts leave `NaN` gaps. Reuses `load_transmission_draws` + `supergroup_split` +
+`aggregate_supergroups`.
 """
-function collect_transmission_structure(labels4, origins; grid = cis_age_grid(), h::Integer = 1)
+function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_grid(),
+                                        h::Integer = 1)
     nO = length(origins)
+    ref = cfg.ref_bin
+    sg_groups, sg_names = supergroup_split(grid, ref)      # reference bin isolated as its own group
+    nG = length(sg_groups)
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
-    susc_store, inf_store, rho_store, gamma_store = mkstore(2), mkstore(2), mkstore(3), mkstore(1)
+    susc_store, inf_store, rho_store, gamma_store = mkstore(nG), mkstore(nG), mkstore(3), mkstore(1)
     gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
     F_store  = mkstore(1)                               # leaky antibody-protection factor F (scalar per draw)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
@@ -1191,14 +1205,15 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
         d === nothing && continue
         for (V, dst, dstb) in ((d.susc, susc_store, susc_bin_store),
                                (d.inf,  inf_store,  inf_bin_store))
-            sg = aggregate_supergroups(V, grid.POP)      # ndraws × 3 (2-15, 16-49, >50)
-            r  = sg[:, 2:3] ./ sg[:, 1]                  # ratios vs 2-15
-            for g in 1:2
+            den = view(V, :, ref)                        # the model's gauge — identically 1 per draw
+            sg  = aggregate_supergroups(V, grid.POP; groups = sg_groups)   # ndraws × nG
+            r   = sg ./ den                              # ratios vs the reference bin
+            for g in 1:nG
                 dst[lbl].med[oi, g] = median(r[:, g])
                 dst[lbl].lo[oi, g]  = quantile(r[:, g], 0.05)
                 dst[lbl].hi[oi, g]  = quantile(r[:, g], 0.95)
             end
-            rb = V ./ sg[:, 1]                           # ndraws × A — each bin vs its own draw's 2-15
+            rb = V ./ den                                # ndraws × A — each bin vs its own draw's ref bin
             for a in 1:grid.N
                 dstb[lbl].med[oi, a] = median(rb[:, a])
                 dstb[lbl].lo[oi, a]  = quantile(rb[:, a], 0.05)
@@ -1229,7 +1244,7 @@ function collect_transmission_structure(labels4, origins; grid = cis_age_grid(),
     end
     return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
               inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store,
-              F = F_store)
+              F = F_store, sg_names, ref_lab = grid.LAB[ref])
 end
 
 """
@@ -1310,26 +1325,32 @@ function _median_ylims(vals; ref::Real = 1.0, pad::Real = 0.05, log::Bool = fals
 end
 
 """
-    plot_ratio(store, labels4, origins, ttl) -> Plot
+    plot_ratio(store, labels4, origins, ttl; gnames, ref_lab) -> Plot
 
-One panel per config of a super-group ratio-to-2-15 store from
-`collect_transmission_structure` (susceptibility or infectivity): the 16-49 and >50 series
-with 90% ribbons, referenced to 1.0 (the 2-15 baseline). The shared y-limits are set from the
-**medians** only (`_median_ylims`) so a wide 90% band on one series runs off-panel instead of
-flattening every median line.
+One panel per config of a super-group ratio store from `collect_transmission_structure`
+(susceptibility or infectivity): each super-group with a 90% ribbon, referenced to 1.0 — the
+model's own reference bin `ref_lab` (= `grid.LAB[cfg.ref_bin]`, default "25-34"). Pass `gnames` and
+`ref_lab` straight from that call's `sg_names`/`ref_lab` so the two never drift apart.
+
+`ref_lab` is one of the super-groups (`supergroup_split` isolates it) but is NOT drawn as a series:
+it is identically 1.0 with a zero-width ribbon, so the dashed grey reference line carries its label
+instead. The shared y-limits are set from the **medians** only (`_median_ylims`) so a wide 90% band
+on one series runs off-panel instead of flattening every median line.
 """
-function plot_ratio(store, labels4, origins, ttl::AbstractString)
-    gnames = ["16-49", ">50"]
+function plot_ratio(store, labels4, origins, ttl::AbstractString;
+                    gnames, ref_lab::AbstractString)
     yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]))
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "ratio to 2-15", legend = (k == 1 ? :topright : false),
+                 ylabel = "ratio to $(ref_lab)", legend = (k == 1 ? :topright : false),
                  legendfontsize = 6, xrotation = 45, ylims = yl)
         # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis.
         # (A leading `hline!` here initialises a numeric axis and collapses the Dates.)
-        plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash, label = "")
-        for g in 1:2
+        plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash,
+              label = "$(ref_lab) (ref)")
+        for g in eachindex(gnames)
+            gnames[g] == ref_lab && continue     # ≡ 1 by construction — the dashed line above IS it
             m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
             plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, label = gnames[g],
                   ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
@@ -1342,22 +1363,25 @@ function plot_ratio(store, labels4, origins, ttl::AbstractString)
 end
 
 """
-    plot_ratio_bins(store, labels4, origins, ttl; grid) -> Plot
+    plot_ratio_bins(store, labels4, origins, ttl; grid, ref_lab) -> Plot
 
-One panel per config of a PER-AGE-BIN ratio-to-2-15 store (`susc_bin`/`inf_bin` from
+One panel per config of a PER-AGE-BIN ratio store (`susc_bin`/`inf_bin` from
 `collect_transmission_structure`) — the age-resolved refinement of `plot_ratio`, sharing its
-2-15 baseline so the two figures read against the same 1.0 reference. Median lines only: seven
-overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure. The y-axis is
-**log10** — the ratios are multiplicative, so a bin at 2× and one at 0.5× sit symmetrically about
-the 1.0 reference; shared limits come from the medians (`_median_ylims(; log = true)`).
+`ref_lab` baseline so the two figures read against the same 1.0 reference. Since that reference is
+the model's own gauge, bin `cfg.ref_bin` sits exactly on the dashed 1.0 line. Median lines only:
+seven overlapping 90% ribbons are unreadable, so the bands stay in the `plot_ratio` figure. The
+y-axis is **log10** — the ratios are multiplicative, so a bin at 2× and one at 0.5× sit
+symmetrically about the 1.0 reference; shared limits come from the medians
+(`_median_ylims(; log = true)`).
 """
-function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = cis_age_grid())
+function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = cis_age_grid(),
+                         ref_lab::AbstractString)
     cols = palette(:viridis, grid.N)     # age is ordinal → perceptually ordered palette
     yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]); log = true)
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
         p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "ratio to 2-15 (log)", legend = (k == 1 ? :topright : false),
+                 ylabel = "ratio to $(ref_lab) (log)", legend = (k == 1 ? :topright : false),
                  legendfontsize = 5, background_color_legend = RGBA(1, 1, 1, 0.7),
                  xrotation = 45, yscale = :log10, ylims = yl)
         # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
@@ -1376,19 +1400,24 @@ function plot_ratio_bins(store, labels4, origins, ttl::AbstractString; grid = ci
 end
 
 """
-    plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid; groups) -> Plot
+    plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid; groups, ref_lab) -> Plot
 
 For ONE model `lbl`, a **3×2** grid of the finest age-dependent transmission structure WITH 90%
 CIs: rows = age-bin groups (default the 7 CIS bins split 2/2/3), columns = susceptibility (left)
-and infectivity (right). Each panel plots every bin in its group as a ratio to the pop-weighted
-2-15 baseline (the same denominator as `plot_ratio`/`plot_ratio_bins`) over the rolling origins —
-posterior median line + 5–95% ribbon. Splitting the bins keeps ≤3 overlapping ribbons per panel
-readable, which is exactly why `plot_ratio_bins` drew medians only. Consumes the `susc_bin`/
-`inf_bin` stores from `collect_transmission_structure` (they already carry `lo`/`hi`). A bin whose
-series is all-NaN (missing chain) is skipped.
+and infectivity (right). Each panel plots every bin in its group as a ratio to the `ref_lab`
+baseline (the same denominator as `plot_ratio`/`plot_ratio_bins` — the model's own `cfg.ref_bin`)
+over the rolling origins — posterior median line + 5–95% ribbon. Splitting the bins keeps ≤3
+overlapping ribbons per panel readable, which is exactly why `plot_ratio_bins` drew medians only.
+Consumes the `susc_bin`/`inf_bin` stores from `collect_transmission_structure` (they already carry
+`lo`/`hi`). A bin whose series is all-NaN (missing chain) is skipped.
+
+`groups` is the PANEL ROW SPLIT only — unrelated to `supergroup_split`'s pop-weighted super-groups.
+The reference bin is drawn like any other: a flat 1.0 line with no visible ribbon, which is the
+visual marker of the gauge.
 """
 function plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid;
-                               groups = [[1, 2], [3, 4], [5, 6, 7]])
+                               groups = [[1, 2], [3, 4], [5, 6, 7]],
+                               ref_lab::AbstractString)
     cols = palette(:viridis, grid.N)             # age is ordinal → perceptually ordered palette
     quantities = [("susceptibility", susc_bin), ("infectivity", inf_bin)]
     # Figure-wide y-limits from the MEDIANS only (both quantities), on a LOG10 axis (ratios are
@@ -1400,7 +1429,8 @@ function plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid;
         for (qname, store) in quantities
             s = store[lbl]
             p = plot(; title = "$qname — bins $(grid.LAB[first(grp)])…$(grid.LAB[last(grp)])",
-                     titlefontsize = 8, xlabel = "forecast origin", ylabel = "ratio to 2-15 (log)",
+                     titlefontsize = 8, xlabel = "forecast origin",
+                     ylabel = "ratio to $(ref_lab) (log)",
                      legend = :topright, legendfontsize = 6, xrotation = 45,
                      yscale = :log10, ylims = yl)
             # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis (see plot_ratio).
@@ -1418,7 +1448,7 @@ function plot_susc_inf_bins_ci(susc_bin, inf_bin, lbl, origins, grid;
     return plot(panels...; layout = (length(groups), length(quantities)),
                 size = (575 * length(quantities), 360 * length(groups)),
                 plot_title = "8j — age-dependent susceptibility & infectivity " *
-                             "(ratio to 2-15, 90% CI) — $lbl",
+                             "(ratio to $(ref_lab), 90% CI) — $lbl",
                 plot_titlefontsize = 11)
 end
 

@@ -111,11 +111,46 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
 end
 
 """
+    supergroup_split(grid, ref_bin; base) -> (; groups, names)
+
+Age super-groups for the ratio figures, with the **reference bin isolated as its own group**.
+Starts from `base` (default `((1,2),(3,4,5),(6,7))` = 2-15 / 16-49 / 50+) and splits whichever
+group contains `ref_bin` into up to three parts — the bins before it, `(ref_bin,)` alone, the bins
+after — dropping the empty ones. For the 7 CIS bins and the default `cfg.ref_bin = 4` this gives
+`((1,2),(3,),(4,),(5,),(6,7))` = 2-15 / 16-24 / **25-34** / 35-49 / 50+, so the group carrying the
+model's gauge is a single bin that is identically 1 (see `collect_transmission_structure`).
+`ref_bin = 1` ⇒ `((1,),(2,),(3,4,5),(6,7))`, and so on for any bin.
+
+`names` mirror the `LAB` construction in `cis_age_grid` — open-ended (`"50+"`) when the group runs
+to the last bin, else `"<LO[first]>-<HI[last]>"` — so a singleton group reproduces `grid.LAB[i]`
+exactly. `groups` comes back in the tuple-of-tuples shape `aggregate_supergroups` takes as its
+`groups` kwarg, ready to pass straight through.
+"""
+function supergroup_split(grid, ref_bin::Integer;
+                          base = ((1, 2), (3, 4, 5), (6, 7)))
+    groups = Tuple{Vararg{Int}}[]
+    for g in base
+        idx = collect(g)
+        if ref_bin in idx
+            for part in (filter(<(ref_bin), idx), [ref_bin], filter(>(ref_bin), idx))
+                isempty(part) || push!(groups, Tuple(part))
+            end
+        else
+            push!(groups, Tuple(idx))
+        end
+    end
+    names = [last(g) == grid.N ? "$(grid.LO[first(g)])+" :
+             "$(grid.LO[first(g)])-$(grid.HI[last(g)])" for g in groups]
+    return (; groups = Tuple(groups), names)
+end
+
+"""
     aggregate_supergroups(V, POP; groups) -> ndraws × length(groups)
 
 Population-weighted aggregation of a per-draw per-bin matrix `V` (`ndraws × A`) to the
 super-groups in `groups` (default `((1,2),(3,4,5),(6,7))` = 2-15 / 16-49 / >50 for the
-7 CIS bins). `POP` is the per-bin population vector (`grid.POP`).
+7 CIS bins; the ratio figures pass `supergroup_split(…).groups` instead). `POP` is the per-bin
+population vector (`grid.POP`).
 """
 function aggregate_supergroups(V::AbstractMatrix, POP::AbstractVector;
                                groups = ((1, 2), (3, 4, 5), (6, 7)))
