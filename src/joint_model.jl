@@ -635,30 +635,134 @@ function _fit_pathfinder(model, ndraws::Int, nruns::Int, rng, adtype; init = not
 end
 
 """
+    _pf_mean_init(model, pf, rng) -> DynamicPPL.InitFromParams
+
+Starting point for Stage-1 NUTS: the Pathfinder mean, as a **structured** `InitFromParams`.
+
+⚠ THIS MUST NOT BE BUILT FROM CHAIN PARAMETER NAMES. `InitFromParams` resolves a `NamedTuple` by
+**VarName symbol** (`hasvalue(params, vn, dist)`), not by the flattened label MCMCChains uses. The
+former implementation here was
+
+    pnames = names(pf.draws_transformed, :parameters)   # Symbol("z[1,1]"), Symbol("p0f[3,7]"), …
+    InitFromParams(NamedTuple(zip(pnames, means)))
+
+and every one of those keys FAILS to match its varname (`z`, `p0f`, …), so each array-valued latent
+fell through to the default `fallback = InitFromPrior()` — **silently**, because falling back is
+`InitFromParams`'s documented behaviour, not an error. `model_degree` declares only 6 scalars
+against 396 (NegBin) / 984 (hurdle-Weibull) array coordinates, so NUTS was starting from the prior
+in ~99% of the space while appearing to start from Pathfinder. Verified on DynamicPPL 0.39.15: a
+`z ~ MvNormal(zeros(4), I)` seeded at 9.0 came back as prior draws, while a sibling scalar was
+honoured. That defeats the whole point of `_stage1_init` (the `z*` blocks "dominate the parameter
+space … and are only weakly identified, so where the path starts largely decides where it ends").
+
+The mean is taken in the **UNCONSTRAINED** space — `pf.fit_distribution` is the ELBO-maximising
+`MvNormal` Pathfinder actually fitted, so its `μ` is the approximation's mode. That is both the
+natural "Pathfinder mean" and strictly better than averaging `pf.draws_transformed`, which would
+average `p0f` on the constrained `[0,1]` scale. `multipathfinder` returns a mixture and exposes no
+single `fit_distribution`, so fall back to the mean of its (also unconstrained) `draws`, which are
+`dim × ndraws`.
+
+The unconstrained vector is turned into a `NamedTuple` by the same `link!!`/`values_as` round-trip
+`_stage1_init` uses, rather than by writing into index ranges — see that function's docstring for
+why the named round-trip is the only form that cannot silently target the wrong block.
+"""
+function _pf_mean_init(model, pf, rng)
+    u = hasproperty(pf, :fit_distribution) && pf.fit_distribution !== nothing ?
+        collect(Float64, mean(pf.fit_distribution)) :
+        vec(mean(pf.draws; dims = 2))                      # multipathfinder: mixture, no single fit
+    vil = DynamicPPL.link!!(DynamicPPL.VarInfo(rng, model), model)
+    length(u) == length(vil[:]) ||
+        error("_pf_mean_init: Pathfinder dim $(length(u)) ≠ model unconstrained dim $(length(vil[:]))")
+    nt = DynamicPPL.values_as(DynamicPPL.invlink!!(DynamicPPL.unflatten(vil, u), model), NamedTuple)
+    # Guard the failure mode above: every model varname must be covered, or the missing ones would
+    # be silently re-drawn from the prior. `values_as` is built FROM the model, so a mismatch here
+    # means the round-trip itself broke — fail loudly rather than sample from a half-prior start.
+    expect = keys(DynamicPPL.values_as(DynamicPPL.VarInfo(rng, model), NamedTuple))
+    missing_keys = setdiff(expect, keys(nt))
+    isempty(missing_keys) ||
+        error("_pf_mean_init: init misses model varnames $(missing_keys) — would fall back to prior")
+    lj = DynamicPPL.logjoint(model, nt)
+    isfinite(lj) || error("_pf_mean_init: Pathfinder mean has non-finite logjoint ($lj)")
+    return DynamicPPL.InitFromParams(nt)
+end
+
+"""
+    _nuts_diagnostics(chn) -> NamedTuple
+
+Post-fit health summary for a Stage-1 NUTS chain: divergence count, the fraction of transitions
+that hit `max_depth` (a saturated tree means the sampler never terminated by U-turn, i.e. the step
+size is too small for the geometry), and the minimum ESS over parameters.
+
+**There is no R̂ here — Stage 1 samples ONE chain per fit** (`prefit_stage1!` already fans the 504
+fits out over threads under a semaphore with BLAS pinned to 1, so per-fit chain threading would
+oversubscribe; this is the same argument `_fit_pathfinder` makes for leaving multipathfinder's
+`executor` sequential). Do not read `turing_utils.jl`'s `Rhat < 1.1` convergence check as applying
+to these chains — it cannot, with one chain.
+
+Every field is `missing` when the chain does not carry the corresponding internal, so this is safe
+to call on a Pathfinder `Chains` too — which has **no `:internals` section at all**. Note
+`names(chn, section)` is a bare `name_map[section]` lookup and therefore throws `KeyError` on a
+missing section; go through `MCMCChains.sections` first rather than calling it speculatively.
+"""
+function _nuts_diagnostics(chn)
+    intern = :internals in MCMCChains.sections(chn) ? names(chn, :internals) : Symbol[]
+    getcol(s) = Symbol(s) in intern ? vec(Array(chn[:, Symbol(s), :])) : nothing
+    div_col = getcol("numerical_error")
+    depth   = getcol("tree_depth")
+    ndiv = div_col === nothing ? missing : count(x -> x === true || x == 1, div_col)
+    dmax = depth === nothing ? missing : maximum(depth)
+    fmax = depth === nothing ? missing : count(==(dmax), depth) / length(depth)
+    # `ess(chn)` returns a ChainDataFrame; read its NamedTuple directly (the `.nt.ess` idiom
+    # MCMCChains itself uses) rather than round-tripping through DataFrame.
+    min_ess = try
+        minimum(skipmissing(MCMCChains.ess(chn).nt.ess))
+    catch
+        missing
+    end
+    return (; divergences = ndiv, max_tree_depth = dmax, frac_at_max_depth = fmax,
+              min_ess, n_draws = size(chn, 1))
+end
+
+"""
     fit_stage1(dm, ds, pop, cfg; use_nuts=cfg.stage1_use_nuts, ndraws_pf, n_sample=250)
 
 Stage-1 (contact-degree GP) fit: Pathfinder init → (optionally) NUTS on `model_degree`.
-Returns `(; chn, model, pf)`. `chn` is the Pathfinder approximate posterior (default) or the
-NUTS chain; both carry the same GP parameter names. `ndraws_pf`/`n_sample` are kept ≥
-`cfg.n_stage1_post` so there are always enough draws to impute into Stage 2.
+Returns `(; chn, model, pf, sampler, diag)`. `chn` is the Pathfinder approximate posterior
+(default) or the NUTS chain; both carry the same GP parameter names. `sampler` is `:pathfinder` or
+`:nuts` and `diag` is `_nuts_diagnostics(chn)` (all-`missing` on the Pathfinder path), so a saved
+artefact can say which sampler produced it. `ndraws_pf`/`n_sample` are kept ≥ `cfg.n_stage1_post`
+so there are always enough draws to impute into Stage 2.
 
 Uses **multi-path** Pathfinder when `cfg.stage1_pathfinder_runs > 1` (see `_fit_pathfinder`);
-`= 1` (the default since 2026-07-30) is single-path. Both return types expose `draws_transformed`,
-so the NUTS-init branch below is unaffected.
+`= 1` (the default since 2026-07-30) is single-path.
 
 Single-path additionally starts from an explicit `_stage1_init(model, z_init_scale, rng, cfg)`: all
 latents drawn from their priors except the non-centred `z*` blocks, drawn from `N(0, z_init_scale²)`
 (see `_stage1_init`).
 Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` default. The init is
 `rng`-dependent, so distinct seeds still explore distinct starting points.
+
+**NUTS path (2026-08-05).** Pathfinder always runs first — NUTS is initialised from its mean via
+`_pf_mean_init` (read that docstring: the previous chain-name construction was a silent no-op), so
+the NUTS cost is ADDITIVE on top of the Pathfinder cost, not a replacement for it. The sampler is
+built from explicit `cfg.stage1_nuts_*` settings rather than a bare `NUTS()`: the convenience
+constructor derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the old `n_sample = 250` gave
+**125** warmup iterations to adapt a step size and metric in 402/990 dimensions (Stan's default is
+1000). ONE chain per fit — see `_nuts_diagnostics` for why, and for what that costs in diagnostics.
+
+A NUTS failure **propagates**. It used to be caught and replaced by `pf.draws_transformed`, which
+`fit_or_load_stage1` then wrote under the NUTS filename with nothing to distinguish it — a
+Pathfinder result wearing a NUTS name, and across a threaded 504-fit prefit the `@warn` is easy to
+lose. `prefit_stage1!` has its own `try/catch` that counts the cell as `failed` and leaves no file,
+so propagating keeps the cell refittable instead of silently poisoning the cache.
 """
 function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
                     use_nuts::Bool = cfg.stage1_use_nuts,
                     ndraws_pf::Int = max(200, cfg.n_stage1_post),
-                    n_sample::Int = max(250, cfg.n_stage1_post),
+                    n_sample::Int = max(cfg.stage1_nuts_draws, cfg.n_stage1_post),
                     nruns::Int = cfg.stage1_pathfinder_runs,
                     z_init_scale::Real = cfg.stage1_z_init_scale,
-                    adtype = AutoReverseDiff(), rng = nothing)
+                    adtype = ad_type(cfg), rng = nothing)
     if rng === nothing
         Random.seed!(cfg.seed)
         rng = Random.default_rng()
@@ -669,33 +773,52 @@ function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
     init = nruns <= 1 ? _stage1_init(model, z_init_scale, rng, cfg) : nothing
     pf = _fit_pathfinder(model, ndraws_pf, nruns, rng, adtype; init = init)
     if !use_nuts
-        return (; chn = pf.draws_transformed, model, pf)
+        return (; chn = pf.draws_transformed, model, pf, ad_backend = cfg.ad_backend,
+                  sampler = :pathfinder, diag = _nuts_diagnostics(pf.draws_transformed))
     end
-    pnames = names(pf.draws_transformed, :parameters)
-    means  = [mean(pf.draws_transformed[:, p, :]) for p in pnames]
-    init   = DynamicPPL.InitFromParams(NamedTuple(zip(pnames, means)))
-    sampler = adtype === nothing ? NUTS() : NUTS(; adtype = adtype)
-    local chn
-    try
-        chn = sample(rng, model, sampler, n_sample; initial_params = init, progress = false)
-    catch err
-        @warn "Stage-1 NUTS failed; falling back to Pathfinder draws" err
-        chn = pf.draws_transformed
+    nuts_init = _pf_mean_init(model, pf, rng)
+    sampler = NUTS(cfg.stage1_nuts_adapts, cfg.stage1_nuts_target_accept;
+                   max_depth = cfg.stage1_nuts_max_depth,
+                   adtype = adtype === nothing ? Turing.DEFAULT_ADTYPE : adtype)
+    # `n_sample` is the number of KEPT draws; `cfg.stage1_nuts_adapts` warmup iterations are drawn
+    # and discarded ON TOP of it (AbstractMCMC applies `discard_initial` before collecting N).
+    chn = sample(rng, model, sampler, n_sample; initial_params = nuts_init, progress = false)
+    diag = _nuts_diagnostics(chn)
+    if !ismissing(diag.divergences) && diag.divergences > 0
+        @warn "Stage-1 NUTS: divergent transitions" divergences=diag.divergences n=diag.n_draws
     end
-    return (; chn, model, pf)
+    if !ismissing(diag.frac_at_max_depth) && diag.frac_at_max_depth > 0.2
+        @warn "Stage-1 NUTS: tree saturating at max_depth" frac=diag.frac_at_max_depth depth=diag.max_tree_depth
+    end
+    return (; chn, model, pf, sampler = :nuts, diag, ad_backend = cfg.ad_backend)
 end
 
 """
     fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
-(`jldsave(path; result=chn)`). Idempotent skip ⇒ resumable prefit.
+(`jldsave(path; result=chn, sampler, diag, ad_backend)`). Idempotent skip ⇒ resumable prefit.
+
+`sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`) and `ad_backend` (`cfg.ad_backend`)
+are written alongside `result` so an artefact is self-describing. The cache filename encodes the
+SAMPLER via `contacts_label`, but deliberately NOT the AD backend, so for the backend the file's own
+contents are the *only* record — which is what makes a mixed-provenance grid auditable:
+
+```julia
+using JLD2, Glob, StatsBase
+countmap([jldopen(p) do f; haskey(f, "ad_backend") ? f["ad_backend"] : :legacy; end
+          for p in glob("8j_s1_*", "../dt_intermediate")])
+```
+
+Adding keys is backward compatible: every existing reader asks for `load(path, "result")` by name,
+and the 504 Pathfinder-generation files that predate this simply have neither key.
 """
 function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, pop,
-                            cfg::FrameworkConfig; adtype = AutoReverseDiff(), rng = nothing)
+                            cfg::FrameworkConfig; adtype = ad_type(cfg), rng = nothing)
     isfile(path) && return (; chn = load(path, "result"))
     res = fit_stage1(dm, ds, pop, cfg; use_nuts = cfg.stage1_use_nuts, adtype = adtype, rng = rng)
-    jldsave(path; result = res.chn)
+    jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
+                  ad_backend = res.ad_backend)
     return (; chn = res.chn)
 end
 
@@ -734,7 +857,7 @@ path forks from the fitted path.
 """
 function stage2_inputs(dm::ContactDegreeModel, apd_h::AgePairData, win0::WeeklyWindow,
                        wd0::WindowData, cfg::FrameworkConfig, s1_path::AbstractString;
-                       adtype = AutoReverseDiff(), rng = nothing)
+                       adtype = ad_type(cfg), rng = nothing)
     Tn = length(wd0.weeks)
     if !needs_stage1(dm)
         c0 = null_contact_level(apd_h, win0)
@@ -760,7 +883,7 @@ matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphor
 (each with its own deterministic RNG `base_seed + m`), writing disjoint preallocated slots.
 """
 function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::FrameworkConfig;
-                           n_draw::Int = cfg.n_stage2_draws, adtype = AutoReverseDiff(),
+                           n_draw::Int = cfg.n_stage2_draws, adtype = ad_type(cfg),
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
     A = wd.A; Tn = length(wd.weeks)
     M = length(moment_draws)
@@ -928,7 +1051,7 @@ chains are skipped ⇒ resumable. Returns `(; fitted, failed, skipped, concurren
 """
 function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
+                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg))
     mkpath(save_dir)
     dms = filter(needs_stage1, collect(dms))   # the NULL degree model has no Stage 1 to fit
     isempty(dms) && return (; fitted = 0, failed = 0, skipped = 0, concurrency = 1)
@@ -937,7 +1060,7 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
     fitted  = Threads.Atomic{Int}(0)
     failed  = Threads.Atomic{Int}(0)
     skipped = Threads.Atomic{Int}(0)
-    warmed  = Ref(false)
+    warmed  = Set{DataType}()   # degree-model TYPES whose AD rule has already been built
     old_blas = LinearAlgebra.BLAS.get_num_threads()
     LinearAlgebra.BLAS.set_num_threads(1)
     try
@@ -960,10 +1083,27 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
                     @warn "stage1 fit failed" origin=win_o.origin degree=degree_label(s.dm) h=s.h exception=(err, catch_backtrace())
                 end
             end
-            rest = specs
-            if !warmed[]
-                do_fit(specs[1]); warmed[] = true; rest = @view specs[2:end]   # warm compile before fan-out
+            # Warm ONE fit per as-yet-unseen degree-model TYPE, SERIALLY, before the fan-out.
+            # Each `typeof(dm)` is a distinct `model_degree` signature and so a distinct AD-rule
+            # derivation — under Mooncake that is `build_rrule`, measured at 66 s (negbin) / 14 s
+            # (hurdle-Weibull). This used to be a single `Ref{Bool}` set on `specs[1]`, and since
+            # `specs` is built `for dm in dms, h in horizons` that is ALWAYS `dms[1]`: the second
+            # degree model's rule was therefore derived INSIDE the `@spawn` region, where Mooncake
+            # serialises concurrent derivations on a global lock and every other worker blocks —
+            # while still holding its semaphore slot. Correct, but it stalls the fan-out and looks
+            # like a hang, because nothing prints until the origin completes.
+            # `warmed` is hoisted outside the origin loop on purpose: the rule cache is per-process
+            # and the model TYPE does not vary with origin (only the values inside `ds` do).
+            warm_idx = Int[]
+            for (k, s) in enumerate(specs)
+                typeof(s.dm) in warmed && continue
+                push!(warmed, typeof(s.dm)); push!(warm_idx, k)
             end
+            for k in warm_idx
+                dt = @elapsed do_fit(specs[k])
+                @info "prefit_stage1!: warm fit (AD rule built)" degree=degree_label(specs[k].dm) backend=cfg.ad_backend seconds=round(dt; digits = 1)
+            end
+            rest = @view specs[setdiff(1:length(specs), warm_idx)]
             sem = Base.Semaphore(K)
             @sync for s in rest
                 Threads.@spawn begin
@@ -991,7 +1131,7 @@ fits under `Semaphore(max_concurrent)`. Cached pooled files are skipped ⇒ resu
 """
 function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
+                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg))
     mkpath(save_dir)
     K   = clamp(max_concurrent, 1, Threads.nthreads())
     tag = contacts_label(cfg)
@@ -1032,7 +1172,7 @@ Convenience driver: `prefit_stage1!` (for the distinct degree models in `combos`
 """
 function prefit_two_stage!(combos, wins, cfg::FrameworkConfig; data_provider,
                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                           max_concurrent::Int = fit_concurrency(), adtype = AutoReverseDiff())
+                           max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg))
     dms = unique(first.(combos))
     s1 = prefit_stage1!(dms, wins, cfg; data_provider = data_provider, save_dir = save_dir,
                         max_concurrent = max_concurrent, adtype = adtype)
@@ -1054,7 +1194,7 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
                             h::Integer; apd_h = nothing, grid = cis_age_grid(),
                             setting::Symbol = :all,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                            adtype = AutoReverseDiff())
+                            adtype = ad_type(cfg))
     tag = contacts_label(cfg)
     s2p = stage2_path(dm, nb, win0.origin, h; contacts = tag, save_dir = save_dir)
     isfile(s2p) && return load(s2p, "pooled")
@@ -1093,7 +1233,7 @@ Two things changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
 function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow;
                             apd_by_h = nothing, grid = cis_age_grid(), setting::Symbol = :all,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                            adtype = AutoReverseDiff())
+                            adtype = ad_type(cfg))
     A = wd0.A; H = length(cfg.horizons)
     mkpath(save_dir)
     hist = collect(float.(wd0.I_mean))                 # A × Tn0, last col = origin (t₀)

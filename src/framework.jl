@@ -115,8 +115,18 @@ Base.@kwdef struct FrameworkConfig
     # The 100×100 = 10_000 pooled infection draws form the predictive distribution scored by WIS.
     n_stage1_post::Int    = 100       # Stage-1 posterior draws imputed into Stage 2 (the "100 posteriors")
     n_stage2_draws::Int   = 100       # Stage-2 samples kept per Stage-1 draw (the "100 samples each")
-    stage1_use_nuts::Bool = false     # Stage-1 sampler: false = Pathfinder (preliminary), true = NUTS (later)
-    stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode the sampler, so changing this alone will silently reuse existing chains — delete them if you change it outside a token bump.
+    stage1_use_nuts::Bool = true      # Stage-1 sampler: true = NUTS (THE DEFAULT since 2026-08-05, user request — "use only NUTS in stage 1"), false = Pathfinder (the preliminary generation that produced the 504-file `-gi` grid). UNLIKE every other field in this block, this one IS encoded in the cache token (`contacts_label` appends `-nuts`), so flipping it does NOT silently reuse the Pathfinder chains — see the `-nuts` note in `contacts_label`. NUTS is initialised from the Pathfinder mean (`_pf_mean_init`), so Pathfinder still runs first and the cost is ADDITIVE. **STAGE 2 IS UNAFFECTED AND HAS NO NUTS PATH AT ALL** — `fit_stage2_pooled` only ever calls `pathfinder` (100 cheap fits per Stage-1 draw); that is by design (inst/4_cut_Bayes.md), not an oversight.
+    ad_backend::Symbol    = :mooncake # AD backend for BOTH stages' gradients: :mooncake (default) | :reversediff | :forwarddiff. Resolved once by `_resolve_adtype`; see `ad_type`. DEFAULTED TO MOONCAKE 2026-08-05 on measurement, not preference — at origin 2021-05-09, gradients/s Mooncake vs ReverseDiff: Stage-1 negbin (402 dims) 482 vs 44 (10.9×), Stage-1 hurdle-Weibull (990 dims) 241 vs 27 (9.0×), Stage-2 transmission (18 dims) 30 685 vs 1 711 (17.9×). Gradients agree with ReverseDiff to ≤4e-14 relative on all three. Mooncake pays a one-off `build_rrule` cost per model TYPE per process (66 s negbin / 14 s hurdle-Weibull / 15 s Stage 2), which is nothing against the ~1e5 gradient evaluations a single Stage-1 NUTS fit needs — but it is why `prefit_stage1!` warms one fit per degree-model type BEFORE its thread fan-out. NOT encoded in the cache token (AD is a numerical means, not a model change); the backend is recorded inside each artefact instead — see `contacts_label`.
+    # --- Stage-1 NUTS settings (2026-08-05; consulted only when `stage1_use_nuts`) ---
+    # These exist because a bare `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the
+    # former `n_sample = 250` gave 125 warmup iterations to adapt a step size and diagonal metric in
+    # 402 (NegBin) / 990 (hurdle-Weibull) dimensions. Stan's default is 1000; 125 is not a tuning
+    # choice, it is an accident of the convenience constructor.
+    stage1_nuts_adapts::Int = 1000    # warmup iterations, DISCARDED and drawn ON TOP of `stage1_nuts_draws` (AbstractMCMC applies `discard_initial` before collecting N, so total work = adapts + draws).
+    stage1_nuts_draws::Int  = 500     # KEPT draws per Stage-1 fit. Must stay ≥ `n_stage1_post` (=100) or `stage1_moment_draws` cannot fill the cut's 100 imputations; `fit_stage1` enforces that with a `max`.
+    stage1_nuts_target_accept::Float64 = 0.9  # above NUTS' 0.65 default: the non-centred GP (`z`, `z_c`) crossed with the soft-clamped exponentials is moderately curved, and the clamp's flat region is exactly where a too-large step lands.
+    stage1_nuts_max_depth::Int = 10   # explicit rather than implicit so `_nuts_diagnostics` can report the saturating fraction against a known ceiling.
+    stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode THIS field (it encodes only `stage1_use_nuts`, since 2026-08-05), so changing it alone will silently reuse existing chains — delete them if you change it outside a token bump.
     stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (336 of 402/990 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
     gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
@@ -130,6 +140,40 @@ Base.@kwdef struct FrameworkConfig
     # --- susc/inf reference age bin (the gauge: susc[ref]=inf[ref]≡1, only the A-1 other bins estimated) ---
     ref_bin::Int = 4 # index of the CIS age bin fixed to 1 in the relative susc/inf profile. SET 2026-07-31 to 4 = "25-34" (user request), moved off the former 1 = "2-10": children are an extreme, poorly-identified, antibody-sparse anchor, whereas 25-34 is a large well-mixed adult group (Munday/Davies convention). The NGM likelihood is GAUGE-INVARIANT to this choice (rescaling all susc by c and γ_SAR by 1/c leaves N unchanged), so switching the reference acts ONLY through the priors — which bin is pinned vs. carries the log-offset, and what γ_SAR = N_{ref,ref} anchors to. Because it changes the Stage-2 posterior but the `contacts_label` cache token does not encode it, stale `8j_s2_*` chains must be regenerated after a change (Stage 1 is unaffected — it has no susc/inf).
 end
+
+"""
+    _resolve_adtype(sym::Symbol) -> ADTypes.AbstractADType
+
+Map `cfg.ad_backend` to its concrete `ADTypes` object — the SINGLE SOURCE OF TRUTH that replaced
+nine duplicated `adtype = AutoReverseDiff()` kwarg defaults in `joint_model.jl` (2026-08-05).
+
+The `Auto*` names arrive via **Turing's re-export** (`Turing.jl` exports `AutoForwardDiff`,
+`AutoReverseDiff`, `AutoMooncake`), which is already how `AutoReverseDiff()` was reached here —
+`ADTypes` is not a direct dependency and does not need to be.
+
+`AutoMooncake()` is `Base.@kwdef` with `config = nothing`, the documented default configuration; it
+constructs to `AutoMooncake{Nothing}` and does NOT require `Mooncake` to be in scope. Mooncake must
+still be LOADED (it is, unconditionally, in `main_utils.jl`) or the failure surfaces much later and
+far less legibly, inside `DifferentiationInterface.prepare_gradient`.
+
+`:enzyme` is deliberately absent: Enzyme was a dependency until 2026-08-05, referenced by no code,
+and was removed with the Mooncake switch. Re-adding it means a `Project.toml` dep AND a `using`.
+"""
+function _resolve_adtype(sym::Symbol)
+    sym === :mooncake    && return AutoMooncake()
+    sym === :reversediff && return AutoReverseDiff()
+    sym === :forwarddiff && return AutoForwardDiff()
+    error("_resolve_adtype: unknown ad_backend $(sym) — expected :mooncake, :reversediff or :forwarddiff")
+end
+
+"""`ad_type(cfg)` — the AD backend object for `cfg`, used by BOTH stages.
+
+One backend covers everything because Stage-1 Pathfinder, Stage-1 NUTS and Stage-2 Pathfinder all
+build the *same* `DynamicPPL.LogDensityFunction(model, getlogjoint_internal, linked_vi; adtype)`,
+and because Mooncake measured faster than ReverseDiff on all three targets (see `ad_backend`) —
+there was no case for a per-stage split, so there is no `ad_backend_stage2`. Add one only if a
+future measurement actually disagrees across stages."""
+ad_type(cfg::FrameworkConfig) = _resolve_adtype(cfg.ad_backend)
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains. The suffix is a running version
@@ -175,6 +219,20 @@ dimension goes 1580→402 (NegBin) and 2168→990 (hurdle-Weibull). The token dr
 p⁰ and the sampled generation interval are BOTH retained (see `inst/3` §4.2 and the `-gi` note above),
 so `temporal-gsar-cut-sc-p0-gi` is NOT the same model as `temporal-gsar-cut-sc`.
 
+`-nuts` (2026-08-05) — a SAMPLER component, appended when `cfg.stage1_use_nuts`. It is the first
+token component that does not describe the model's parameter space: Stage 1's posterior is the
+same target either way, but Pathfinder only *approximates* it with a single multivariate normal in
+402/990 dimensions, so the draws differ and everything conditioned on them differs with it. The
+component is added because `fit_or_load_stage1` short-circuits on bare `isfile`, so without it
+flipping `stage1_use_nuts` would silently reload the 504 Pathfinder chains and change nothing —
+the hazard that was already documented on the `stage1_pathfinder_runs` field.
+
+The token is SHARED with `stage2_path`, and that is correct here (unlike the 2026-07-13 γ_SAR case,
+where bumping would have orphaned Stage-1 chains for a Stage-2-only change): Stage 2 conditions on
+Stage-1 draws, so a Stage-1 sampler change invalidates both. The Pathfinder generation keeps the
+un-suffixed token and stays on disk untouched as the comparison baseline — read the two side by
+side the way `11j_viz_utils.jl` already reads `CONTACTS_TOKEN_HD`.
+
 **Both older generations are RETAINED on disk**: `-hd` in `dt_intermediate_hierarchical/` (2022 files)
 and the pre-hierarchy `…-sc` in `dt_intermediate_old/` (1520 files). The `-hd` set is still read by
 `src/10j_viz_utils.jl`/`11j_viz_utils.jl` to compare "flat hierarchy" against "no hierarchy"; it needs
@@ -183,12 +241,22 @@ The `dt_intermediate_old/` set is NOT reusable here even though its Stage 1 also
 hurdle-Weibull Stage 1 lacks `p0f` and used the old κ clamp [-3,3], and all of its Stage 2 predates
 `w_mu`/`w_sigma`, `ref_bin=4` and the `susc_inf_sd_prior` change."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi"
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi" *
+    (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`
 (`stage1_chain_path`, `reconstruct_p0_draws`, `reconstruct_tau_draws`, …), so a token bump lands in
 one place instead of the seven hard-coded copies that previously had to be edited in lockstep.
-Resolves to the per-week (`constant_contacts=false`) regime — the setting every notebook uses.
+Resolves to the per-week (`constant_contacts=false`) regime — the setting every notebook uses — and,
+since `stage1_use_nuts` became the default on 2026-08-05, to the **NUTS** sampler generation, i.e. it
+now carries the `-nuts` suffix.
+
+⚠ **That is a live migration, not a no-op.** The complete 504/1512-file grid on disk is the
+*Pathfinder* generation and is reached by `CONTACTS_TOKEN_PF` below. Until the NUTS grid has actually
+been fitted, the read-only viz helpers that default to this constant (`stage1_chain_path`,
+`reconstruct_p0_draws`, `reconstruct_tau_draws`, the 9j/10j/11j figures) will find **no files**.
+Point them at `CONTACTS_TOKEN_PF` to read the old generation, exactly as `plot_within_block_sd`
+already does with `CONTACTS_TOKEN_HD`.
 
 It is a load-time constant built from the **default** `FrameworkConfig`. The token no longer encodes
 any dispersion prior (it did while the horseshoe's τ₀ was being tuned), so it is stable again — but
@@ -196,6 +264,18 @@ helpers that take a `cfg` still default to `contacts_label(cfg)` rather than thi
 right habit for any future field that does enter the token. Use this only where no `cfg` is in scope
 (see `CONTACTS_TOKEN_HD` for the previous generation)."""
 const CONTACTS_TOKEN = contacts_label(FrameworkConfig(constant_contacts = false))
+
+"""The **Pathfinder** Stage-1 generation's token — what the 504 `8j_s1_*` / 1512 `8j_s2_*` files
+currently in `dt_intermediate/` were fitted under, before `stage1_use_nuts` became the default on
+2026-08-05. Same model, same parameter space; only the Stage-1 sampler differs (Pathfinder fits ONE
+multivariate normal in 402/990 dimensions, NUTS samples the posterior itself).
+
+This is a live constant, not a historical note — it is how the 9j/10j/11j viz reaches the existing
+grid while the NUTS generation is being fitted, and how the two are read side by side afterwards.
+Unlike `CONTACTS_TOKEN_HD` it needs NO separate directory: both generations live in
+`dt_intermediate/`, distinguished by the `-nuts` suffix alone."""
+const CONTACTS_TOKEN_PF = contacts_label(FrameworkConfig(constant_contacts = false,
+                                                         stage1_use_nuts = false))
 
 """The PREVIOUS generation's token (`-hd`, 2026-07-30 → 2026-08-02): flat hierarchical dispersion
 with a per-week half-Normal τ_t (and, briefly after it, the `-rhs` horseshoe). Those chains are still

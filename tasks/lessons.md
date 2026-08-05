@@ -2,6 +2,98 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## Mooncake as the default AD backend — and the type-instability that nearly hid it 2026-08-05 (`poisson_mixture.jl`, `framework.jl`, `joint_model.jl`)
+
+Switched both stages from ReverseDiff to **Mooncake** (`cfg.ad_backend = :mooncake`), on Julia 1.12.4.
+
+- **A struct with abstract fields can make a source-to-source AD backend 15× SLOWER, not just a bit
+  slower.** `NegBin` was `struct NegBin; m::Real; k::Real; end`. ReverseDiff does not care — it boxes
+  into `TrackedReal` regardless. Mooncake needs the *primal* to infer. First measurement, Stage-1
+  negbin (402 dims): **ReverseDiff 41.8 grad/s, Mooncake 2.7 grad/s.** The same run had
+  hurdle-Weibull (990 dims, concrete `Distributions.Weibull`) at **9× FASTER** under Mooncake. That
+  asymmetry — the *bigger* model winning while the smaller one lost — is what indicted the struct
+  rather than the backend. Parameterising it (`NegBin{Tm<:Real,Tk<:Real}`) took negbin to **482
+  grad/s (10.9× faster)** with the log-density unchanged to the last bit. **If a backend is
+  inexplicably slow on one model but fast on another, compare the two models' struct field types
+  before you blame the backend.**
+- **Do not conclude "Mooncake is slower here" from one model.** The first table would have justified
+  abandoning the migration. Measuring both degree families in the same run is what made the real
+  cause visible. Final numbers, origin 2021-05-09, Mooncake vs ReverseDiff gradients/s:
+  Stage-1 negbin **482 vs 44**, Stage-1 hurdle-Weibull **241 vs 27**, Stage-2 transmission (18 dims)
+  **30 685 vs 1 711**. Gradients agree to ≤4e-14 relative on all three.
+- **`build_rrule` cost is per model TYPE per PROCESS** (66 s negbin / 14 s hurdle-Weibull / 15 s
+  Stage 2), and it is paid inside `DifferentiationInterface.prepare_gradient`, i.e. in the
+  `LogDensityFunction` **constructor** — *not* on the first `logdensity_and_gradient` call. A
+  benchmark that times the first call and not the constructor reports Mooncake's compile cost as
+  ~0 s and looks too good. Time the constructor.
+- **`prefit_stage1!`'s warm-up was warming only one of the two degree models.** `warmed = Ref(false)`
+  was set on `specs[1]`, and `specs` is built `for dm in dms, h in horizons`, so it is *always*
+  `dms[1]`. The second type's rule was therefore derived inside the `Threads.@spawn` region, where
+  Mooncake serialises derivations on a global lock and every other worker blocks while still holding
+  its semaphore slot. Now a `Set{DataType}` keyed on `typeof(dm)`, warmed serially with a timed
+  `@info`. A sysimage does **not** remove this need: `:Mooncake` in the sysimage bakes in Mooncake's
+  own codegen, but the rule keys on the concrete `DynamicPPL.Model` type, which does not exist until
+  `forecast_utils.jl` is included at runtime.
+- **The AD backend is deliberately NOT in the cache token.** The target density is the same function;
+  AD only supplies its gradient. Encoding it would fork the 504-file Stage-1 and 1512-file Stage-2
+  grids for no scientific difference. But the draws are **not** bit-identical (different accumulation
+  order ⇒ chaotically different LBFGS/NUTS trajectories), so artefacts record `ad_backend` in the
+  JLD2 instead, and a partially-refitted grid is **mixed-provenance**. Audit before publishing:
+  `countmap([jldopen(p) do f; haskey(f,"ad_backend") ? f["ad_backend"] : :legacy end for p in glob("8j_s1_*", "../dt_intermediate")])`.
+- **`ETp = promote_type(...)` in `model_degree` is a no-op under Mooncake — do NOT delete it.**
+  Mooncake substitutes no tracked element type, so `ETp` collapses to `Float64` and the buffers are
+  plain `Matrix{Float64}` (which Mooncake mutates and differentiates natively). The promotion is
+  still load-bearing for `:reversediff`, which remains the fallback.
+- **`LogDensityFunction`'s accessor: use `getlogjoint_internal`, not `getlogjoint`.** Amending the
+  entry below (`LogDensityFunction` harness): the *linked-VarInfo* half stands verbatim, but
+  `getlogjoint`'s accumulators omit `LogJacobianAccumulator`, so over a linked VarInfo it is the log
+  joint *without* the change-of-variables Jacobian. `getlogjoint_internal` is the DynamicPPL 0.39
+  default and is what NUTS and Pathfinder actually differentiate — the only form that reproduces the
+  sampler's target.
+- **Environment**: `Manifest.toml` had been left claiming `julia_version = "1.11.1"` while the
+  container ran 1.12.4 — it only worked because the persisted depot carried a `compiled/v1.12`
+  cache. Re-resolving under 1.12.4 moved **only** stdlibs/jlls; no Turing-stack version changed.
+  `Project.toml` gained its first-ever `[compat]`, with `julia = "1.12"` so that drift is a hard
+  resolve error next time. `Enzyme` (a direct dep referenced by zero lines of `src/`) was removed
+  with its 9 transitive packages.
+
+## Stage-1 NUTS: Pathfinder-mean init, explicit adapts, propagating failure 2026-08-05 (`framework.jl`, `joint_model.jl`)
+
+Backfilled — this work was implemented but never written up. Stage 1 now defaults to NUTS
+(`cfg.stage1_use_nuts = true`); **Stage 2 has no NUTS path at all and is always Pathfinder**, which
+is the point of the cut (100 cheap fits per Stage-1 draw), not an omission.
+
+- **`InitFromParams` resolves by VarName symbol, NOT by MCMCChains' flattened label — and falls back
+  to `InitFromPrior()` SILENTLY.** The original init was built as
+  `InitFromParams(NamedTuple(zip(names(pf.draws_transformed, :parameters), means)))`, whose keys are
+  `Symbol("z[1,1]")`, `Symbol("p0f[3,7]")`, … None of those match their varname (`z`, `p0f`), so
+  **every array-valued latent fell through to the prior** — 396 of 402 (984 of 990) coordinates —
+  while the code appeared to start from Pathfinder. Falling back is documented behaviour, so nothing
+  errored. Verified on DynamicPPL 0.39.15. `_pf_mean_init` now builds the NamedTuple by
+  `link!!`/`values_as` round-trip and **asserts every model varname is covered**. Any future
+  `InitFromParams` construction must be checked the same way: assert coverage, never assume it.
+- **The Pathfinder mean is taken in the UNCONSTRAINED space** (`pf.fit_distribution`'s `μ`, the
+  ELBO-maximising `MvNormal`), not by averaging `draws_transformed` — which would average `p0f` on
+  the constrained `[0,1]` scale.
+- **`NUTS()`'s convenience constructor derives `n_adapts = min(1000, n_sample ÷ 2)`.** At the old
+  `n_sample = 250` that is **125** warmup iterations to adapt a step size and a diagonal metric in
+  402/990 dimensions (Stan's default is 1000). That is an accident of the constructor, not a tuning
+  choice — hence the explicit `cfg.stage1_nuts_adapts/draws/target_accept/max_depth` fields.
+- **A NUTS failure must PROPAGATE.** It used to be caught and replaced by `pf.draws_transformed`,
+  which `fit_or_load_stage1` then wrote under the NUTS filename with nothing to distinguish it — a
+  Pathfinder result wearing a NUTS name, and across a threaded 504-fit prefit the `@warn` is easy to
+  lose. `prefit_stage1!` already counts the cell as `failed` and leaves no file, so propagating keeps
+  it refittable.
+- **No R̂ here — one chain per fit.** `turing_utils.jl`'s `Rhat < 1.1` check cannot apply. Also
+  `names(chn, section)` is a bare `name_map[section]` lookup and throws `KeyError` on a missing
+  section, so `_nuts_diagnostics` goes through `MCMCChains.sections` first — a Pathfinder `Chains`
+  has no `:internals` section at all.
+- **Flipping the default moved `CONTACTS_TOKEN`.** It is built from the *default* `FrameworkConfig`,
+  so `stage1_use_nuts = true` made it `…-gi-nuts`. The existing 504/1512-file Pathfinder grid is now
+  reached by the new `CONTACTS_TOKEN_PF`; until the NUTS grid is fitted, viz helpers that default to
+  `CONTACTS_TOKEN` will find **no files**. Same pattern as `CONTACTS_TOKEN_HD`, but no separate
+  directory — both generations live in `dt_intermediate/`, separated by the suffix alone.
+
 ## `Meta.parseall` does NOT throw on a syntax error 2026-08-02 (verification tooling)
 
 - Used as a cheap "does this file still parse?" gate after bulk edits, `Meta.parseall(read(f,String))`

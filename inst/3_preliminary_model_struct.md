@@ -845,10 +845,18 @@ antibody at $t_0+h$ (§3.2, §8).
 
 For one $(dm, nb, \text{origin}, h)$:
 
-1. **Stage 1** — `fit_stage1(dm, ds, pop, cfg)` fits the contact GP by **Pathfinder** (default; or
-   NUTS when `cfg.stage1_use_nuts = true`, initialised from the Pathfinder mean). `stage1_moment_draws`
-   then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments (deterministic even-grid
-   subsample).
+1. **Stage 1** — `fit_stage1(dm, ds, pop, cfg)` fits the contact GP by **NUTS**
+   (`cfg.stage1_use_nuts`, the default since 2026-08-05), **initialised from the Pathfinder mean**:
+   Pathfinder runs first regardless, and NUTS starts from its `fit_distribution` mean in the
+   *unconstrained* space, so the cost is **additive**, not a replacement. Set
+   `stage1_use_nuts = false` for the Pathfinder-only preliminary. NUTS is configured explicitly —
+   `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.9`, `_max_depth = 10` —
+   because the convenience constructor `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, i.e.
+   only $125$ warmup iterations to adapt a step size and diagonal metric in $402$/$990$ dimensions.
+   **One chain per fit**, so there is no $\hat R$; health is reported by `_nuts_diagnostics`
+   (divergence count, fraction of transitions saturating `max_depth`, minimum ESS).
+   `stage1_moment_draws` then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments
+   (deterministic even-grid subsample).
 2. **Stage 2** — `fit_stage2_pooled(nb, moment_draws, wd, cfg)` forms $\{C^\ast_t\}$ for each Stage-1
    draw (via `contact_star`) and Pathfinder-fits `model_transmission` conditioning on it, keeping
    $D = $ `cfg.n_stage2_draws` $= 100$ draws. The $M\times D = 10{,}000$ pooled draws
@@ -866,14 +874,43 @@ comparability of WIS/log score — is preserved. `prefit_stage1!` drops such deg
 so **no `8j_s1_no-contact_*` file is ever written**.
 
 The random seed is `cfg.seed = 1236` (Stage-2 draw $m$ uses `Xoshiro(seed + m)`). Fits are mutually
-independent: `prefit_stage1!` fans the Stage-1 chains out over Julia threads (BLAS pinned, warm-compile
-first), then `prefit_stage2!` runs each Stage-2 cell's 100 per-draw fits under the same concurrency cap;
+independent: `prefit_stage1!` fans the Stage-1 chains out over Julia threads (BLAS pinned, and
+**one warm fit per *degree-model type*** before the fan-out — each `typeof(dm)` is a distinct
+`model_degree` signature and therefore a distinct AD-rule derivation), then `prefit_stage2!` runs each
+Stage-2 cell's 100 per-draw fits under the same concurrency cap;
 origins are processed sequentially (bounded memory). Artefacts cache to
 `dt_intermediate/8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2` (Stage 1) and
 `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2` (Stage 2); cached files are skipped ⟹ resumable.
 
-**The 8j notebook uses Pathfinder for both stages (`STAGE1_USE_NUTS = false`); switching Stage 1 to
-NUTS is the intended later refinement.**
+**The 8j notebook now uses NUTS for Stage 1 (`STAGE1_USE_NUTS = true`, the default) and Pathfinder
+for Stage 2. Stage 2 has no NUTS path at all** — 100 cheap Pathfinder fits per Stage-1 draw is the
+point of the cut, not an omission. Because `stage1_use_nuts` is a token component, the NUTS fits form
+a **new generation** (`…-gi-nuts`); the previous Pathfinder generation stays on disk and is reached
+by `CONTACTS_TOKEN_PF`.
+
+### 7.1 Automatic differentiation
+
+Both stages' gradients go through `ADTypes`/`DifferentiationInterface`, selected by a single
+`cfg.ad_backend` (`:mooncake` — the default — `:reversediff`, or `:forwarddiff`) and resolved once by
+`_resolve_adtype`/`ad_type` in `framework.jl`. One knob covers everything because Stage-1 Pathfinder,
+Stage-1 NUTS and Stage-2 Pathfinder all construct the *same*
+`DynamicPPL.LogDensityFunction(model, getlogjoint_internal, linked_vi; adtype)`.
+
+Measured at origin 2021-05-09 (gradients/s, Mooncake vs ReverseDiff): Stage-1 NegBin ($402$ dims)
+**482 vs 44**; Stage-1 hurdle-Weibull ($990$ dims) **241 vs 27**; Stage-2 transmission ($18$ dims)
+**30 685 vs 1 711**. Gradients agree to $\le 4\times10^{-14}$ relative on all three, so this is a pure
+speed change. Mooncake pays a one-off rule build per model *type* per process ($\approx 66$ s / $14$ s
+/ $15$ s), negligible against the $O(10^5)$ gradient evaluations one Stage-1 NUTS fit needs.
+
+Two consequences worth stating:
+
+- ReverseDiff and ForwardDiff are **tracked-number** backends, which is why `model_degree` promotes
+  `ETp = promote_type(...)` before allocating its `K1`/`K2`/`G` buffers — miss a term and that
+  latent's tape is silently cut. **Mooncake is source-to-source and substitutes no element type**, so
+  under it `ETp` collapses to `Float64` and the promotion is an inert compile-time constant. It is
+  still load-bearing for the ReverseDiff fallback and must not be removed.
+- The AD backend is deliberately **not** a cache-token component (AD is a numerical means, not a
+  model change). It is recorded inside each Stage-1 artefact under the `ad_backend` key instead.
 
 > **Stage-1 dimension after the hierarchical dispersion and fitted $p^0$ (2026-07-30).** The contact
 > block gains $T = 12$ shared scales $\tau_t$ and $A^2 T = 588$ per-cell standard normals, and — on

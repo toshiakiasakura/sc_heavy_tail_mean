@@ -31,6 +31,8 @@ using DynamicPPL
 using MCMCChains
 using Pathfinder
 using Turing
+using Mooncake
+using ReverseDiff
 
 # Exercise Distributions
 d = Normal(0, 1)
@@ -53,6 +55,13 @@ end
 
 model = demo(1.0)
 chain = sample(model, NUTS(0.65), 50; progress=false)
+
+# Exercise the two AD backends the forecasting framework selects between (cfg.ad_backend).
+# Mooncake is the default; ReverseDiff the fallback. This warms each backend's own machinery —
+# it does NOT warm the derived rule for `model_degree`, whose concrete Model type only exists
+# once forecast_utils.jl is included (see build_sysimage.jl).
+sample(model, NUTS(0.65; adtype = AutoMooncake()),    50; progress=false)
+sample(model, NUTS(0.65; adtype = AutoReverseDiff()), 50; progress=false)
 
 # Exercise Arrow round-trip so the compiled sysimage has DataFrame<->Arrow paths warm.
 let

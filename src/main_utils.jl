@@ -35,6 +35,15 @@ using Pathfinder
 using DynamicPPL
 using Turing
 using ReverseDiff          # loads the Turing/DynamicPPL ReverseDiff AD extension (AutoReverseDiff)
+using Mooncake             # 2026-08-05: loads DynamicPPLMooncakeExt / BijectorsMooncakeExt /
+                           # DifferentiationInterfaceMooncakeExt ⇒ AutoMooncake() works. This is the
+                           # forecasting framework's DEFAULT backend (`cfg.ad_backend`, framework.jl).
+                           # UNCONDITIONAL, like ReverseDiff above: `using` is only legal at top
+                           # level, so loading it lazily from `_resolve_adtype` would need an
+                           # `@eval Main using …` plus an `invokelatest` world-age barrier — the
+                           # freshly-loaded extension methods are invisible to the already-compiled
+                           # caller. Notebooks 1j–7j pay the load cost without using AD, which is the
+                           # same trade-off `using ReverseDiff`/`Turing`/`Pathfinder` already make.
 using MCMCChains
 
 include("distributions/main.jl")
