@@ -556,8 +556,8 @@ $$
 so the total number of $i\!\to\! j$ contacts equals that of $j\!\to\! i$ contacts.
 
 **Spatial kernel over the age-pair grid.** The 28 log-rates are smoothed by a non-centred GP over
-the age-pair coordinates. The spatial kernel is an **anisotropic** separable RBF in **diagonal
-coordinates**: the age pair $(\text{mid}_{p_1},\text{mid}_{p_2})$ is rotated $45°$ into a total-age
+the age-pair coordinates. Since `-diag` (2026-08-05) the GP smooths **the matrix diagonal only**.
+The age pair $(\text{mid}_{p_1},\text{mid}_{p_2})$ is still rotated $45°$ into a total-age
 (along-diagonal) coordinate and an age-gap (across-diagonal) coordinate,
 
 $$
@@ -565,17 +565,31 @@ u_p = \frac{\text{mid}_{p_1}+\text{mid}_{p_2}}{\sqrt 2}, \qquad
 v_p = \frac{\text{mid}_{p_1}-\text{mid}_{p_2}}{\sqrt 2},
 $$
 
-each with its **own** length-scale — $\rho_{\text{diag}}$ on total age, $\rho_{\text{gap}}$ on the
-age gap (assortativity):
+but $v$ **no longer carries a length-scale**: it only selects the diagonal, since $v_p = 0
+\iff p_1 = p_2$. Writing $\mathbb 1^{\text{d}}_p = \mathbb 1\{p_1 = p_2\}$ for the 7 same-age cells,
 
 $$
-K^{\text{age}}_{pq} = \exp\!\left(-\frac{(u_p-u_q)^2}{2\rho_{\text{diag}}^2} - \frac{(v_p-v_q)^2}{2\rho_{\text{gap}}^2}\right),
+K^{\text{age}}_{pq} = \begin{cases}
+1 & p = q\\
+\exp\!\left(-\dfrac{(u_p-u_q)^2}{2\rho_{\text{diag}}^2}\right) & p \neq q,\ \mathbb 1^{\text{d}}_p = \mathbb 1^{\text{d}}_q = 1\\
+0 & \text{otherwise,}
+\end{cases}
 \qquad L_{\text{age}} = \mathrm{chol}(K^{\text{age}} + 10^{-6} I).
 $$
 
-The rotation is orthonormal, so $(u_p-u_q)^2+(v_p-v_q)^2 = (\text{mid}_{p_1}-\text{mid}_{q_1})^2 +
-(\text{mid}_{p_2}-\text{mid}_{q_2})^2$ and $\rho_{\text{diag}}=\rho_{\text{gap}}$ recovers the
-isotropic RBF exactly.
+So $\rho_{\text{diag}}$ is the **sole** spatial length-scale: the 7 diagonal cells are smoothed
+along total age and the 21 off-diagonal cells keep the field's marginal scale $\eta$ but are
+correlated with nothing. The $\sqrt 2$ normalisation is now a units convention (it keeps $\rho$,
+`RHO_BOUNDS` and `gp_len_prior` on the age-year scale) rather than half an orthonormal rotation.
+
+*Why not simply delete the $v$ term?* Setting $\rho_{\text{gap}} \to \infty$ instead would make
+cells with equal **total age** perfectly correlated regardless of their age gap. Measured on this
+design that drops $\mathrm{rank}(A_p)$ from 27 to 21 — six field directions left to the $10^{-6}$
+jitter — and makes `2-10|16-24` identically equal to `11-15|11-15` (both total age 26). The form
+above keeps $\mathrm{rank}(A_p) = 27$ throughout the region the prior supports — up to
+$\rho = 66.7$, i.e. $+5.6\sigma$ under `gp_len_prior` — degrading to 24 only at the $\rho = 500$
+ceiling, where the 7 diagonal cells merging is the *correct* limit. $\mathrm{chol}(A_p + 10^{-6}I)$
+succeeds at every $\rho$ in `RHO_BOUNDS`.
 
 **Separable spatio-temporal GP over age-pairs × weeks.** Over the $T$ window weeks the field is *not*
 drawn independently each week. Each age-pair carries its own temporally-correlated log-rate, with the
@@ -610,19 +624,26 @@ corners, with $\max_t|\overline{R_{\cdot,t}}| \le 7.4\times10^{-16}$.
 
 *Why the constraint.* Nothing previously fixed the field's per-week mean over the pairs, and that mean
 is exactly what $c_t$ below already parameterises — so $\eta$ and $\sigma_c$ were confounded, and
-increasingly so as the length-scales grow ($K^{\text{age}}\to J$, rank-1). It is what makes the
+increasingly so as the length-scales grow. It is what makes the
 "decoupled amplitude" claim below true rather than aspirational. $Z$ loses a row, so Stage 1 is
 **390** (NegBin) / **978** (hurdle-Weibull) unconstrained dimensions rather than 402/990; the
-dimension saving is incidental, identifiability is the point.
+dimension saving is incidental, identifiability is the point. (`-diag` later the same day removed
+the $\log\rho_{\text{gap}}$ scalar as well, giving the current **389** / **977**. Under the old
+anisotropic kernel the confounding became total as $\rho\to\infty$, since $K^{\text{age}}\to J$,
+rank-1, and the field collapsed to an exact copy of $c_t$; under `-diag` that limit is
+$\mathrm{block}(J_7, I_{21})$, rank 22, so only the 7 diagonal cells merge and the confounding is
+partial — but the constraint is still what makes $\eta$ and $\sigma_c$ separately meaningful.)
 
 *Consequence for $\eta$.* $K^{\text{age}}$ has unit diagonal but $M K^{\text{age}} M$ does not, so
 $\eta$ is no longer exactly the marginal SD — the field's SD is $\eta\sqrt{\operatorname{diag}(M
-K^{\text{age}} M)}$, measured at $\times0.98$–$\times0.91$ across the surveyed posterior range
-($\rho_{\text{diag}}\in[3.49,12.77]$, $\rho_{\text{gap}}\in[3.02,10.30]$), which is well inside a
-prior spanning $\times0.6$–$\times1.65$ at $\pm1\sigma$; `gp_scale_prior` is therefore unchanged.
+K^{\text{age}} M)}$, measured at $\times0.979$–$\times0.982$ at the prior mode $\rho=4$, $\times0.950$–$\times0.984$
+at $\rho=7.9$ and $\times0.932$–$\times0.985$ at $\rho=10.9$ (the $+2\sigma$ reach of
+`gp_len_prior`); the spread is across cells, the diagonal ones shrinking most because they are the
+only correlated block. All well inside a prior spanning $\times0.6$–$\times1.65$ at $\pm1\sigma$;
+`gp_scale_prior` is therefore unchanged.
 Do **not** renormalise $A$ by $\operatorname{tr}(A)/P$ to restore the unit diagonal: as
 $\rho\to\infty$ that ratio is dominated by the jitter and the field degenerates to *white noise* of
-scale $\eta$, inverting the correct limit (field $\to 0$, measured $\times0.052$ at $\rho=500$, with
+scale $\eta$. Under `-diag` the field does **not** vanish at the ceiling either ($\times0.768$–$1.009$ at $\rho=500$, versus $\times0.052$ under the old anisotropic kernel), because off-diagonal cells stay independent however large $\rho$ grows (with
 $c_t$ carrying everything). The **overall weekly level** is likewise temporally smoothed, but with its own
 amplitude $\sigma_c$ **decoupled** from $\eta$: a scalar intercept $c$ plus a 1-D temporal GP sharing
 $L_{\text{time}}$,
@@ -635,14 +656,14 @@ $$
 and the week-$t$ log-rate field is $r_{p,t} = c_t + R_{p,t}$. The intercept is anchored at the grand
 mean $c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$ (so $c \sim \mathcal N(c_0,3^2)$).
 $\rho_{\text{time}}\to 0$ recovers independent weeks; $\rho_{\text{time}}\to\infty$ collapses to one
-pooled field. Numerically, each of $\rho_{\text{diag}}, \rho_{\text{gap}}$ is clamped to $[0.5,500]$,
+pooled field. Numerically, $\rho_{\text{diag}}$ is clamped to $[0.5,500]$,
 $\rho_{\text{time}}$ to $[0.25,104]$ weeks (both widened 2026-08-05 — see `RHO_BOUNDS` /
 `RHO_TIME_BOUNDS`, which are the single source of truth), $\eta$ and $\sigma_c$ to $[e^{-3}, e^{2}]$, and the per-cell
 exponent $r_{p,t} + \log N_j$ to $[-8,6]$ (so $\mu \in [3\times10^{-4}, 400]$); the modes stay
 interior so reciprocity is not distorted.
 
 The kernels $L_A, L_{\text{time}}$, the sum-to-zero basis $Q$, the length-scales
-$\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ are all
+$\rho_{\text{diag}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ are all
 **shared across weeks**; the per-week variation is now **temporally correlated** (through
 $L_{\text{time}}$) rather than an independent draw per week (§6).
 
@@ -722,7 +743,7 @@ the joint model and are given below as the two stages.
 **The model estimates contacts per week, temporally smoothed.** A single **separable
 spatio-temporal GP** (§5) governs all $T$ window weeks — sharing the spatial kernel $L_{\text{age}}$,
 the temporal kernel $L_{\text{time}}$, the length-scales
-$\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ — so the
+$\rho_{\text{diag}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ — so the
 weekly log-rate fields are **temporally correlated** rather than independent draws. Each week yields
 its own $C^\ast_t$ (through the per-week level $c_t$, structure-field column $R_{\cdot,t}$, and
 per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$, §4.3), and the transmission NGM $N(t)$ therefore varies in time through
@@ -734,7 +755,7 @@ per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$, §4.3), and the 
 
 $$
 \begin{aligned}
-\log\rho_{\text{diag}},\ \log\rho_{\text{gap}} &\sim \mathcal N(\log 4,\ 0.5^2), &
+\log\rho_{\text{diag}} &\sim \mathcal N(\log 4,\ 0.5^2), &
 \log\rho_{\text{time}} &\sim \mathcal N(\log 4,\ 0.5^2), &
 \log\eta &\sim \mathcal N(0,\ 0.5^2), \\
 c &\sim \mathcal N(c_0,\ 3^2), &
@@ -914,7 +935,7 @@ For one $(dm, nb, \text{origin}, h)$:
    `stage1_use_nuts = false` for the Pathfinder-only preliminary. NUTS is configured explicitly —
    `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.9`, `_max_depth = 10` —
    because the convenience constructor `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, i.e.
-   only $125$ warmup iterations to adapt a step size and diagonal metric in $402$/$990$ dimensions.
+   only $125$ warmup iterations to adapt a step size and diagonal metric in $389$/$977$ dimensions.
    **One chain per fit**, so there is no $\hat R$; health is reported by `_nuts_diagnostics`
    (divergence count, fraction of transitions saturating `max_depth`, minimum ESS).
    `stage1_moment_draws` then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments
@@ -1075,8 +1096,9 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   `gen_mean_days`/`gen_sd_days` $=5/5$ days with `gen_prior_rel_sd` $=0.2$ (§3.1 — these now set the
   *prior* on the estimated $w_\mu,w_\sigma$, not a fixed $w$), `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
   `n_stage1_post` $=100$ / `n_stage2_draws` $=100$ (⟹ 10 000 pooled), `stage1_use_nuts` $=$ `false`,
-  GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log4,0.5^2)$ (shared
-  prior for both diagonal length-scales; **recentred $\log15\to\log4$ on 2026-08-05**, see §5),
+  GP prior $\log\rho_{\text{diag}}\sim\mathcal N(\log4,0.5^2)$ (the sole spatial length-scale
+  since `-diag`; centre **recentred $\log15\to\log4$ on 2026-08-05** and carried over unchanged
+  when $\rho_{\text{gap}}$ was removed, see §5),
   $\log\eta\sim\mathcal N(0,0.5^2)$,
   $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
@@ -1115,7 +1137,7 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 - **Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`) and diagnostic figures: WIS by
   horizon, four-ways WIS bars, WIS over the forecast period, forecast-vs-observed fans by origin,
   and fitted transmission structure (susceptibility/infectivity ratios to a reference group and the
-  three GP length-scales $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ over time).
+  two GP length-scales $\rho_{\text{diag}}, \rho_{\text{time}}$ over time).
   Added 2026-07-30: *(i)* a **generation-interval** panel (9j) showing the posterior of the GI mean
   and SD **in days** (back-transformed from $w_\mu,w_\sigma$) and of $w=(w_1..w_4)$, overlaid on the
   prior, by model and over the rolling origins — the identifiability check for the

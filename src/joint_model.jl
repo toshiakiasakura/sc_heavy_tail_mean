@@ -41,6 +41,8 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 #   • `gp_len_prior = N(log 15, 0.5)` was delivered as ρ∈[10.6,19.0] at ±1sd, not [9.1,24.7];
 #   • the floor BOUND: raw log_rho_gap = 1.5375 came out as ρ_gap = 7.22, not exp(1.5375) = 4.65.
 # ⇒ `log_rho_gap`/`log_rho_diag` were 2 of the 15 worst-mixing coordinates (ESS 44.5/59.9 of 500).
+#   (`log_rho_gap` itself was removed later the same day by `-diag`; the clamp lesson stands for the
+#   surviving `log_rho_diag` and for every other soft-clamped log-latent.)
 # With s = 0.25 the same window is the identity to 4 s.f. and the min gradient over ρ∈[1,300] is
 # 0.885. The wide clamps are unaffected (log_kappa 0.980→1.000, μ 0.997→1.000).
 # Keep s well below `(hi − lo)`; s → 0 recovers a hard `clamp` (and a flat, hard-to-escape
@@ -235,12 +237,19 @@ end
     # via the contactee-population offset  log μ_{i→j} = r_{min,max} + log(pop_j)
     # ⟹ pop_i·μ_{i→j} = pop_j·μ_{j→i}. The rate field is a separable-RBF GP over the
     # age-pair grid, non-centred as f = η·L·z (L = chol K).
-    # The kernel is ANISOTROPIC in DIAGONAL coordinates: the age pair (x,y)=(mid_a,mid_b)
-    # is rotated 45° into u=(x+y)/√2 (along the main diagonal = total age) and v=(x−y)/√2
-    # (across the diagonal = age gap), each with its OWN length-scale — ρ_diag on the
-    # total-age direction, ρ_gap on the age-gap direction (assortativity). Because the
-    # rotation is orthonormal, (Δu)²+(Δv)² = (Δx)²+(Δy)², so ρ_diag=ρ_gap recovers the old
-    # isotropic RBF exactly. `ρ_diag`, `ρ_gap`, `η` and the 27×27 Cholesky `La` are SHARED
+    # The kernel smooths the MATRIX DIAGONAL ONLY (`-diag`, 2026-08-05). The age pair
+    # (x,y)=(mid_a,mid_b) is still rotated 45° into u=(x+y)/√2 (along the main diagonal =
+    # total age) and v=(x−y)/√2 (across it = age gap), but v NO LONGER CARRIES A LENGTH-SCALE:
+    # it only selects the diagonal, since v=0 ⟺ a=b. The 7 same-age cells (a,a) are smoothed
+    # along u by the single length-scale ρ_diag; the 21 off-diagonal cells keep the field's
+    # marginal scale η but are correlated with nothing. So `Kp` is an RBF block over the
+    # diagonal cells and the identity elsewhere — PSD and unit-diagonal at every ρ, with
+    # rank(Ap) = 27 up to ρ = 66.7 (+5.6σ under `gp_len_prior`) and degrading gracefully to 24 at
+    # the ρ = 500 ceiling as the 7 diagonal cells merge. `cholesky(Ap + 1e-6·I)` is clean throughout.
+    # ⚠ Do NOT "restore" the old anisotropy by deleting the v term instead (ρ_gap→∞): that
+    # makes cells with equal TOTAL age perfectly correlated, drops rank(Ap) 27→21 and makes
+    # `2-10|16-24` identical to `11-15|11-15` (both total age 26). See tasks/lessons.md.
+    # `ρ_diag`, `η` and the 27×27 Cholesky `La` are SHARED
     # across weeks. In the per-week regime the weekly fields are no longer iid: they are
     # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Q·La·z·Ltᵀ) with a
     # shared temporal Cholesky Lt(ρ_time) and a decoupled temporal level cₜ = c + σ_c·(Lt·z_c).
@@ -251,19 +260,32 @@ end
     # old clamp, the degenerate μ≡403 saturation; see tasks/lessons.md).
     logpop = log.(pop ./ pop[1])
     log_rho_diag ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # total-age direction
-    log_rho_gap  ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # age-gap direction
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
-    ρ_diag = exp(_softclamp(log_rho_diag, RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
-    ρ_gap  = exp(_softclamp(log_rho_gap,  RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
+    # UNITS: ρ_diag lives on the `su` scale, so between diagonal cells it is √2× an age difference —
+    # ρ_diag = 4 is an effective age-difference length-scale of 4/√2 = 2.83 yr. Unchanged from the
+    # anisotropic kernel (see the `su` note below).
+    ρ_diag = exp(_softclamp(log_rho_diag, RHO_BOUNDS...))   # length-scale, soft-bounded
     η = exp(_softclamp(log_eta, -3.0, 2.0))               # GP marginal scale, soft-bounded
     c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
     P = length(ds.pair_list)
-    # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised
+    # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised. `su` is the
+    # kernel's only coordinate. KEEP THE /√2: for two diagonal cells (a,a) and (b,b) it makes
+    # |su_m − su_n| = √2·|mid_a − mid_b| exactly the EUCLIDEAN distance in the (mid_a, mid_b)
+    # plane, so ρ_diag keeps precisely the meaning and scale it had under the old anisotropic
+    # kernel — verified: on diagonal-cell pairs the old and new kernels agree to 0.000e+00 over 30
+    # (ρ_diag, ρ_gap) combinations, because v=0 for both cells made the old gap factor exp(0)=1
+    # there. The whole `-diag` change is therefore confined to the OFF-diagonal, which is why
+    # `gp_len_prior` could be carried over untouched.
     su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in ds.pair_list]   # along-diagonal (total age)
-    df = [(mid[p[1]] - mid[p[2]]) / sqrt(2) for p in ds.pair_list]   # across-diagonal (age gap)
-    # 28×28 anisotropic separable RBF in diagonal coordinates
-    Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag^2) + (df[m] - df[n])^2 / (2 * ρ_gap^2)))
+    # Diagonal cells of the contact matrix. Equivalently `(mid[p[1]] - mid[p[2]])/√2 == 0`, i.e. the
+    # v=0 line — this mask is what is left of the old `df` coordinate. Parameter-free, so it is
+    # constant across gradient evaluations.
+    isd = [p[1] == p[2] for p in ds.pair_list]
+    # 28×28: RBF along total age WITHIN the matrix diagonal, identity off it
+    Kp = [m == n           ? one(ρ_diag) :
+          isd[m] && isd[n] ? exp(-(su[m] - su[n])^2 / (2 * ρ_diag^2)) :
+                             zero(ρ_diag)
           for m in 1:P, n in 1:P]
     # ---- SUM-TO-ZERO over the P pairs, within each week (2026-08-05) ----
     # `Q = ds.sz_Q` is the constant P×(P−1) Helmert basis of 1^⊥ (`_sum_zero_basis`), so QQᵀ = M =
@@ -275,30 +297,36 @@ end
     #
     # WHY: nothing previously constrained the field's per-week mean over the pairs, and that mean is
     # exactly what `c_t = c + σ_c·(Lt·z_c)_t` already parameterises — so η and σ_c were confounded,
-    # increasingly so as ρ grows (`Kp → J`, rank-1; see `RHO_BOUNDS`' docstring). The comment below
+    # increasingly so as ρ grows. The comment below
     # has claimed since the temporal GP landed that σ_c exists "so η governs age-structure only";
-    # this is what makes that true. `z` drops from P×Tn to (P−1)×Tn ⇒ Stage 1 goes 402→390 (NegBin)
-    # and 990→978 (hurdle-Weibull). The dimension saving is incidental; identifiability is the point.
+    # this is what makes that true. `z` drops from P×Tn to (P−1)×Tn ⇒ Stage 1 goes 401→389 (NegBin)
+    # and 989→977 (hurdle-Weibull). The dimension saving is incidental; identifiability is the point.
+    # (Under the OLD anisotropic kernel the confounding was total — `Kp → J`, rank-1, so the field
+    # collapsed to a per-week constant, an exact copy of `c_t`. Under the diagonal-only kernel the
+    # ρ→∞ limit is `block(J₇, I₂₁)`: rank(Kp)=22, rank(Ap)=21, so only the 7 diagonal cells merge
+    # and the 21 off-diagonal ones stay free. The confounding is partial now, but `-s0` is still
+    # what makes η and σ_c separately meaningful.)
     #
     # η IS NO LONGER THE MARGINAL SD. `Kp` has unit diagonal, `M·Kp·M` does not — the field's SD is
-    # η·sqrt(diag(M·Kp·M)). Measured on this design: ×0.964 at the posterior (ρ_diag 7.9, ρ_gap 4.65)
-    # and ×0.825 at ρ=17.9 (the +2σ reach of `gp_len_prior`), i.e. well inside a prior that spans
-    # ×0.6–×1.65 at ±1σ, so `gp_scale_prior` is left alone. Do NOT "fix" this by renormalising `Ap`
-    # by tr(Ap)/P: as ρ→∞ that is a 0/0 dominated by the jitter and the field degenerates to WHITE
-    # NOISE of scale η — the opposite of the correct limit, which is the one below (field → 0,
-    # measured ×0.052 at ρ=500, with `c_t` carrying everything).
+    # η·sqrt(diag(M·Kp·M)). Measured on this design: ×0.979–0.982 at the prior mode (ρ=4),
+    # ×0.950–0.984 at ρ=7.9 and ×0.932–0.985 at ρ=10.9 (the +2σ reach of `gp_len_prior`) — the
+    # spread is across cells, the diagonal ones shrinking most because they are the only correlated
+    # block. All well inside a prior that spans ×0.6–×1.65 at ±1σ, so `gp_scale_prior` is left
+    # alone. Do NOT "fix" this by renormalising `Ap` by tr(Ap)/P. Even at the clamp ceiling the
+    # factor only reaches ×0.768–1.009 (ρ=500), i.e. the field does NOT vanish the way it did under
+    # the old kernel (×0.052 there) — off-diagonal cells stay independent no matter how large ρ gets.
     Ap = ds.sz_Qt * Kp * ds.sz_Q                        # (P−1)×(P−1) projected kernel
     # DENSE Cholesky factor (Matrix, not the LowerTriangular `.L`): the per-week structure field
     # forms the matrix product Q·La·z·Ltᵀ, and ReverseDiff cannot write a dense cotangent into a
     # triangular-typed factor (`… * Ltᵀ` → "cannot set index in the lower triangular part of an
     # UpperTriangular matrix"). Densifying both factors is the RD-safe form; gradients w.r.t.
-    # ρ_diag/ρ_gap still flow through `Matrix(cholesky(...).L)`. (Verified vs triangular variants.)
+    # ρ_diag still flows through `Matrix(cholesky(...).L)`. (Verified vs triangular variants.)
     #
     # Jitter stays 1e-6. `Ap` reaches near-singularity SOONER than `Kp` does — its eigenvalues are
-    # `Kp`'s NON-CONSTANT ones, and `Kp → J` means `Ap → 0` — so this was checked rather than
-    # assumed: swept over 25×25 ρ values spanning all of `RHO_BOUNDS`, `min eigval(Ap) = −1.3e-15`
-    # (numerical zero, at ρ_diag=500) and even a 1e-8 jitter gave 0/625 `PosDefException`s. That
-    # margin matters because the Pathfinder call is not try/caught (cf. `Kt`'s 1e-4 below).
+    # `Kp`'s NON-CONSTANT ones — so this was checked rather than assumed: swept over 200 ρ values
+    # spanning all of `RHO_BOUNDS`, `min eigval(Ap) = −1.1e-15` (numerical zero, at the ceiling) and
+    # even a 1e-8 jitter gave 0/200 `PosDefException`s. That margin matters because the Pathfinder
+    # call is not try/caught (cf. `Kt`'s 1e-4 below).
     La = Matrix(cholesky(Symmetric(Ap) + 1e-6 * I).L)
 
     # per-cell log-rate → directional mean μ_{i→j}. Soft-clamped (not `clamp`, so ReverseDiff-safe)
@@ -421,7 +449,7 @@ end
     else
         # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over
         # weeks by a temporal RBF over week indices 1:Tn, sharing one length-scale ρ_time
-        # across all age-pairs; the spatial kernel (ρ_diag, ρ_gap, η, La) is shared as before.
+        # across all age-pairs; the spatial kernel (ρ_diag, η, La) is shared as before.
         #   • temporal kernel  Kt[s,t] = exp(-(s-t)²/(2ρ_time²)),  Lt = chol(Kt + jitter)
         #   • structure field  R = η·(Q·La·z·Ltᵀ)  (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ M·Kage·M),
         #     each age-pair a temporally-correlated GP, each week the spatial RBF conditioned to
@@ -433,7 +461,7 @@ end
         # STILL CONFOUNDED, DELIBERATELY LEFT: `c` and the temporal mean of σ_c·(Lt·z_c) duplicate
         # each other the same way — one flat direction on the Tn axis, fixable with the identical
         # `_sum_zero_basis` machinery. Held back so the Tn-axis change can be measured separately.
-        # ρ_diag=ρ_gap recovers the isotropic spatial kernel; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
+        # ρ_diag→0 ⇒ iid age-pairs, →∞ ⇒ the 7 diagonal cells merge; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
         log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
         ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
         # temporal Cholesky over the Tn window weeks. Jitter 1e-4 (not 1e-6): Kt is near
@@ -649,7 +677,7 @@ Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vect
 
 Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
 variable whose name starts with `z` (`z`, `z_c`) — which are drawn from `N(0, z_scale²)` instead of
-`N(0,1)`. These dominate the parameter space (336 of 402/990 unconstrained coordinates) and are only
+`N(0,1)`. These dominate the parameter space (336 of 389/977 unconstrained coordinates) and are only
 weakly identified, so where the path starts largely decides where it ends.
 
 The name filter is a **prefix**, not a fixed list, so it automatically covers any future `z*` block;
@@ -745,8 +773,8 @@ former implementation here was
 
 and every one of those keys FAILS to match its varname (`z`, `p0f`, …), so each array-valued latent
 fell through to the default `fallback = InitFromPrior()` — **silently**, because falling back is
-`InitFromParams`'s documented behaviour, not an error. `model_degree` declares only 6 scalars
-against 396 (NegBin) / 984 (hurdle-Weibull) array coordinates, so NUTS was starting from the prior
+`InitFromParams`'s documented behaviour, not an error. `model_degree` declares only 5 scalars
+against 384 (NegBin) / 972 (hurdle-Weibull) array coordinates, so NUTS was starting from the prior
 in ~99% of the space while appearing to start from Pathfinder. Verified on DynamicPPL 0.39.15: a
 `z ~ MvNormal(zeros(4), I)` seeded at 9.0 came back as prior draws, while a sibling scalar was
 honoured. That defeats the whole point of `_stage1_init` (the `z*` blocks "dominate the parameter
@@ -844,7 +872,7 @@ Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` defau
 the NUTS cost is ADDITIVE on top of the Pathfinder cost, not a replacement for it. The sampler is
 built from explicit `cfg.stage1_nuts_*` settings rather than a bare `NUTS()`: the convenience
 constructor derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the old `n_sample = 250` gave
-**125** warmup iterations to adapt a step size and metric in 402/990 dimensions (Stan's default is
+**125** warmup iterations to adapt a step size and metric in 389/977 dimensions (Stan's default is
 1000). ONE chain per fit — see `_nuts_diagnostics` for why, and for what that costs in diagnostics.
 
 A NUTS failure **propagates**. It used to be caught and replaced by `pf.draws_transformed`, which

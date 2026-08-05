@@ -2,6 +2,39 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## "Remove a direction from a separable kernel" has two opposite readings — pick the right one 2026-08-05 (`joint_model.jl`)
+
+Asked to drop the off-diagonal (age-gap) direction from the spatial GP, there are exactly two ways
+to remove a factor from a product kernel, and they are **opposite limits of the same parameter**:
+
+- `ρ_gap → ∞` — delete the `v` term. Everything stays smoothed, but now by **total age alone**.
+- `ρ_gap → 0` — make `v` white. Cells at different gaps become independent; smoothing survives
+  only *along* lines of constant `v`.
+
+Deleting the term is the reading that looks like "removal" in code and is the **wrong** one here.
+Measured on the 7-bin CIS design: `rank(Ap)` falls 27 → 21 (six field directions left to the
+`1e-6` jitter — 72 `z` coordinates with no likelihood signal, exactly the random-walk pathology the
+convergence work was chasing), mean off-diagonal correlation rises 0.036 → 0.189, 17 of 378
+cell-pairs exceed 0.9, and `2-10|16-24` becomes **identically** equal to `11-15|11-15` because both
+have total age 26. The adopted form instead smooths the matrix diagonal only (`-diag`): PSD, unit
+diagonal, `rank(Ap) = 27` and Cholesky-clean at every ρ in `RHO_BOUNDS`.
+
+**Related trap: "diagonal lines" are NOT constant-`v` lines under an irregular grid.** The CIS
+midpoints are `[6, 13, 20, 29.5, 42, 59.5, 74.5]`, so the first matrix diagonal spans midpoint gaps
+`7, 7, 9.5, 12.5, 17.5, 15` — six different `v` values. Grouping cells by equal `v` leaves **19 of
+28 as singletons**; grouping by index offset gives lines of `7, 6, 5, 4, 3, 2, 1`. Say which one is
+meant before implementing, because the two models differ substantially.
+
+**And check what the change does to the prior.** Removing a direction changes which separations the
+kernel can see. Here the smallest surviving one is the 7-year `2-10`→`11-15` step (9.9 in `su`
+units, since `su` distance between diagonal cells is √2× the age difference), where the retained
+`gp_len_prior = N(log 4, 0.5²)` gives correlation 0.047 — at its *mode* the new kernel barely
+smooths. Note what did and did not change: the **scale** is untouched (old and new kernels agree to
+0.000e+00 on every diagonal-cell pair, for any `ρ_gap`, because `v = 0` for both cells made the old
+gap factor `exp(0) = 1` there), so the prior is on exactly the axis it always was. What changed is
+the **information** — ρ is now identified by the 7 diagonal cells' 21 pairs instead of all 378. That
+is survivable (ρ = 7.9 is only +1.36σ and gives 0.456) and the prior was left in place deliberately.
+
 ## A non-centred GP field whose per-week mean is unconstrained duplicates its own level term 2026-08-05 (`joint_model.jl`)
 
 Stage 1's structure field was `R = η·(Lp·z·Ltᵀ)`, drawn over all `P = 28` age pairs with **nothing

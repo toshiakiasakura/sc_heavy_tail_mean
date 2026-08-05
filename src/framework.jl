@@ -109,10 +109,11 @@ WIDENED 2026-08-05, `RHO_BOUNDS` `[log 3, log 45]` → `[log 0.5, log 500]`. The
 2.708 nats wide, which is narrower than `_softplus`'s transition width, so `_softclamp` had **no
 interior** there (max derivative 0.600 anywhere) and was acting as a hard modelling constraint
 disguised as a numerical guard — see the `_softclamp` note in `joint_model.jl`. It is not a
-numerical guard: `cholesky(Symmetric(Kp) + 1e-6·I)` succeeds at every ρ from 1e-3 to 1e4 (as ρ→∞,
-`Kp → J` rank-1 so `cond → P/ε = 2.8e7`, seven orders inside Float64; as ρ→0, `Kp → I`). The real
-limits are identifiability — ρ_gap ≲ 2 makes the kernel diagonal, ρ_diag ≳ 200 makes the field flat
-— and those are held by `gp_len_prior`, not by this clamp.
+numerical guard: `cholesky(Symmetric(Kp) + 1e-6·I)` succeeds at every ρ from 1e-3 to 1e4, and under
+the `-diag` kernel it is safer still (as ρ→∞, `Kp → block(J₇, I₂₁)`, rank 22 rather than rank 1; as
+ρ→0, `Kp → I`). Swept over 200 ρ spanning the whole window, `min eigval(Ap) = −1.1e-15` and even a
+1e-8 jitter gives 0/200 `PosDefException`s. The real limit is identifiability — ρ_diag ≳ 200 merges
+the 7 diagonal cells — and that is held by `gp_len_prior`, not by this clamp.
 
 `RHO_TIME_BOUNDS` `[log 0.5, log 26]` → `[log 0.25, log 104]`, widened 2026-08-05 on MEASUREMENT,
 having first been left alone on the (wrong) reasoning that ρ_time = 26 is already "fully pooled" over
@@ -122,7 +123,9 @@ a 12-week window so more range would be unidentified. A posterior survey — 4 o
 the largest draw sat 0.005 nats below `log 26` (0.1% of the window). Being unidentified up there is
 not a reason to bound it there: the clamp was absorbing the likelihood's preference for a very smooth
 temporal field and reporting false confidence. For contrast, the same survey put ρ_diag in
-[3.49, 12.77] and ρ_gap in [3.02, 10.30] — both far inside `RHO_BOUNDS`, which needs no further change.
+[3.49, 12.77] and ρ_gap in [3.02, 10.30] — both far inside `RHO_BOUNDS`, which needs no further
+change. (That survey predates `-diag`; `ρ_gap` no longer exists and ρ_diag now measures decay along
+the matrix diagonal only, so treat those intervals as an order-of-magnitude guide, not a posterior.)
 
 The new ceiling is ~8.7× the 12-week window, where `Kt` is numerically indistinguishable from
 all-ones (`Kt[1,12]` = 0.914 at ρ_time = 26, 0.978 at 52, 0.994 at 104), so the posterior can express
@@ -155,7 +158,7 @@ artefact of that and should NOT be quoted as a posterior. The POST-clamp values 
 they are what actually entered `Kt` — and those are what show the bound binding. Confirm the raw
 range against a NUTS chain before acting on it.
 """
-const RHO_BOUNDS      = (log(0.5), log(500.0))   # ρ_diag, ρ_gap — age-years
+const RHO_BOUNDS      = (log(0.5), log(500.0))   # ρ_diag — age-years (sole spatial ρ since `-diag`)
 const RHO_TIME_BOUNDS = (log(0.25), log(104.0))  # ρ_time — weeks (widened on measurement, see above)
 
 """
@@ -217,16 +220,16 @@ Base.@kwdef struct FrameworkConfig
     # --- Stage-1 NUTS settings (2026-08-05; consulted only when `stage1_use_nuts`) ---
     # These exist because a bare `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the
     # former `n_sample = 250` gave 125 warmup iterations to adapt a step size and diagonal metric in
-    # 390 (NegBin) / 978 (hurdle-Weibull) dimensions. Stan's default is 1000; 125 is not a tuning
+    # 389 (NegBin) / 977 (hurdle-Weibull) dimensions. Stan's default is 1000; 125 is not a tuning
     # choice, it is an accident of the convenience constructor.
     stage1_nuts_adapts::Int = 1000    # warmup iterations, DISCARDED and drawn ON TOP of `stage1_nuts_draws` (AbstractMCMC applies `discard_initial` before collecting N, so total work = adapts + draws).
     stage1_nuts_draws::Int  = 500     # KEPT draws per Stage-1 fit. Must stay ≥ `n_stage1_post` (=100) or `stage1_moment_draws` cannot fill the cut's 100 imputations; `fit_stage1` enforces that with a `max`.
     stage1_nuts_target_accept::Float64 = 0.9  # above NUTS' 0.65 default: the non-centred GP (`z`, `z_c`) crossed with the soft-clamped exponentials is moderately curved, and the clamp's flat region is exactly where a too-large step lands.
     stage1_nuts_max_depth::Int = 10   # explicit rather than implicit so `_nuts_diagnostics` can report the saturating fraction against a known ceiling.
     stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode THIS field (it encodes only `stage1_use_nuts`, since 2026-08-05), so changing it alone will silently reuse existing chains — delete them if you change it outside a token bump.
-    stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (`z` 324 + `z_c` 12 = 336 of 390/978 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
+    stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (`z` 324 + `z_c` 12 = 336 of 389/977 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)   # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap). RECENTRED log(15)→log(4) on 2026-08-05 (the data support it: naive unsquashed posterior means ρ_gap≈4.65, ρ_diag≈7.9 straddle 4, and the survey put ρ_diag∈[3.49,12.77], ρ_gap∈[3.02,10.30]). THE SD STAYS 0.5 — it was briefly 0.75 and that MEASURABLY BROKE Stage-1 NUTS: at origin 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, mean tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597 (284/402 coords over 1.01). The worst blocks were log_rho_time (ESS 2.7, R̂ 1.32) and the z_c/z field it couples to through Lt (ESS 4.1/1.8, R̂ 1.23/1.60) — a looser prior let ρ_time drift toward the near-pooled region where Kt is rank-1, which collapses the map z↦Fld. DO NOT LOOSEN THIS TO BUY ρ HEADROOM; the clamp is the backstop, this prior is the restraint.
+    gp_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)   # log-ρ_diag Normal(μ,σ), age-years; the SOLE spatial length-scale since `-diag` (2026-08-05) — it smooths the 7 diagonal cells of the contact matrix along total age, and the 21 off-diagonal cells are correlated with nothing. Centre RECENTRED log(15)→log(4) earlier the same day, when there were still two length-scales, on the grounds that the naive posterior means ρ_gap≈4.65 and ρ_diag≈7.9 straddled 4; that pair no longer exists, so the centre is now UNJUSTIFIED BY MEASUREMENT and is simply carried over unchanged (deliberately: the `-diag` change was landed without a refit). ⚠ UNITS: ρ is on the `su` scale, which between diagonal cells is √2× an age difference, so ρ=4 is an effective age-difference length-scale of 4/√2 = 2.83 yr. This is UNCHANGED from the anisotropic kernel — verified, the old and new kernels agree to 0.000e+00 on every diagonal-cell pair over 30 (ρ_diag,ρ_gap) combos, because v=0 for both cells made the old gap factor exp(0)=1 there. WATCH AT THE FIRST REFIT: the closest separation the kernel can now see is the 7-year 2-10→11-15 step (9.9 in su units), where ρ=4 gives correlation only 0.047 — at the prior MODE this kernel barely smooths. What changed is not the scale but the INFORMATION: ρ is now identified by the 7 diagonal cells' 21 pairs alone. The prior does not pin it there (ρ=7.9 is +1.36σ and gives 0.456, ρ=12 is +2.2σ and gives 0.712), so the likelihood can still find a smoothing scale; but if the posterior piles up in the upper tail, RECENTRE rather than widen. THE SD STAYS 0.5 — it was briefly 0.75 and that MEASURABLY BROKE Stage-1 NUTS: at origin 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, mean tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597 (284/402 coords over 1.01). The worst blocks were log_rho_time (ESS 2.7, R̂ 1.32) and the z_c/z field it couples to through Lt (ESS 4.1/1.8, R̂ 1.23/1.60) — a looser prior let ρ_time drift toward the near-pooled region where Kt is rank-1, which collapses the map z↦Fld. DO NOT LOOSEN THIS TO BUY ρ HEADROOM; the clamp is the backstop, this prior is the restraint.
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
     gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)   # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only. Briefly 0.75 on 2026-08-05 and reverted the same day — see `gp_len_prior` for the measurement. This is the PRIMARY suspect in that regression: ρ_time is the length-scale whose drift degenerates Kt, so its prior is what keeps the temporal GP identified. At σ=0.5 the prior puts ρ_time=26 at +3.6σ and the RHO_TIME_BOUNDS ceiling of 104 at +6.5σ, so the ceiling cannot be reached and the restraint is the prior, not the clamp — which is the intended division of labour.
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
@@ -319,7 +322,7 @@ so `temporal-gsar-cut-sc-p0-gi` is NOT the same model as `temporal-gsar-cut-sc`.
 `-nuts` (2026-08-05) — a SAMPLER component, appended when `cfg.stage1_use_nuts`. It is the first
 token component that does not describe the model's parameter space: Stage 1's posterior is the
 same target either way, but Pathfinder only *approximates* it with a single multivariate normal in
-390/978 dimensions, so the draws differ and everything conditioned on them differs with it. The
+389/977 dimensions, so the draws differ and everything conditioned on them differs with it. The
 component is added because `fit_or_load_stage1` short-circuits on bare `isfile`, so without it
 flipping `stage1_use_nuts` would silently reload the 504 Pathfinder chains and change nothing —
 the hazard that was already documented on the `stage1_pathfinder_runs` field.
@@ -352,9 +355,24 @@ Because it is a Stage-1 parameter-space change, **every `8j_s1_*` AND `8j_s2_*` 
 previous token is stale** (Stage 2 conditions on Stage-1 draws), as is every derived 9j cache. It is
 placed BEFORE the `-nuts` sampler component so the model/sampler split stays readable in the
 filename. Note this stacks on the `-nuts` live migration that had not yet been fitted, so in practice
-no completed grid is discarded — see `CONTACTS_TOKEN_PF`."""
+no completed grid is discarded — see `CONTACTS_TOKEN_PF`.
+
+`-diag` (2026-08-05) — the Stage-1 spatial kernel smooths the **matrix diagonal only**. The 45°
+rotation into `u` (total age) and `v` (age gap) survives, but `v` no longer carries a length-scale:
+it only selects the diagonal, since `v = 0 ⟺ a = b`. `Kp` is an RBF in `u` over the 7 same-age cells
+and the identity elsewhere, so `log_rho_gap` is GONE and `log_rho_diag` is the sole spatial ρ.
+Stage 1 drops one scalar: **389** (NegBin) / **977** (hurdle-Weibull), from 390/978. Why: `ρ_gap`
+was one of the two worst-mixing scalars (bulk ESS 44.5 of 500), and the off-diagonal smoothing it
+bought was judged not to earn its keep. The alternative of deleting the `v` TERM instead
+(`ρ_gap → ∞`) was measured and rejected — it drops `rank(Ap)` 27→21 and makes `2-10|16-24`
+identically equal to `11-15|11-15` (both total age 26); see `tasks/lessons.md`.
+
+Stage-1 parameter-space change again, so the same staleness rule applies, and `gp_len_prior`'s
+centre is now carried over rather than justified — see its own note. The read-only mirrors
+(`reconstruct_mu_draws`, `load_transmission_draws`) grew a `log_rho_gap ∈ pnames ⇒ refuse` sniff,
+because the `z` shape is unchanged and the existing `zrows` guard is blind to this."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0" *
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0-diag" *
     (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`

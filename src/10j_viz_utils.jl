@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
+# (log_rho_diag, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -16,10 +16,10 @@
 Load the cached chain for `(lbl, origin, h)` and rebuild the smoothed directional contact-mean
 matrix μ_{i→j} for one week, once per posterior draw:
 
-    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...)),  ρ_gap = exp(softclamp(log_rho_gap, RHO_BOUNDS...))
+    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...))
     η = exp(softclamp(log_eta, -3, 2))  (mirrors model)
-    u = (mid_p1+mid_p2)/√2 (total age),  v = (mid_p1-mid_p2)/√2 (age gap)        # 45° rotation
-    Kp[p,q] = exp(-((u_p-u_q)²/(2ρ_diag²) + (v_p-v_q)²/(2ρ_gap²)))  over the 28 unordered pairs
+    u = (mid_p1+mid_p2)/√2 (total age);  isd_p = (p1 == p2), the matrix diagonal (⟺ v_p = 0)
+    Kp[p,q] = p==q ? 1 : (isd_p && isd_q ? exp(-(u_p-u_q)²/(2ρ_diag²)) : 0)  # 28 unordered pairs
     Lp = chol(Kp + 1e-6 I).L
     μ[i,j] = exp(softclamp(rvec[pair_index[i,j]] + log(pop_j / pop_ref), -8, 6))   (pop_ref = pop[1], "2-10")
 
@@ -62,15 +62,28 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
 
     # `RHO_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree` or every
     # reconstructed μ / C* is silently wrong. See the constants' docstring.
+    pnames = string.(names(chn, :parameters))
+
+    # ---- which SPATIAL KERNEL generation is this chain? (`-diag`, 2026-08-05) ----
+    # `model_degree` now smooths the MATRIX DIAGONAL ONLY with a single length-scale, so
+    # `log_rho_gap` is gone. A chain that still carries it was fitted under the anisotropic
+    # two-length-scale kernel, and replaying it through the formula below would silently rebuild a
+    # DIFFERENT kernel — every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
+    # The `zrows` sniff below cannot catch this (the `z` shape is identical), so it needs its own.
+    if any(n -> n == "log_rho_gap", pnames)
+        @warn "chain carries `log_rho_gap`, i.e. the pre-`-diag` anisotropic spatial kernel. \
+               Refusing to reconstruct rather than replay it through the diagonal-only kernel." path
+        return nothing
+    end
+
     ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))   # soft-bounded, mirrors model
-    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))
     η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
     D = length(ρ_diag)
-    # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised (mirrors model)
-    su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in pair_list]   # along-diagonal (total age)
-    df = [(mid[p[1]] - mid[p[2]]) / sqrt(2) for p in pair_list]   # across-diagonal (age gap)
-
-    pnames = string.(names(chn, :parameters))
+    # along-diagonal (total age) coordinate for the 28 pairs, √2-normalised (mirrors model). The /√2
+    # is a units convention now, not half a rotation — the across-diagonal coordinate survives only
+    # as the `isd` mask, since v = (mid_p1 − mid_p2)/√2 = 0 ⟺ p1 = p2.
+    su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in pair_list]
+    isd = [p[1] == p[2] for p in pair_list]                       # the diagonal cells of the matrix
 
     # ---- which GP field generation is this chain? (`-s0`, 2026-08-05) ----
     # `model_degree` constrains the structure field to sum to zero over the P pairs each week, so
@@ -98,7 +111,9 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # way the returned factor maps a `zrows`-vector to the P-vector field, so the call sites below
     # are identical.
     function _Lp(d)
-        Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag[d]^2) + (df[m] - df[n])^2 / (2 * ρ_gap[d]^2)))
+        Kp = [m == n           ? 1.0 :
+              isd[m] && isd[n] ? exp(-(su[m] - su[n])^2 / (2 * ρ_diag[d]^2)) :
+                                 0.0
               for m in 1:P, n in 1:P]
         sum_zero ? sz_Q * cholesky(Symmetric(sz_Q' * Kp * sz_Q) + 1e-6 * I).L :
                    cholesky(Symmetric(Kp) + 1e-6 * I).L
