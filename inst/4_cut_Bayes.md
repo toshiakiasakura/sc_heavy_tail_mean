@@ -1,6 +1,0 @@
-I would like to refactor the code significantly to achieve the followings: 
-
-- Cut Bayesian inference: Currently the parameters for contact degrees and infection-related parameters are jointly estimated. However, I would like to estimate first contact degree-related parameters, and then in the second stage estimate infection-related parameters. For the first stage, after the estimation, use 100 posteriors for the second stage, and 100 samples for each posterior for the second stage. Pooling the posterior samples as the full posteiror distributions for the infection, which will be used to calculate the WIS.
-- Contact degree distributions should be jointly fit for the fitting window and forecasting period (separately for horizon 1,2,3,4). 
-- Revert the separation of contact and γ to the situation where no scaling for contact matrices, and γ_SAR to represent the SAR. 
-- Save the first stage of the estimations, and save the second stage results as appropriate (e.g. saving a pooled results). 
