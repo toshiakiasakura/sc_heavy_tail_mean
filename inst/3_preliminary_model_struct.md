@@ -206,10 +206,33 @@ for $w_\mu$ — which is not a valid statement, and truncating $w_\mu$ at $0$ wo
 5-day generation interval is shorter than a week, so $\text{meanlog} = -0.683 < 0$ is *required*. This
 is a deliberate, documented departure from the printed table.
 
-Both latents are soft-clamped inside the model — $w_\mu \in [\log\tfrac17, \log 3]$ (GI mean between
-about one day and three weeks) and $w_\sigma \in [0.02, 4]$ — far outside the prior's $\pm 2$ SD, per
-the codebase idiom that a clamp is an outer safety bound with the weakly-informative prior living
-inside it. At either clamp $F(s_{\max}) \ge 0.55$, so the division above cannot blow up.
+Both latents are soft-clamped inside the model — $w_\mu \in [\log\tfrac1{28}, \log 3]$ and
+$w_\sigma \in [0.002, 4]$, with a **transition width $s = 0.05$** (`W_MU_BOUNDS`,
+`W_SIGMA_BOUNDS`, `W_GI_SOFT` in `framework.jl`) — per the codebase idiom that a clamp is an outer
+safety bound with the weakly-informative prior living inside it. At either clamp
+$F(s_{\max}) \ge 0.5572$, so the division above cannot blow up.
+
+> **⚠ CORRECTED 2026-08-05 — the old box was BIASING the generation interval, and the claim that
+> replaced it here ("far outside the prior's $\pm2$ SD") was simply false of $w_\sigma$.** The
+> previous bounds were $w_\mu\in[\log\frac17,\log3]$, $w_\sigma\in[0.02,4]$ at the default
+> transition width. $w_\sigma$ is a log-*variance* whose prior mode $\log 2 = 0.6931$ sits just
+> $0.673$ above its floor — narrower than `_softplus`'s O(1) transition — so the clamp displaced it
+> by **2.8 prior SDs**, to $1.0816$. At the *intended* prior centre
+> (`gen_mean_days` $=$ `gen_sd_days` $=5$) the model was therefore running a GI of
+> **6.91 d mean / 9.65 d sd**, a $+38\%/+93\%$ inflation present at every draw and in every Stage-2
+> fit. Because $w$ and $\gamma_{\mathrm{SAR}}$ are confounded (§6, both scale the renewal
+> predictor), that bias was absorbed into $\gamma_{\mathrm{SAR}}$ rather than showing as misfit.
+> The PMF quoted below, $(0.799, 0.158, 0.033, 0.010)$, was always the *intended* value; the old
+> code actually produced $(0.725, 0.188, 0.061, 0.026)$. The correction makes code and spec agree.
+>
+> The **upper** $w_\mu$ bound stays at $\log 3$ deliberately: it is the $F(s_{\max})$ guard, and
+> $\min F(4)$ over the box is attained exactly at $(\log 3, 4)$. Raising it gives
+> $\log 4\Rightarrow0.500$, $\log 6\Rightarrow0.0021$ and $0$ at small $w_\sigma$ — i.e. $w/F(4)$
+> divides by $\approx0$. $w_\sigma$'s ceiling is held for the same reason. Its floor cannot be
+> usefully widened either, since a variance is pinned at $0$ ($0.02\to0.0002$ buys $0.02$ and moves
+> the clamped mode only $0.7095\to0.7083$); the tighter $s$ is the only lever that reaches it.
+> Verified: the effective prior now reproduces $5.000$ d / $5.000$ d and tracks the raw latents to
+> $<0.06\%$ across $\pm3$ prior SDs, with a finite normalised PMF at all 3600 grid points of the box.
 
 At the prior mean the PMF is $w \approx (0.799,\ 0.158,\ 0.033,\ 0.010)$.
 
@@ -470,6 +493,18 @@ The log-parameter is soft-clamped (`_softclamp`, not `clamp` — ReverseDiff-saf
 interior and avoiding Weibull/exponential underflow: $\log\kappa \in [-4.3,5]$, i.e.
 $\kappa \in [0.0136,148]$; $\log\phi \in [-4,5]$, i.e. $\phi \in [0.018,148]$.
 
+> **Transition width $s$ (added 2026-08-05).** `_softclamp(x, lo, hi, s = 0.25)` is
+> $lo + s\,\mathrm{softplus}\big((hi - s\,\mathrm{softplus}((hi-x)/s) - lo)/s\big)$. The unscaled
+> form (equivalently $s=1$) inherits `_softplus`'s **O(1)** transition width, so the standing claim
+> that the clamp "equals $x$ in the interior" holds only when $hi-lo$ is several nats. Measure the
+> **derivative**, not the width: the old $\rho$ window $[\log3,\log45]$ is $2.708$ nats and its
+> $d(\text{softclamp})/dx$ never exceeded $\mathbf{0.600}$ *anywhere* — it had no interior at all,
+> and was a hard modelling constraint disguised as a numerical guard. Same for the GI box (above).
+> The wide clamps were always fine and are unaffected: $\log\kappa$ $0.980\to1.000$,
+> $\mu$ $0.997\to1.000$. Keep $s$ well below $hi-lo$; $s\to0$ recovers a hard `clamp` with a flat,
+> hard-to-escape exterior, so $0.25$ is deliberately moderate. Inf-safety is preserved — every
+> intermediate stays finite, $f(-\infty)=lo$ and $f(+\infty)=hi+s\log(1+e^{-(hi-lo)/s})$.
+
 > **$\kappa$ clamp WIDENED $[-3,3]\to[-4.3,5]$ on 2026-07-30, and RETAINED after the RE was removed.**
 > With the per-cell random effect added, the old bound bound *hard*: every fitted $\kappa$ sat exactly
 > on $0.0498$ — the clamp-compression signature — and the flat region it creates let the Stage-1 LBFGS
@@ -553,16 +588,42 @@ K^{\text{time}}_{st} = \exp\!\left(-\frac{(s-t)^2}{2\rho_{\text{time}}^2}\right)
 $$
 
 ($\rho_{\text{time}}$ in weeks; the larger $10^{-4}$ jitter keeps $L_{\text{time}}$ positive-definite
-in the near-pooled limit). The $P\times T$ structure field is drawn matrix-normal, non-centred,
+in the near-pooled limit). The $P\times T$ structure field is drawn matrix-normal, non-centred, and **constrained to sum to zero
+over the $P$ age pairs within each week** (`-s0`, 2026-08-05). Writing $Q\in\mathbb R^{P\times(P-1)}$
+for the constant orthonormal basis of $\mathbf 1^{\perp}$ (Helmert contrasts, `_sum_zero_basis`), so
+that $QQ^{\!\top} = M = I - \tfrac{1}{P}\mathbf 1\mathbf 1^{\!\top}$,
 
 $$
-R = \eta\,\big(L_{\text{age}}\, Z\, L_{\text{time}}^{\!\top}\big),
-\qquad Z \sim \mathcal N(0,1)^{P\times T},
-\qquad \operatorname{Cov}(\operatorname{vec} R) = \eta^2\,\big(K^{\text{time}}\!\otimes K^{\text{age}}\big),
+A = Q^{\!\top} K^{\text{age}} Q,
+\qquad L_A = \mathrm{chol}(A + 10^{-6} I),
+$$
+$$
+R = \eta\,\big(Q\, L_A\, Z\, L_{\text{time}}^{\!\top}\big),
+\qquad Z \sim \mathcal N(0,1)^{(P-1)\times T},
+\qquad \operatorname{Cov}(\operatorname{vec} R) = \eta^2\,\big(K^{\text{time}}\!\otimes M K^{\text{age}} M\big),
 $$
 
-so fixing a week gives the spatial RBF and fixing an age-pair gives a temporal GP with shared
-$\rho_{\text{time}}$. The **overall weekly level** is likewise temporally smoothed, but with its own
+so fixing a week gives the spatial RBF conditioned on $\sum_p R_{p,t}=0$, and fixing an age-pair gives
+a temporal GP with shared $\rho_{\text{time}}$. This is the same GP **conditioned**, not approximated
+— verified to $6.7\times10^{-16}$ against $M K^{\text{age}} M + \text{jitter}\cdot M$ at the range
+corners, with $\max_t|\overline{R_{\cdot,t}}| \le 7.4\times10^{-16}$.
+
+*Why the constraint.* Nothing previously fixed the field's per-week mean over the pairs, and that mean
+is exactly what $c_t$ below already parameterises — so $\eta$ and $\sigma_c$ were confounded, and
+increasingly so as the length-scales grow ($K^{\text{age}}\to J$, rank-1). It is what makes the
+"decoupled amplitude" claim below true rather than aspirational. $Z$ loses a row, so Stage 1 is
+**390** (NegBin) / **978** (hurdle-Weibull) unconstrained dimensions rather than 402/990; the
+dimension saving is incidental, identifiability is the point.
+
+*Consequence for $\eta$.* $K^{\text{age}}$ has unit diagonal but $M K^{\text{age}} M$ does not, so
+$\eta$ is no longer exactly the marginal SD — the field's SD is $\eta\sqrt{\operatorname{diag}(M
+K^{\text{age}} M)}$, measured at $\times0.98$–$\times0.91$ across the surveyed posterior range
+($\rho_{\text{diag}}\in[3.49,12.77]$, $\rho_{\text{gap}}\in[3.02,10.30]$), which is well inside a
+prior spanning $\times0.6$–$\times1.65$ at $\pm1\sigma$; `gp_scale_prior` is therefore unchanged.
+Do **not** renormalise $A$ by $\operatorname{tr}(A)/P$ to restore the unit diagonal: as
+$\rho\to\infty$ that ratio is dominated by the jitter and the field degenerates to *white noise* of
+scale $\eta$, inverting the correct limit (field $\to 0$, measured $\times0.052$ at $\rho=500$, with
+$c_t$ carrying everything). The **overall weekly level** is likewise temporally smoothed, but with its own
 amplitude $\sigma_c$ **decoupled** from $\eta$: a scalar intercept $c$ plus a 1-D temporal GP sharing
 $L_{\text{time}}$,
 
@@ -574,12 +635,13 @@ $$
 and the week-$t$ log-rate field is $r_{p,t} = c_t + R_{p,t}$. The intercept is anchored at the grand
 mean $c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$ (so $c \sim \mathcal N(c_0,3^2)$).
 $\rho_{\text{time}}\to 0$ recovers independent weeks; $\rho_{\text{time}}\to\infty$ collapses to one
-pooled field. Numerically, each of $\rho_{\text{diag}}, \rho_{\text{gap}}$ is clamped to $[3,45]$,
-$\rho_{\text{time}}$ to $[0.5,26]$ weeks, $\eta$ and $\sigma_c$ to $[e^{-3}, e^{2}]$, and the per-cell
+pooled field. Numerically, each of $\rho_{\text{diag}}, \rho_{\text{gap}}$ is clamped to $[0.5,500]$,
+$\rho_{\text{time}}$ to $[0.25,104]$ weeks (both widened 2026-08-05 — see `RHO_BOUNDS` /
+`RHO_TIME_BOUNDS`, which are the single source of truth), $\eta$ and $\sigma_c$ to $[e^{-3}, e^{2}]$, and the per-cell
 exponent $r_{p,t} + \log N_j$ to $[-8,6]$ (so $\mu \in [3\times10^{-4}, 400]$); the modes stay
 interior so reciprocity is not distorted.
 
-The kernels $L_{\text{age}}, L_{\text{time}}$, the length-scales
+The kernels $L_A, L_{\text{time}}$, the sum-to-zero basis $Q$, the length-scales
 $\rho_{\text{diag}}, \rho_{\text{gap}}, \rho_{\text{time}}$ and the scales $\eta, \sigma_c$ are all
 **shared across weeks**; the per-week variation is now **temporally correlated** (through
 $L_{\text{time}}$) rather than an independent draw per week (§6).
@@ -672,7 +734,7 @@ per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$, §4.3), and the 
 
 $$
 \begin{aligned}
-\log\rho_{\text{diag}},\ \log\rho_{\text{gap}} &\sim \mathcal N(\log 15,\ 0.5^2), &
+\log\rho_{\text{diag}},\ \log\rho_{\text{gap}} &\sim \mathcal N(\log 4,\ 0.5^2), &
 \log\rho_{\text{time}} &\sim \mathcal N(\log 4,\ 0.5^2), &
 \log\eta &\sim \mathcal N(0,\ 0.5^2), \\
 c &\sim \mathcal N(c_0,\ 3^2), &
@@ -1013,8 +1075,9 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   `gen_mean_days`/`gen_sd_days` $=5/5$ days with `gen_prior_rel_sd` $=0.2$ (§3.1 — these now set the
   *prior* on the estimated $w_\mu,w_\sigma$, not a fixed $w$), `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
   `n_stage1_post` $=100$ / `n_stage2_draws` $=100$ (⟹ 10 000 pooled), `stage1_use_nuts` $=$ `false`,
-  GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log15,0.5^2)$ (shared
-  prior for both diagonal length-scales), $\log\eta\sim\mathcal N(0,0.5^2)$,
+  GP priors $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log4,0.5^2)$ (shared
+  prior for both diagonal length-scales; **recentred $\log15\to\log4$ on 2026-08-05**, see §5),
+  $\log\eta\sim\mathcal N(0,0.5^2)$,
   $\log\rho_{\text{time}}\sim\mathcal N(\log4,0.5^2)$ (`gp_time_len_prior`, weeks),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
   $\log\gamma_{\mathrm{SAR}}\sim\mathcal N(\log0.1,1.8^2)$ (`gamma_sar_prior`; loosened 2026-07-13 to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$, 90% $\in[0.0052,1.93]$, softclamp $[\log0.001,\log10]$),

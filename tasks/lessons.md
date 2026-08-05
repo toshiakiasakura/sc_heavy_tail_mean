@@ -2,6 +2,160 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## A non-centred GP field whose per-week mean is unconstrained duplicates its own level term 2026-08-05 (`joint_model.jl`)
+
+Stage 1's structure field was `R = η·(Lp·z·Ltᵀ)`, drawn over all `P = 28` age pairs with **nothing
+constraining its per-week mean** — and that mean is exactly what `c_t = c + σ_c·(Lt·z_c)_t` already
+parameterises. So `η` and `σ_c` were confounded by construction, not by accident of the data. The
+comment in `model_degree` had claimed since the temporal GP landed that σ_c exists "so η governs
+age-structure only"; that was aspirational, and nothing in the code enforced it.
+
+**The confounding is worst exactly where the posterior wants to go.** As `ρ_diag, ρ_gap → ∞` the
+kernel `Kp → J` (rank-1), so the field collapses to a single per-week constant — a perfect copy of
+`c_t`. `RHO_BOUNDS`' own docstring already recorded `Kp → J`; what was missed is that this makes the
+level a *ridge*, not merely an unidentified scale.
+
+**The fix is a conditioning, not an approximation.** With `Q` a constant orthonormal basis of `1^⊥`
+(`_sum_zero_basis`), `Ap = Qᵀ·Kp·Q`, `La = chol(Ap + 1e-6·I)` and `R = η·(Q·La·z·Ltᵀ)`:
+`Cov(vec R) = η²·(Kt ⊗ M·Kp·M)` with `M = I − 11ᵀ/P`. Verified to 6.7e-16 against
+`M·Kp·M + jitter·M`, per-week mean zero to ≤7.4e-16, and the `/√2` isotropy invariant preserved.
+`z` goes 28×Tn → 27×Tn (Stage 1: 402→390, 990→978).
+
+Four things worth keeping:
+
+1. **Use Helmert contrasts, NOT `qr(ones(P))`.** QR's column signs come from LAPACK. The *model* is
+   invariant to a sign flip (it is absorbed by the matching row of `z`), but `reconstruct_mu_draws`
+   is NOT — it rebuilds the basis to replay a saved chain, so a basis differing by a sign between
+   fitting and replay yields a different μ with nothing raising. Helmert is closed-form.
+2. **Do NOT renormalise `Ap` by `tr(Ap)/P` to "restore" η as the marginal SD.** It is tempting
+   because `Kp` has unit diagonal and `M·Kp·M` does not. But as `ρ→∞`, `Ap→0` and the normalised
+   matrix is dominated by the jitter, so the field degenerates to *white noise* of scale η — the
+   exact inverse of the correct limit (field → 0, `c_t` carries everything). Measured field-SD
+   ratio: ×0.98–×0.91 over the surveyed posterior range, ×0.052 at ρ=500. `gp_scale_prior` needs no
+   change; the un-normalised form has the right limit.
+3. **`Ap` goes near-singular sooner than `Kp` does** — its eigenvalues are `Kp`'s *non-constant*
+   ones. This was checked rather than assumed, because the Pathfinder call is not try/caught (the
+   reason `Kt`'s jitter is 1e-4): over 25×25 ρ values spanning all of `RHO_BOUNDS`, `min eigval(Ap)
+   = −1.3e-15` and even a **1e-8** jitter gave 0/625 `PosDefException`s. 1e-6 is kept.
+4. **The reconstruction mirror fails SILENTLY on a shape change.** `reconstruct_mu_draws` allocated
+   `Z = Array{Float64,3}(undef, D, P, Tn)` with `P` derived from the *grid*, and filled only the rows
+   present in the chain — so replaying a 27-row chain under the 28-row formula would have left row 28
+   as uninitialised memory and put garbage in every μ / C* / CCDF, with no error and no warning. It
+   now sniffs the row count, dispatches on it, and refuses anything that is neither `P` nor `P−1`.
+   Any future change to the field's shape must add a branch there, not edit it in place — the legacy
+   branches read the `dt_intermediate_old/` and `CONTACTS_TOKEN_PF` generations, which are
+   unconstrained.
+
+Keep the latent named `z`: `_stage1_init` selects the non-centred blocks by the **prefix**
+`startswith(string(k), "z")` and would silently return `nothing` on a rename, dropping Pathfinder
+back to `UniformSampler(2)` with no warning. `_pf_mean_init`'s guards resolve by VarName and are
+safe either way — the asymmetry is the trap.
+
+STILL OPEN, deliberately: `c` and the temporal mean of `σ_c·(Lt·z_c)` are confounded the same way
+(one flat direction on the Tn axis, fixable with the identical machinery). Held back so the two axes
+can be measured separately.
+
+## A soft-clamp narrower than a few × `_softplus`'s transition width has NO interior — and silently becomes part of the model 2026-08-05 (`joint_model.jl`, `framework.jl`)
+
+`_softclamp(x, lo, hi) = lo + softplus((hi − softplus(hi − x)) − lo)` was documented as "equals `x`
+in the interior (lo ≪ x ≪ hi)". That is only true when `hi − lo` is several nats, because
+`_softplus` has an **O(1) transition width**. Two of the model's clamps were narrower than that and
+had no interior at all. Neither was detectable from the fit: no error, no divergence, no warning.
+
+**Measure the derivative, not the width.** Max `d(softclamp)/dx` over ALL `x`:
+
+| latent | window | width (nats) | max grad |
+|---|---|---|---|
+| `log_rho_diag` / `log_rho_gap` | `[log 3, log 45]` | 2.708 | **0.600** |
+| `w_sigma` | `[0.02, 4.0]` | 3.98 | 0.699 |
+| `w_mu` | `[log 1/7, log 3]` | 3.04 | 0.648 |
+| `log_rho_time` | `[log 0.5, log 26]` | 3.95 | 0.758 |
+| `log_eta`, `log_sigma_c` | `[-3, 2]` | 5.0 | 0.849 |
+| `log_k` / `log_kappa` / `μ` | 9.0 / 9.3 / 14.0 | | 0.978 / 0.981 / 0.998 |
+
+**The generation interval was BIASED, not just badly mixed — this is the important one.** `w_sigma`
+is a LOG-VARIANCE whose prior mode (0.6931) sits just 0.673 above its floor, so the clamp displaced
+it by **2.8 prior SDs**. At the *intended* prior centre (`gen_mean_days = gen_sd_days = 5.0`, i.e.
+Munday 2023 Table 1) the model was running a GI of **6.91 d mean / 9.65 d sd — +38% / +93%, on
+every draw, in every Stage-2 fit ever run**. The source comment asserted these bounds sit "far
+outside the prior's ±2 SD"; that was never true of `w_sigma`. And because `w` and `γ_SAR` are
+confounded (both scale the renewal predictor), the bias was being absorbed into `γ_SAR` rather than
+showing up as misfit.
+
+**Three traps worth naming:**
+
+1. **A clamp is not a guard until you check that it isn't.** The ρ window was assumed to protect the
+   Cholesky. It does not: `cholesky(Symmetric(Kp) + 1e-6·I)` succeeds at every ρ from 1e-3 to 1e4,
+   because as ρ→∞ `Kp → J` (rank 1) and `cond → P/ε = 2.8e7` — it SATURATES rather than diverging;
+   as ρ→0, `Kp → I`, perfectly conditioned. So the bound was pure modelling constraint. Before
+   defending a clamp as numerical, evaluate the thing it supposedly protects at the extremes.
+2. **Widening cannot fix a bound the parameter is physically pinned against.** `w_sigma` is a
+   variance: its floor cannot go below 0, so the mode-to-floor distance is 0.673 no matter what
+   (0.02 → 0.0002 buys 0.02 and moves the clamped mode only 0.7095 → 0.7083). The only lever is a
+   smaller transition width. Hence `_softclamp` gained a 4th positional arg `s` (default 0.25) and
+   the GI sites use `W_GI_SOFT = 0.05`.
+3. **Some bounds ARE load-bearing — check which before widening.** `w_mu`'s UPPER bound is the
+   `F(smax)` guard for `gen_interval_pmf_log`'s `w ./ F(4)`. `min F(4)` over the box is attained
+   exactly at `(log 3, 4.0)` and equals 0.5572; raising it gives `log 4 ⇒ 0.500`, `log 6 ⇒ 0.0021`,
+   and 0.000 at small `w_sigma` — i.e. divide by ~0. So the lower bound was widened and the upper
+   held. Same for `w_sigma`'s ceiling: raising 4.0 → 8.0 would drop `min F(4)` to 0.5405 for no
+   benefit, since the prior's +4σ is 1.25 and it never binds.
+
+**What the fix looks like.** `_softclamp(x, lo, hi, s = 0.25)`, keeping the Inf-safe nested form
+(the `Inf − Inf = NaN` lesson below still stands — verify `f(±Inf)` after any edit).
+`RHO_BOUNDS = [log 0.5, log 500]`, `W_MU_BOUNDS = [log 1/28, log 3]`,
+`W_SIGMA_BOUNDS = [0.002, 4.0]`, `W_GI_SOFT = 0.05`. Effective GI prior now reproduces
+5.000 d / 5.000 d and tracks the raw latents to <0.06% across ±3 prior SDs; the ρ clamp is the
+identity to 4 s.f. across ρ ∈ [2, 200].
+
+**Two process lessons.** (a) The bounds were spelled as literals in FIVE places — `joint_model.jl`
+plus `8j_viz_utils.jl` and `10j_viz_utils.jl`, which RECONSTRUCT ρ and `C*` by re-applying the same
+clamp to a stored chain. A model-side change without a matching viz change is silently wrong and
+raises nothing. They are now named constants in `framework.jl`; keep them there. (b) `10j`/`12j`
+report the **raw** latent, so `log_rho_gap`'s mean of 1.5375 was being read as ρ = 4.65 when the
+model was using 7.22. Post-clamp and raw only agree once the clamp actually has an interior.
+
+## Stage-1 NUTS saturates `max_depth` and ESS collapses — divergences never fire 2026-08-05 (`12j_*`, `joint_model.jl`)
+
+Four full-settings pilot fits (2 degree models × origins 2021-05-09 / 2020-11-15, h=1) measured the
+per-fit NUTS cost. **Three of four sample at 100% of `max_depth = 10`**, and effective sample size
+tracks the adapted step size almost deterministically:
+
+| step size | sampling tree depth | min ESS of 500 |
+|---|---|---|
+| 1.51e-02 | 8.40 | 118 |
+| 4.75e-03 | 10.00 | 89.0 |
+| 2.95e-03 | 10.00 | 42.4 |
+| 1.28e-03 | 10.00 | **1.9** |
+
+The trajectory never U-turns inside 2^10 leapfrog steps, so NUTS truncates and the chain crawls.
+
+**Three traps, in order of how easy they are to walk into:**
+
+1. **Divergences do not detect this.** Zero divergent transitions in the kept draws of three of the
+   four fits (one in the fourth). A chain can be perfectly non-divergent, have healthy E-BFMI
+   (0.73 / 0.92 measured), and still carry ~2 independent samples in 500 draws. `min_ess` is the
+   only one of `_nuts_diagnostics`' three numbers that catches it — do not read a clean divergence
+   count as convergence.
+2. **The consequence is silent downstream.** `stage2_inputs` imputes `n_stage1_post = 100` draws
+   into Stage 2. At ESS 1.9 those 100 draws are ~one contact-GP configuration, so the cut's Monte
+   Carlo *looks* like it averages over 100 and does not. Nothing in the Stage-2 path would notice.
+3. **`frac_at_max_depth` is computed against the OBSERVED maximum, not the configured cap**
+   (`_nuts_diagnostics`, joint_model.jl). A chain whose deepest tree is 9 reports
+   `frac_at_max_depth = 0.40` — that is "40% of iterations reached depth 9", NOT "40% saturated".
+   The 25-adapt wiring checks read 1.0 for exactly this reason and meant nothing. `hmc_health`
+   (12j_viz_utils.jl) therefore returns BOTH `frac_at_obs_max` and `frac_at_cap`, and `frac_at_cap`
+   is `missing` unless you pass `cap`.
+
+Diagnosis, not just detection: `12j_chain_convergence.ipynb` adds rank-normalised **split-R̂** — and
+note that "one chain ⇒ no R̂" is only true of the *between-chain* statistic; MCMCDiagnosticTools
+defaults to `split_chains = 2`, so `rhat(chn)` on a single chain compares its own halves and does
+detect non-stationarity (it cannot detect multi-modality; nothing single-chain can). At 2021-05-09
+it puts 34/402 (negbin) and 96/990 (hurdle-Weibull) coordinates over R̂ 1.01, and the worst-mixing
+coordinates are almost all **`z[·, 1]` — the first week of the structure field**, i.e. the temporal
+GP's boundary week, which has neighbours on one side only. Pursue the metric/parameterisation there;
+`stage1_nuts_target_accept` is not the lever.
+
 ## Mooncake as the default AD backend — and the type-instability that nearly hid it 2026-08-05 (`poisson_mixture.jl`, `framework.jl`, `joint_model.jl`)
 
 Switched both stages from ReverseDiff to **Mooncake** (`cfg.ad_backend = :mooncake`), on Julia 1.12.4.
