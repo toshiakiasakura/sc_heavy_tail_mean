@@ -29,9 +29,25 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 # when the GP field or a raw dispersion latent (`log_kappa`/`log_k`) overflows to Inf on a stray
 # optim step, `dispv`/`rvec` become Inf, and the old form's NaN would make `κ = exp(NaN)` NaN and abort
 # the fit with `Weibull: α > 0 not satisfied`; the nested form keeps κ, λ, μ finite so the fit
-# just sees a bad (finite) objective and backtracks. The interior is unchanged to <3e-3.
+# just sees a bad (finite) objective and backtracks.
+#
+# `s` IS THE TRANSITION WIDTH AND IT IS LOAD-BEARING (added 2026-08-05). The un-scaled form
+# (equivalently s=1) inherits `_softplus`'s O(1) transition width, so "equals x in the interior" is
+# only true when `hi − lo` is several nats. It was NOT true for the ρ length-scales, whose window
+# was 2.708 nats wide (`[log 3, log 45]`): the derivative there never exceeded **0.600** ANYWHERE —
+# there was no interior at all. Measured consequences at origin 2021-05-09, hurdle-Weibull:
+#   • gradients attenuated ~1.9× at the mode, and curved everywhere (nonzero 2nd derivative
+#     throughout), which bends the ρ↔z ridge in a way a diagonal metric cannot undo;
+#   • `gp_len_prior = N(log 15, 0.5)` was delivered as ρ∈[10.6,19.0] at ±1sd, not [9.1,24.7];
+#   • the floor BOUND: raw log_rho_gap = 1.5375 came out as ρ_gap = 7.22, not exp(1.5375) = 4.65.
+# ⇒ `log_rho_gap`/`log_rho_diag` were 2 of the 15 worst-mixing coordinates (ESS 44.5/59.9 of 500).
+# With s = 0.25 the same window is the identity to 4 s.f. and the min gradient over ρ∈[1,300] is
+# 0.885. The wide clamps are unaffected (log_kappa 0.980→1.000, μ 0.997→1.000).
+# Keep s well below `(hi − lo)`; s → 0 recovers a hard `clamp` (and a flat, hard-to-escape
+# exterior), so 0.25 is deliberately moderate. Inf-safety is preserved: every intermediate is
+# finite, `f(+Inf) = hi + s·log1p(exp(-(hi-lo)/s))` (≈5e-6 over `hi` at s=0.25) and `f(-Inf) = lo`.
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
-_softclamp(x, lo, hi) = lo + _softplus((hi - _softplus(hi - x)) - lo)
+_softclamp(x, lo, hi, s = 0.25) = lo + s * _softplus((hi - s * _softplus((hi - x) / s) - lo) / s)
 
 # Element type of the fitted hurdle p⁰ block, for the `ETp` promotion in `model_degree`.
 # The NegBin path has no p⁰ (it models its zeros directly) and passes `nothing`; `Bool` is the
@@ -203,8 +219,8 @@ end
     log_rho_diag ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # total-age direction
     log_rho_gap  ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # age-gap direction
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
-    ρ_diag = exp(_softclamp(log_rho_diag, log(3.0), log(45.0)))   # length-scale (age-yrs), soft-bounded
-    ρ_gap  = exp(_softclamp(log_rho_gap,  log(3.0), log(45.0)))   # length-scale (age-yrs), soft-bounded
+    ρ_diag = exp(_softclamp(log_rho_diag, RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
+    ρ_gap  = exp(_softclamp(log_rho_gap,  RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
     η = exp(_softclamp(log_eta, -3.0, 2.0))               # GP marginal scale, soft-bounded
     c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
@@ -345,7 +361,7 @@ end
         #     with its OWN amplitude σ_c (so η governs age-structure only), sharing ρ_time.
         # ρ_diag=ρ_gap recovers the isotropic spatial kernel; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
         log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
-        ρ_time = exp(_softclamp(log_rho_time, log(0.5), log(26.0)))   # weeks, soft-bounded
+        ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
         # temporal Cholesky over the Tn window weeks. Jitter 1e-4 (not 1e-6): Kt is near
         # rank-1 at the upper clamp (near-pooled) and the Pathfinder call is not try/caught,
         # so a PosDefException would abort the whole fit (see tasks/lessons.md).
@@ -514,8 +530,11 @@ end
     # what gets returned/stored so `gen_interval_pmf_log(w_mu, w_sigma)` downstream (the forecast,
     # the 10j fit-window reconstruction, the 9j GI panel) reproduces this fit exactly. Same
     # convention as gamma_sar/susc/inf, which are also returned post-clamp.
-    w_mu_e    = _softclamp(w_mu, log(1 / 7), log(3.0))
-    w_sigma_e = _softclamp(w_sigma, 0.02, 4.0)
+    # `W_MU_BOUNDS`/`W_SIGMA_BOUNDS`/`W_GI_SOFT` (framework.jl) — read that docstring before touching
+    # them. The upper `w_mu` bound is the `F(smax)` guard and log(3) is its maximum; the tighter
+    # `W_GI_SOFT` is required because `w_sigma` is a VARIANCE whose floor is pinned near 0.
+    w_mu_e    = _softclamp(w_mu,    W_MU_BOUNDS...,    W_GI_SOFT)
+    w_sigma_e = _softclamp(w_sigma, W_SIGMA_BOUNDS..., W_GI_SOFT)
     w = gen_interval_pmf_log(w_mu_e, w_sigma_e; smax = cfg.smax)
 
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----

@@ -102,10 +102,12 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
         return (; susc, inf, gamma_sar, F = pooled.F, rho_diag = nan1, rho_gap = nan1, rho_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F are Stage-2, always there
     end
-    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
-    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
-    rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?                  # temporal dir (weeks); NaN if pooled
-        exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0))) : fill(NaN, length(rho_diag))
+    # `RHO_BOUNDS`/`RHO_TIME_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree`
+    # or every reconstructed length-scale is silently wrong. See the constants' docstring.
+    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))  # total-age dir, mirrors model
+    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))  # age-gap dir
+    rho_time = ("log_rho_time" in string.(names(chn, :parameters))) ?            # temporal dir (weeks); NaN if pooled
+        exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...)) : fill(NaN, length(rho_diag))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
     return (; susc, inf, gamma_sar, F = pooled.F, rho_diag, rho_gap, rho_time, w_mu, w_sigma)
 end

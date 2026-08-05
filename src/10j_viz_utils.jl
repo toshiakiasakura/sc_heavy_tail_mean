@@ -16,7 +16,7 @@
 Load the cached chain for `(lbl, origin, h)` and rebuild the smoothed directional contact-mean
 matrix μ_{i→j} for one week, once per posterior draw:
 
-    ρ_diag = exp(softclamp(log_rho_diag, log3, log45)),  ρ_gap = exp(softclamp(log_rho_gap, log3, log45))
+    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...)),  ρ_gap = exp(softclamp(log_rho_gap, RHO_BOUNDS...))
     η = exp(softclamp(log_eta, -3, 2))  (mirrors model)
     u = (mid_p1+mid_p2)/√2 (total age),  v = (mid_p1-mid_p2)/√2 (age gap)        # 45° rotation
     Kp[p,q] = exp(-((u_p-u_q)²/(2ρ_diag²) + (v_p-v_q)²/(2ρ_gap²)))  over the 28 unordered pairs
@@ -27,7 +27,7 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
 
 - **Separable spatio-temporal regime** (`log_rho_time` present; the cached `contacts="temporal"`
   chains): scalar intercept `c`, temporal-level GP and matrix-normal structure field share the
-  temporal Cholesky `Lt` built from `ρ_time = exp(softclamp(log_rho_time, log0.5, log26))` over the
+  temporal Cholesky `Lt` built from `ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))` over the
   full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
@@ -60,8 +60,10 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     mid = cis_age_midpoints(; grid = grid)
     logpop = log.(grid.POP ./ grid.POP[1])          # relative to reference bin (index 1, "2-10")
 
-    ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))   # soft-bounded, mirrors model
-    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))
+    # `RHO_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree` or every
+    # reconstructed μ / C* is silently wrong. See the constants' docstring.
+    ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))   # soft-bounded, mirrors model
+    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))
     η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
     D = length(ρ_diag)
     # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised (mirrors model)
@@ -82,7 +84,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         wk = week_index === nothing ? Tn : week_index
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
-        ρ_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), log(0.5), log(26.0)))  # D
+        ρ_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))  # D
         Z  = Array{Float64,3}(undef, D, P, Tn)               # structure-field raw z[p,t]
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue

@@ -95,6 +95,66 @@ fit_offset(w::WeeklyWindow)   = length(w.lag_weeks)  # index (0-based) of fit_we
 ##########################################################################
 # Configuration
 ##########################################################################
+"""
+Hard soft-clamp bounds for the GP length-scales, as `(lo, hi)` on the LOG scale.
+
+SINGLE SOURCE OF TRUTH — do not re-spell these as literals. They are consumed by `model_degree`
+(`src/joint_model.jl`) *and*, independently, by the read-only viz layer, which RECONSTRUCTS ρ and
+`C*` from a raw chain by re-applying the same `_softclamp`: `8j_viz_utils.jl` (`reconstruct_*`) and
+`10j_viz_utils.jl` (`reconstruct_mu_draws`). If the model's window moves and a viz site does not,
+every reconstructed length-scale and contact matrix is silently wrong and NOTHING raises. That is
+why these were hoisted out of five separate literals on 2026-08-05.
+
+WIDENED 2026-08-05, `RHO_BOUNDS` `[log 3, log 45]` → `[log 0.5, log 500]`. The old window was
+2.708 nats wide, which is narrower than `_softplus`'s transition width, so `_softclamp` had **no
+interior** there (max derivative 0.600 anywhere) and was acting as a hard modelling constraint
+disguised as a numerical guard — see the `_softclamp` note in `joint_model.jl`. It is not a
+numerical guard: `cholesky(Symmetric(Kp) + 1e-6·I)` succeeds at every ρ from 1e-3 to 1e4 (as ρ→∞,
+`Kp → J` rank-1 so `cond → P/ε = 2.8e7`, seven orders inside Float64; as ρ→0, `Kp → I`). The real
+limits are identifiability — ρ_gap ≲ 2 makes the kernel diagonal, ρ_diag ≳ 200 makes the field flat
+— and those are held by `gp_len_prior`, not by this clamp.
+
+`RHO_TIME_BOUNDS` is UNCHANGED: `[log 0.5, log 26]` already spans iid weeks to fully pooled over a
+12-week window (at ρ_time = 26 every `Kt` entry is ≥ 0.914), so widening it would only add
+unidentified range. It gains the sharper transition width via `_softclamp`'s `s` default.
+"""
+const RHO_BOUNDS      = (log(0.5), log(500.0))   # ρ_diag, ρ_gap — age-years
+const RHO_TIME_BOUNDS = (log(0.5), log(26.0))    # ρ_time — weeks
+
+"""
+Soft-clamp bounds and transition width for the estimated generation interval (`model_transmission`,
+`src/joint_model.jl`). `w_mu` is the meanlog in WEEKS; `w_sigma` is the LOG-VARIANCE (so
+`sdlog = √w_sigma`, see `gen_interval_logparams`).
+
+WIDENED 2026-08-05, and this one was a REAL BIAS, not just a mixing problem. The old box
+(`w_mu ∈ [log 1/7, log 3]`, `w_sigma ∈ [0.02, 4]`) is only 3.04 / 3.98 wide, and `w_sigma`'s prior
+mode sits just 0.673 above its floor — under the old O(1) transition width the clamp displaced
+`w_sigma` by **2.8 prior SDs**. At the INTENDED prior centre (`gen_mean_days = gen_sd_days = 5.0`)
+the model was therefore using a generation interval of **6.91 d mean / 9.65 d sd**, not 5.0/5.0 —
+a +38% / +93% inflation, present at every draw. The old comment claiming these bounds sit "far
+outside the prior's ±2 SD" was simply not true of `w_sigma`. Since `w` and `γ_SAR` are confounded
+(both scale the renewal predictor, `gamma_sar_prior`), that bias was being absorbed into γ_SAR.
+With this box the effective prior reproduces 5.000 d / 5.000 d exactly and tracks the raw latents
+to <0.06% across ±3 prior SDs.
+
+THE UPPER BOUND ON `w_mu` IS LOAD-BEARING AND log(3) IS THE MAXIMUM — DO NOT WIDEN IT.
+`gen_interval_pmf_log` divides by `F(smax) = F(4)`. `min F(4)` over the box is attained at exactly
+this corner (`w_mu = log 3`, `w_sigma = 4`) and equals **0.5572**. Raising the bound collapses it:
+`log 4 ⇒ 0.500`, `log 6 ⇒ 0.0021` (and 0.000 at small `w_sigma`), i.e. `w ./ F(4)` divides by ~0.
+The LOWER bound is free to move (small meanlog ⇒ mass at short lags ⇒ `F(4) → 1`), so only it was
+widened. `w_sigma`'s ceiling is likewise held at 4.0: it never binds (prior +4σ = 1.25) and raising
+it to 8.0 would drop `min F(4)` to 0.5405, eroding the ≥0.55 guarantee for nothing.
+
+`W_GI_SOFT` is a TIGHTER transition width than `_softclamp`'s 0.25 default, and it is needed here
+because `w_sigma` is a VARIANCE: its floor is pinned near 0 by physics, so the distance from the
+prior mode to the bound cannot be bought by widening (0.02 → 0.0002 buys 0.02, moving the clamped
+mode only 0.7095 → 0.7083). Shrinking `s` is the only lever that reaches it: at 0.05 the gradient
+at the mode is 1.000000 and the clamped value equals the raw latent to 6 d.p.
+"""
+const W_MU_BOUNDS    = (log(1 / 28), log(3.0))   # meanlog, weeks — UPPER bound is the F(4) guard
+const W_SIGMA_BOUNDS = (0.002, 4.0)              # LOG-VARIANCE (sdlog = √w_sigma)
+const W_GI_SOFT      = 0.05                      # transition width; tighter than the 0.25 default
+
 Base.@kwdef struct FrameworkConfig
     d_max::Float64        = 240.0     # duration-weight cap (>4h ⇒ weight 1)
     w_dur_group::Float64  = 2.5 / 240 # group-contact duration weight (inst/1e; fixed now, estimated later)
@@ -129,9 +189,9 @@ Base.@kwdef struct FrameworkConfig
     stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode THIS field (it encodes only `stage1_use_nuts`, since 2026-08-05), so changing it alone will silently reuse existing chains — delete them if you change it outside a token bump.
     stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (336 of 402/990 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(15.0), 0.5)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap)
+    gp_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.75)  # log-ρ Normal(μ,σ), age-years; shared by BOTH spatial diagonal length-scales (ρ_diag=total-age, ρ_gap=age-gap). RECENTRED log(15)→log(4) AND WIDENED 0.5→0.75 on 2026-08-05, together with the `RHO_BOUNDS` widening: once the clamp stopped squashing (see `_softclamp`), this prior became the ONLY restraint on ρ, and at N(log 15, 0.5) it put the observed posterior 2.34 SDs into its tail — it was censoring the likelihood's clear preference for a shorter age-gap length-scale. Under N(log 4, 0.75) the two spatial posterior means sit at z = +0.20 (ρ_gap) and +0.91 (ρ_diag), i.e. inside ±1σ; the location matches the data (naive unsquashed posterior means ρ_gap≈4.65, ρ_diag≈7.9 straddle the mode of 4). Quantiles under the new clamp: ±1σ ⇒ ρ∈[1.89,8.47], ±2σ ⇒ [0.91,17.9], ±3σ ⇒ [0.55,38.0], with only 0.28% of prior mass below the clamp floor — the clamp is a genuine backstop again. The likelihood can now reach the ρ_gap≈2 identifiability floor at −0.92σ. WATCH: this prior is SHARED by both directions, whose design spreads differ 2× (u/total-age 96.87 units vs v/age-gap 48.44). If `log_rho_diag` presses its UPPER tail, split this into separate diag/gap priors rather than widening the shared one.
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
-    gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only
+    gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.75)  # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only. WIDENED 0.5→0.75 on 2026-08-05 alongside `gp_len_prior` (user request: same variance for all three ρ priors); the LOCATION was already log(4). Well calibrated for a 12-week window — it spans the full meaningful range of the temporal GP and little else: ρ_time = 0.91 at −2σ (Kt[1,12]=3e-32, iid weeks) through 4.0 at the mode (0.023) to 17.9 at +2σ (0.83, ~fully pooled).
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
