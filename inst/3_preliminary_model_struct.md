@@ -248,6 +248,16 @@ susceptibility by the group's antibody prevalence $A_a(t)$ (at $F=1$ antibodies 
 protection; smaller $F$ gives stronger protection). $C^\ast_{ab}$ is the per-capita effective
 contact matrix produced by the NGM builder (§5.1).
 
+> **⚠ ANTIBODY TERM CURRENTLY DISABLED (2026-08-04, user request).** `model_transmission` **pins
+> $F \equiv 1$** instead of sampling it, so $\text{full\_susceptibility}_a(t)=\text{susc}_a$ exactly
+> and $A_a(t)$ drops out of the NGM entirely. This is a deliberately **temporary** hard-code (the
+> `F ~ Beta(5,1)` line sits commented out immediately beside it in `joint_model.jl`) — everything
+> below about $F$ and about antibody timing describes the model as it stands when the term is
+> re-enabled. `ngm.jl` is untouched: `build_ngm`/`full_susceptibility` stay general and are simply
+> called with $F=1$, so the $(F-1)$ multiplier is exactly $0$. Note $F$ is Stage-2-only, so the
+> Stage-1 chains are unaffected and `contacts_label` was **not** bumped (it is shared with Stage 1);
+> cached `8j_s2_*` and the derived `9j_*` caches must be deleted by hand — see §10.
+
 > **Antibody at the target week (2026-07-30, `inst/5_formal_pathfinder_impl.md`).** Inside the
 > Stage-2 *fit* loop $A_a(t)$ is the week-$t$ antibody of the $t_0$-anchored infection window, as
 > before. In the **forecast** (§8) the frozen NGM instead uses $A_a(t_0+h)$ — the antibody prevalence
@@ -715,6 +725,12 @@ w &= \text{Eq. §3.1}\big(w_\mu, w_\sigma\big).
 \end{aligned}
 $$
 
+> **⚠ 2026-08-04:** the $F \sim \mathrm{Beta}(5,1)$ line above is **not currently sampled** — $F$ is
+> pinned to the constant $1$ to disable the antibody term (§3.2), and is dropped from the Stage-2
+> parameter space rather than left as an unused latent (same treatment, and the same reason, as
+> $\sigma_i,z_i$ under `fix_infectivity`). Temporary; the prior is preserved commented-out in
+> `joint_model.jl`.
+
 With $C^\ast$ **un-normalised** (§3.2 update, 2026-07-12), $\gamma_{\mathrm{SAR}}$ is the per-contact
 secondary attack rate: it reproduces the reference cell $N_{rr}=\text{susc}_r\cdot\text{inf}_r$
 directly and is comparable across origins. **The reference bin $r$ is a gauge**: the NGM likelihood is
@@ -1013,9 +1029,12 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   the posterior of the leaky factor $F$ (median + 90% band) per model over the rolling origins, the
   direct analog of the $\gamma_{\mathrm{SAR}}$-over-time figure. $F$ enters
   $\text{full\_susceptibility}_a(t)=\text{susc}_a(1+(F-1)A_a(t))$, so $F\to0$ ⟹ antibodies fully
-  protect, $F\to1$ ⟹ no protection (prior $\mathrm{Beta}(5,1)$ ⟹ $F\in(0,1)$); it is a scalar per
-  Stage-2 draw, surfaced from the pooled artefact via `collect_transmission_structure` and drawn by
-  `plot_F`.
+  protect, $F\to1$ ⟹ no protection; it is a scalar per Stage-2 draw, surfaced from the pooled
+  artefact via `collect_transmission_structure` and drawn by `plot_F`.
+  **2026-08-04:** with $F$ now pinned at $1$ (§3.2) this panel is degenerate by construction — six
+  flat lines at exactly $1.0$ with zero-width bands, all overplotting. It is deliberately kept as
+  the visible confirmation that the antibody term is off, and `plot_F`'s `ylims` was widened from
+  $(0,1)$ to $(0,1.05)$ so the pinned line does not vanish into the top border.
 - **Reproduction number** (two separate figures). *(1)* `res/9j_reproduction_number.png` — the
   "contact & transmission" $R$: the dominant (Perron) eigenvalue $\rho(N)$ of the frozen origin-week
   NGM, per origin, over the inc2prev national $R$ and the $R=1$ line. *(2)*
@@ -1091,8 +1110,9 @@ the seams at which they would be relaxed:
   smoothing** (the shared-length-scale squared-exponential GP $\sigma\,L_{si}z$ was removed 2026-07-13,
   user request; ending the GP→RW1→RW2→GP→none sequence), and each log-offset is soft-clamped to
   $[\log 0.05,\log 20]$ **hard-bounding** susc/inf to $[0.05,20]$. *Remaining seams*: $F$ keeps the $\mathrm{Beta}(5,1)$ reference prior (paper uses
-  $\Gamma(2,2)T[0,1]$), and infection observation error uses an independence approximation across the week
-  and across ages.
+  $\Gamma(2,2)T[0,1]$) — **moot while $F$ is pinned at 1** (2026-08-04, §3.2), and the open question
+  becomes whether to re-enable the term at all rather than which prior to give it — and infection
+  observation error uses an independence approximation across the week and across ages.
 - **Antibody availability.** The forecast NGM assumes $A(t_0+h)$ is known at forecast time (§3.2),
   parallel to the contact data. This is a *stronger* assumption than the contact one, because
   `gen_dab` shares the inc2prev/CIS pipeline with the infection targets while CoMix is an independent

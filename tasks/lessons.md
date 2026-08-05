@@ -1080,3 +1080,46 @@ hierarchy; 2026-08-02 `-rhs` regularised horseshoe). The current model is block-
   `grid.LAB[1]`, so it printed `ref bin "2-10" = 1` over a figure whose 1.0 line had been bin 4 since
   2026-07-31. `cfg` was already in scope. `inst/analysis_plan_heavy_tail_mean.md` still names `(2-10)` as
   the baseline age group — left alone (the docx is source of truth), but it is stale.
+
+## Disabling the antibody term by pinning `F ≡ 1` 2026-08-04 (Stage 2)
+
+User: *"remove the antibody titer part (i.e. assuming a leaky-effect F to be always 1.0). To minimise
+the code change, just fix F to be 1.0 temporarily in this stage."* One line changed
+(`joint_model.jl`: `F ~ Beta(5, 1)` → `F = 1.0`) plus comments/docs. What made it a one-liner:
+
+- **`F` has exactly one path out of the model**: `model_transmission`'s return NamedTuple →
+  `generated_quantities` → `q.F` → `pooled.F`. It is **never** read from a chain by symbol
+  (no `chn[:F]`). So keeping `F` in the return tuple as the constant `1.0` leaves every consumer —
+  `fit_stage2_pooled`, `two_stage_forecast`, `reproduction_draws` (8j), `fit_window_infection_draws`
+  (10j), `collect_transmission_structure`/`plot_F` (9j) — working untouched. Check this property
+  before assuming any other latent can be pinned as cheaply.
+- **Pin the latent, don't sample-and-ignore it.** House style is `fix_infectivity` (`inst/3`
+  §"Fixed infectivity"): an unused latent stays prior-driven and pollutes the Pathfinder
+  approximation, so it is dropped from the parameter space. Verified via
+  `DynamicPPL.VarInfo(model)` — `keys` came back
+  `["log_gamma_sar","sig_s","z_s","sig_i","z_i","sigma_inf","w_mu","w_sigma"]`, no `F`.
+- **`ngm.jl` needed no change and got none.** `full_susceptibility(susc, F, A) = susc.*(1 .+ (F-1).*A)`
+  stays general and is simply called with `F = 1.0`, making the multiplier exactly `0.0`. That is
+  NaN-safe **only** because `weekly_antibody` ZERO-fills unmatched weeks rather than NaN-filling
+  (`0.0 * NaN = NaN` would have propagated into the NGM). The zero fill is deliberate — see the
+  2026-07-30 lesson above. If that ever changes to `NaN`/`missing`, this shortcut breaks.
+- **Do NOT bump `contacts_label` for a Stage-2-only change.** The token is shared by `stage1_path`
+  and `stage2_path`, so a bump would orphan all 504 valid `8j_s1_*` chains (Stage 1 has no `F`) and
+  force hours of pointless refits. Same call as `ref_bin`/`gamma_sar_prior`: leave the token, carry
+  an inline "delete stale `8j_s2_*`" NOTE at the change site. Here it cost nothing to check —
+  `dt_intermediate/` held **only** the 504 Stage-1 chains, zero `8j_s2_*` and zero derived
+  `9j_assembly_*`/`9j_rt_*`/`9j_relrt_*`/`9j_obsrt_*`, so there was nothing stale to delete.
+- **The decisive test is invariance, not the parameter value.** `all(pooled.F .== 1.0)` only proves
+  the constant landed. What proves the *term* is gone is re-running the forecast's NGM+renewal step
+  with the antibody column replaced (real / 0.99 / 0.0) and getting **bit-identical** draws. Always
+  pair such a test with a **control** at `F = 0.5` that must differ — otherwise a step that ignores
+  its antibody argument for some unrelated reason would pass silently.
+- **A pinned parameter can hide on a hard axis limit.** `plot_F` had `ylims = (0, 1)`, so the flat
+  1.0 line landed exactly on the top border and vanished. Widened to `(0, 1.05)`. This also removes
+  the pre-existing hazard that an out-of-range `F` was clipped away without warning. Long titles are
+  truncated at `size = (950, 520)` — the first "PINNED at 1.0, antibody term disabled" title was cut
+  mid-word; check the rendered PNG, not just the string.
+- Docstrings/specs that assert an estimated `F ~ Beta(5,1)` were updated rather than left to
+  contradict the code (`plot_F`, the 9j notebook cell, `inst/3` §3.2 / §6 priors / §diagnostics /
+  "remaining seams"). Same discipline as deleting the false "GAUGE-INVARIANT" claim in the ref-bin
+  task above.

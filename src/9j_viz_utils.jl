@@ -1518,15 +1518,23 @@ end
 Antibody-protection factor **F** over the rolling forecast origins, one line per model (median + 90%
 band). `store` is the `F` field of `collect_transmission_structure` (an `nO × 1` med/lo/hi store of
 the pooled per-draw `F`). F is the LEAKY antibody-protection factor in `full_susceptibility_a(t) =
-susc_a·(1 + (F−1)·A_a(t))`: F = 0 ⇒ antibodies fully protect, F = 1 ⇒ no protection (prior
-`Beta(5,1)`, so F ∈ (0,1)). This is the direct analog of `plot_gamma` for the γ_SAR level.
+susc_a·(1 + (F−1)·A_a(t))`: F = 0 ⇒ antibodies fully protect, F = 1 ⇒ no protection. This is the
+direct analog of `plot_gamma` for the γ_SAR level.
+
+⚠ **CHANGED 2026-08-04 (user request): F is no longer estimated.** `model_transmission` PINS
+`F = 1.0` to disable the antibody term (the `Beta(5,1)` prior is commented out there), so every
+model's line is a flat 1.0 with a zero-width band and all six coincide — that degenerate line IS
+the pin, not a fitting result or a convergence failure. The panel is kept as the visible evidence
+that the term is off. `ylims` is `(0, 1.05)` rather than `(0, 1)` precisely so the pinned line does
+not sit on the top border and vanish (it also fixes the pre-existing silent-clipping hazard: an F
+outside (0,1) used to be clipped away without warning).
 """
 function plot_F(store, labels4, model_cols, origins; h::Integer = 1)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
     fig = plot(; xlabel = "forecast origin", ylabel = "F (leaky antibody-protection factor)",
-               title = "9j — antibody-protection factor F over time by model (h=$h; 90% CI)",
-               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0, 1))
+               title = "9j — antibody-protection factor F (h=$h) — PINNED at 1.0 (term off)",
+               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0, 1.05))
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
         all(isnan, m) && continue

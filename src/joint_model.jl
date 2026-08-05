@@ -463,7 +463,28 @@ end
         inf = vcat(offs_i[1:cfg.ref_bin-1], one(sig_i), offs_i[cfg.ref_bin:end])         # inf[ref]=1
     end
 
-    F ~ Beta(5, 1)
+    # ⚠ TEMPORARY (2026-08-04, user request): the ANTIBODY / TITRE TERM IS DISABLED by pinning the
+    # leaky protection factor to F ≡ 1. Then full_susceptibility_a(t) = susc_a·(1 + 0·A_a(t)) = susc_a
+    # EXACTLY, so `wd.antibody` drops out of the NGM entirely. `ngm.jl` is deliberately left alone —
+    # `build_ngm`/`full_susceptibility` stay general and are simply called with F = 1.0, and the
+    # multiplier (F−1) is exactly 0.0. That is only NaN-safe because `weekly_antibody` ZERO-fills
+    # unmatched weeks rather than NaN-filling (infection_data.jl; 0.0*NaN would be NaN).
+    #
+    # F is NOT sampled — same reasoning as `fix_infectivity` above (inst/3 §"Fixed infectivity"):
+    # an unused latent stays prior-driven and pollutes the Pathfinder approximation, so it is dropped
+    # from the parameter space rather than merely ignored. It IS still returned (as the constant 1.0)
+    # so every downstream consumer keeps working untouched: `fit_stage2_pooled`'s `q.F` → `pooled.F`,
+    # `two_stage_forecast`, `reproduction_draws` (8j), `fit_window_infection_draws` (10j) and
+    # `plot_F` (9j), whose panel now shows a flat 1.0 line that documents the term being off.
+    #
+    # ⚠ CACHE: this changes the Stage-2 posterior and `contacts_label` does NOT encode it (same trap
+    # as `ref_bin`/`gamma_sar_prior`) — delete any `8j_s2_*` and the derived `9j_assembly_*`/`9j_rt_*`/
+    # `9j_relrt_*`/`9j_obsrt_*` before refitting. Stage-1 `8j_s1_*` chains have no F and are
+    # UNAFFECTED; do NOT bump the token, it is shared with Stage 1 and a bump would orphan them all.
+    #
+    # TO RESTORE the antibody term: swap the two lines below back.
+    # F ~ Beta(5, 1)
+    F = 1.0
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
     # ---- generation interval, ESTIMATED (2026-07-30; Munday 2023 Eq 2 + Table 1, §3.1) ----
@@ -498,7 +519,8 @@ end
     w = gen_interval_pmf_log(w_mu_e, w_sigma_e; smax = cfg.smax)
 
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
-    # (antibody and contacts vary by week; C*_t is the fixed Cstar_weeks[t].)
+    # (contacts vary by week; C*_t is the fixed Cstar_weeks[t]. `wd.antibody[:, t]` is still passed
+    # but has NO effect while F ≡ 1 — see the TEMPORARY block above.)
     for t in (cfg.smax + 1):Tn
         N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
         pred = renewal_next(N, wd.I_mean, t, w)
