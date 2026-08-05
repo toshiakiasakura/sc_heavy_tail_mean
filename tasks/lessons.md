@@ -2,6 +2,69 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## The kernel FAMILY, not the kernel structure, was the mixing problem — `-m32` 2026-08-05 (`joint_model.jl`, `framework.jl`)
+
+Stage-1 NUTS had failed to converge in every cell of a four-cell pilot (2 degree models × 2 origins ×
+h1): 100 % of sampling iterations at max tree depth, min ESS 1.9 → 4.0 → 5.4 of 500 across three
+successive model generations (pre-`s0` → `-s0` → `-diag`). Divergences and E-BFMI were fine
+throughout, so it was never a pathological posterior — it was geometry.
+
+**Two rounds of structural edits to the SPATIAL kernel did not touch the cause.** `-s0` (sum-to-zero
+field) and `-diag` (smooth the matrix diagonal only) were both aimed at the spatial GP. Measuring the
+chains rather than the model showed the binding constraint was elsewhere:
+
+| | ρ_time | SD `z[:,1]` | SD `z[:,6]` | ratio | min ESS |
+|---|---|---|---|---|---|
+| the ONE healthy fit ever seen | **0.65 wk** | 0.363 | 0.531 | 1.5× | **118** |
+| `-diag` negbin @ 2020-11-15 | 24.1 wk | 0.012 | 0.761 | 63× | 5.4 |
+| `-diag` negbin @ 2021-05-09 | 62.7 wk | 0.013 | 0.825 | 62× | 2.0 |
+
+Mechanism: as ρ_time grows, the squared-exponential `Kt` goes numerically low-rank (rank 4 of 12 at
+ρ_time = 63), `Lt`'s leading column absorbs the whole field, and `z[:,1]` becomes ultra-tightly
+constrained while `z[:,2:12]` sit at prior. A ~60× scale spread inside ONE parameter block forces the
+diagonal metric's step size down to the tightest direction — hence 1e-3 steps and 100 % at cap.
+
+**Three lessons.**
+
+1. **Diagnose from the chain, not from the model.** Both structural edits were defensible on paper
+   and neither moved the number that mattered. The per-block SD table above took minutes to compute
+   from chains already on disk and pointed straight at ρ_time.
+2. **A length-scale is restrained by its prior only where the likelihood is informative.**
+   `framework.jl` asserted "the ceiling cannot be reached and the restraint is the prior, not the
+   clamp". Measured: ρ_time sat at +3.6σ to +5.5σ into that prior's tail in all four cells. Over a
+   12-week window the likelihood is flat in ρ_time past ~10 weeks, so the prior is doing *all* the
+   work and a weak one does none. Widening `RHO_TIME_BOUNDS` earlier the same day (on the correct
+   observation that the old clamp was binding) removed a hard pile-up and thereby made the drift
+   *visible* — it did not make ρ_time identified, and the docstring claiming otherwise was written
+   ahead of the measurement.
+3. **Prefer Matérn to squared-exponential whenever a GP feeds a non-centred parameterisation.** The
+   SE kernel's super-exponential eigenvalue decay is exactly what turns "smooth" into "numerically
+   rank-deficient", and under a non-centred map that becomes an anisotropy the sampler pays for.
+   Measured on this design (`Tn=12`, 28 age-pairs): `Kt` keeps full rank 12 at every ρ_time under
+   Matérn 3/2 versus rank 10 by ρ_time = 4 and rank 4 by 63 under SE; `Lt`'s column-scale spread at
+   the new prior mode is 2.4 versus 228–274 in the chains that failed. Spatially, `Ap`'s smallest
+   eigenvalue at the ρ prior's mode is 2.5e-2 under Matérn against 2.9e-5 under SE — and at +2σ,
+   2.1e-3 against **1.5e-8, below the 1e-6 jitter**, i.e. the SE kernel would have left several field
+   directions determined by the jitter alone.
+
+**What landed** (user request): the off-diagonal smoothing term restored (`log_rho_gap` back, 389/977
+→ 390/978), BOTH kernels switched to Matérn 3/2, `gp_len_prior` → N(log 20, 0.35²) shared by both
+spatial ρ, `gp_time_len_prior` → N(log 2, 0.35²). The tight time prior and the kernel swap attack the
+same mechanism from opposite sides and were landed together; do not revert one alone.
+
+**Two things to watch at the refit.** (a) The spatial prior is in genuine tension with the earlier
+Pathfinder survey (ρ_diag ≈ 7.9, ρ_gap ≈ 4.65 are −2.7σ and −4.2σ under N(log 20, 0.35²)), so it is
+informative rather than weak — if the posterior piles up on its LOWER edge, the data disagree with
+the assumed smoothness. (b) η is no longer bounded above by its nominal marginal SD: the
+`sqrt(diag(M·Kp·M))` factor now runs ×0.71–×1.08 at the mode, exceeding 1 for cells anti-correlated
+with the pair-mean, which cannot happen under SE.
+
+**Lockstep sites this touched** (all silent failures if missed): the `log_rho_gap` sniffs in
+`8j_viz_utils.jl` and `10j_viz_utils.jl` had to be **inverted** — after the restore, a chain LACKING
+the scalar is the stale one; the 10j kernel mirror rebuilds `Kp`/`Kt` independently of the model and
+is checked only by `tmp/verify_sumzero.jl`; and the 9j ρ store was hard-coded to two length-scales
+(`mkstore(2)`), which *throws* rather than warns once a third arrives.
+
 ## "Remove a direction from a separable kernel" has two opposite readings — pick the right one 2026-08-05 (`joint_model.jl`)
 
 Asked to drop the off-diagonal (age-gap) direction from the spatial GP, there are exactly two ways

@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (log_rho_diag, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
+# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -16,10 +16,11 @@
 Load the cached chain for `(lbl, origin, h)` and rebuild the smoothed directional contact-mean
 matrix μ_{i→j} for one week, once per posterior draw:
 
-    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...))
+    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...));  ρ_gap = exp(softclamp(log_rho_gap, RHO_BOUNDS...))
     η = exp(softclamp(log_eta, -3, 2))  (mirrors model)
-    u = (mid_p1+mid_p2)/√2 (total age);  isd_p = (p1 == p2), the matrix diagonal (⟺ v_p = 0)
-    Kp[p,q] = p==q ? 1 : (isd_p && isd_q ? exp(-(u_p-u_q)²/(2ρ_diag²)) : 0)  # 28 unordered pairs
+    u = (mid_p1+mid_p2)/√2 (total age);  v = (mid_p1-mid_p2)/√2 (age gap)
+    m32(x) = (1+√3 x)·exp(-√3 x)                                    # Matérn 3/2 (`-m32`, 2026-08-05)
+    Kp[p,q] = m32(|u_p-u_q|/ρ_diag) · m32(|v_p-v_q|/ρ_gap)          # 28 unordered pairs, separable
     Lp = chol(Kp + 1e-6 I).L
     μ[i,j] = exp(softclamp(rvec[pair_index[i,j]] + log(pop_j / pop_ref), -8, 6))   (pop_ref = pop[1], "2-10")
 
@@ -31,7 +32,7 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
   full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
-      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=exp(-(s-t)²/(2ρ_time²));  Lt=chol(Kt+1e-4 I).L
+      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=m32(|s-t|/ρ_time);  Lt=chol(Kt+1e-4 I).L
       rvec = ( c + σ_c·(Lt[wk,:]·z_c) )  .+  η·( Lp · (z · Lt[wk,:]) )
 
 - **Legacy per-week iid** (`c[t]`, `z[p,t]`): `rvec = c[wk] .+ η .* (Lp * z[:,wk])`.
@@ -64,59 +65,77 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # reconstructed μ / C* is silently wrong. See the constants' docstring.
     pnames = string.(names(chn, :parameters))
 
-    # ---- which SPATIAL KERNEL generation is this chain? (`-diag`, 2026-08-05) ----
-    # `model_degree` now smooths the MATRIX DIAGONAL ONLY with a single length-scale, so
-    # `log_rho_gap` is gone. A chain that still carries it was fitted under the anisotropic
-    # two-length-scale kernel, and replaying it through the formula below would silently rebuild a
-    # DIFFERENT kernel — every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
-    # The `zrows` sniff below cannot catch this (the `z` shape is identical), so it needs its own.
-    if any(n -> n == "log_rho_gap", pnames)
-        @warn "chain carries `log_rho_gap`, i.e. the pre-`-diag` anisotropic spatial kernel. \
-               Refusing to reconstruct rather than replay it through the diagonal-only kernel." path
+    # ---- which SPATIAL KERNEL generation is this chain? (`-m32`, 2026-08-05) ----
+    # `model_degree` uses a SEPARABLE ANISOTROPIC kernel with TWO length-scales, so `log_rho_gap`
+    # must be present. A chain lacking it was fitted under the short-lived `-diag` generation
+    # (diagonal-only smoothing, one length-scale), and replaying it through the formula below would
+    # silently rebuild a DIFFERENT kernel — every μ / C* / contact matrix / CCDF would be wrong with
+    # nothing raised. The `zrows` sniff below cannot catch this (the `z` shape is identical to
+    # `-diag`'s), so it needs its own. NOTE this guard was INVERTED on 2026-08-05: it previously
+    # refused chains that CARRIED `log_rho_gap`.
+    # ⚠ It does NOT distinguish `-m32` from the pre-`-diag` squared-exponential generation, which
+    # also carried two length-scales — that fork is caught by the cache token instead, since `-m32`
+    # renamed it. Do not rely on this sniff alone if you stage a chain under a hand-written filename.
+    if !any(n -> n == "log_rho_gap", pnames)
+        @warn "chain has no `log_rho_gap`, i.e. the `-diag` diagonal-only spatial kernel. \
+               Refusing to reconstruct rather than replay it through the two-length-scale kernel." path
+        return nothing
+    end
+    # ---- which KERNEL FAMILY? (`-m32`, 2026-08-05) ----
+    # A pre-`-diag` chain is PARAMETRICALLY IDENTICAL to a current one — same names, same shapes,
+    # two length-scales — but its kernel was the SQUARED EXPONENTIAL. No sniff over `pnames` can
+    # tell them apart, so this forks on the TOKEN, which `-m32` renamed for exactly this reason.
+    # Without it, `reconstruct_mu_draws(…; contacts = CONTACTS_TOKEN_PF)` — a supported way to read
+    # the retained Pathfinder grid — would silently replay SE draws through a Matérn kernel and
+    # every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
+    if !occursin("-m32", contacts)
+        @warn "contacts token `$contacts` predates `-m32`, so this chain's kernel was the squared \
+               exponential, not Matérn 3/2. The chain columns are indistinguishable from a current \
+               one, so this cannot be detected from the chain — refusing on the token." path
         return nothing
     end
 
     ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))   # soft-bounded, mirrors model
+    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))   # soft-bounded, mirrors model
     η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
     D = length(ρ_diag)
-    # along-diagonal (total age) coordinate for the 28 pairs, √2-normalised (mirrors model). The /√2
-    # is a units convention now, not half a rotation — the across-diagonal coordinate survives only
-    # as the `isd` mask, since v = (mid_p1 − mid_p2)/√2 = 0 ⟺ p1 = p2.
-    su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in pair_list]
-    isd = [p[1] == p[2] for p in pair_list]                       # the diagonal cells of the matrix
+    # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised (mirrors model).
+    su = [(mid[p[1]] + mid[p[2]]) / sqrt(2) for p in pair_list]   # along-diagonal  (total age)
+    dfp = [(mid[p[1]] - mid[p[2]]) / sqrt(2) for p in pair_list]  # across-diagonal (age gap)
 
     # ---- which GP field generation is this chain? (`-s0`, 2026-08-05) ----
     # `model_degree` constrains the structure field to sum to zero over the P pairs each week, so
-    # `z` has P−1 = 27 rows, not P = 28. Chains written before that have 28. The row count is the
-    # ONLY thing that distinguishes them, and getting it wrong is silent: `Z` below is allocated at
-    # a size derived from the GRID, so replaying a 27-row chain under the 28-row formula would leave
-    # row 28 as uninitialised memory and every μ / C* / CCDF would contain garbage without so much
-    # as a warning. Sniff it and dispatch, in the same spirit as the `c2` `-rhs` guard in
-    # `_read_disp_chain` below.
+    # `z` has P−1 = 27 rows, not P = 28. Chains written before that have 28, and getting it wrong is
+    # silent: `Z` below is allocated at a size derived from the GRID, so replaying a 27-row chain
+    # under the 28-row formula would leave row 28 as uninitialised memory and every μ / C* / CCDF
+    # would contain garbage without so much as a warning.
+    #
+    # P−1 IS NOW THE ONLY ACCEPTED COUNT. `-s0` landed before `-m32` and was never reverted, so any
+    # chain the token guard above admits is necessarily sum-to-zero; a P-row chain reaching here is
+    # a pre-`-s0` file staged under a current-token filename, which the token fork cannot see. The
+    # unconstrained branch that used to handle it was therefore both unreachable in normal use and,
+    # since `-m32`, actively wrong (it would rebuild a squared-exponential generation's field with a
+    # Matérn kernel), so it is gone rather than kept as a trap. Restore it only alongside a
+    # kernel-family branch.
     zrows = maximum((parse(Int, match(r"^z\[(\d+)", n).captures[1])
                      for n in pnames if occursin(r"^z\[\d+", n)); init = 0)
     if zrows == 0
         @warn "chain has no `z[...]` structure-field columns — not a `model_degree` Stage-1 chain" path
         return nothing
-    elseif zrows ∉ (P, P - 1)
-        @warn "chain's structure field has $zrows rows, expected $P (unconstrained) or $(P-1) \
-               (sum-to-zero `-s0`) for A=$A. Refusing to reconstruct rather than guess." path
+    elseif zrows != P - 1
+        @warn "chain's structure field has $zrows rows, expected $(P-1) (sum-to-zero `-s0`) for \
+               A=$A. $(zrows == P ? "This is the pre-`-s0` unconstrained generation, whose kernel \
+               also predates `-m32`. " : "")Refusing to reconstruct rather than guess." path
         return nothing
     end
-    sum_zero = zrows == P - 1
     sz_Q = _sum_zero_basis(P)                    # SAME helper the model uses — never re-derive it
 
-    # Spatial whitening for draw d (mirrors model) — shared by all regimes. Under `-s0` this is
-    # `Q·chol(Qᵀ·Kp·Q + 1e-6·I)`, giving Cov = M·Kp·M; before it, plain `chol(Kp + 1e-6·I)`. Either
-    # way the returned factor maps a `zrows`-vector to the P-vector field, so the call sites below
-    # are identical.
+    # Spatial whitening for draw d (mirrors model): `Q·chol(Qᵀ·Kp·Q + 1e-6·I)`, giving Cov = M·Kp·M.
+    # Maps a (P−1)-vector of `z` to the P-vector field.
     function _Lp(d)
-        Kp = [m == n           ? 1.0 :
-              isd[m] && isd[n] ? exp(-(su[m] - su[n])^2 / (2 * ρ_diag[d]^2)) :
-                                 0.0
+        Kp = [_m32(abs(su[m] - su[n]) / ρ_diag[d]) * _m32(abs(dfp[m] - dfp[n]) / ρ_gap[d])
               for m in 1:P, n in 1:P]
-        sum_zero ? sz_Q * cholesky(Symmetric(sz_Q' * Kp * sz_Q) + 1e-6 * I).L :
-                   cholesky(Symmetric(Kp) + 1e-6 * I).L
+        sz_Q * cholesky(Symmetric(sz_Q' * Kp * sz_Q) + 1e-6 * I).L
     end
     μ = Array{Float64,3}(undef, D, A, A)
 
@@ -139,7 +158,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
             Zc[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
         end
         for d in 1:D
-            Kt = [exp(-((s - t)^2) / (2 * ρ_time[d]^2)) for s in 1:Tn, t in 1:Tn]
+            Kt = [_m32(abs(s - t) / ρ_time[d]) for s in 1:Tn, t in 1:Tn]   # Matérn 3/2, mirrors model
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
             c_wk = cc[d] + σ_c[d] * dot(ltrow, @view Zc[d, :])

@@ -105,61 +105,56 @@ SINGLE SOURCE OF TRUTH — do not re-spell these as literals. They are consumed 
 every reconstructed length-scale and contact matrix is silently wrong and NOTHING raises. That is
 why these were hoisted out of five separate literals on 2026-08-05.
 
+Both `RHO_BOUNDS` and `RHO_TIME_BOUNDS` are **INERT under the current priors** and are kept only as
+overflow guards. `gp_len_prior` N(log 20, 0.35²) puts the `RHO_BOUNDS` floor 10.5σ below and the
+ceiling 9.2σ above; `gp_time_len_prior` N(log 2, 0.35²) puts the `RHO_TIME_BOUNDS` floor 5.9σ below
+and the ceiling 11.3σ above. Neither clamp can bind, which is the intended division of labour: the
+PRIOR restrains the length-scale, the clamp only stops a stray optimiser step from overflowing.
+
+⚠ That was NOT true of the previous generation, and the failure was measured. With
+`gp_time_len_prior` at N(log 4, 0.5²) the four-cell NUTS pilot of 2026-08-05 put ρ_time at 24.1,
+34.8, 48.0 and 62.7 weeks — +3.6σ to +5.5σ into the prior's tail, over a **12-week** window. The
+docstring here previously asserted "the ceiling cannot be reached and the restraint is the prior";
+that was an assertion, not a measurement, and the posterior went most of the way to the ceiling
+anyway. The lesson stands independent of the numbers: **a length-scale is only restrained by its
+prior if the likelihood is informative about it, and over 12 weeks it is not.** If a refit shows
+ρ_time drifting up the tail again, the answer is a tighter prior or a shorter window — not a wider
+clamp.
+
 WIDENED 2026-08-05, `RHO_BOUNDS` `[log 3, log 45]` → `[log 0.5, log 500]`. The old window was
 2.708 nats wide, which is narrower than `_softplus`'s transition width, so `_softclamp` had **no
 interior** there (max derivative 0.600 anywhere) and was acting as a hard modelling constraint
 disguised as a numerical guard — see the `_softclamp` note in `joint_model.jl`. It is not a
-numerical guard: `cholesky(Symmetric(Kp) + 1e-6·I)` succeeds at every ρ from 1e-3 to 1e4, and under
-the `-diag` kernel it is safer still (as ρ→∞, `Kp → block(J₇, I₂₁)`, rank 22 rather than rank 1; as
-ρ→0, `Kp → I`). Swept over 200 ρ spanning the whole window, `min eigval(Ap) = −1.1e-15` and even a
-1e-8 jitter gives 0/200 `PosDefException`s. The real limit is identifiability — ρ_diag ≳ 200 merges
-the 7 diagonal cells — and that is held by `gp_len_prior`, not by this clamp.
+numerical guard: under `-m32` (2026-08-05) `cholesky(Symmetric(Ap) + 1e-6·I)` is clean at all 625
+points of a 25×25 (ρ_diag, ρ_gap) grid spanning the whole window, `min eigval(Kp) = 1.4e-7` (PSD),
+and `rank(Ap) = 27` everywhere INCLUDING the ρ = 500 ceiling — Matérn 3/2's tails are heavy enough
+that `Kp → J` is not reached inside the clamp at all (min(Kp) is still 0.93 at ρ = 500; rank first
+degrades around ρ ≈ 5000). As ρ→0, `Kp → I`. The real limit is identifiability, and that is held by
+`gp_len_prior`, not by this clamp.
 
-`RHO_TIME_BOUNDS` `[log 0.5, log 26]` → `[log 0.25, log 104]`, widened 2026-08-05 on MEASUREMENT,
-having first been left alone on the (wrong) reasoning that ρ_time = 26 is already "fully pooled" over
-a 12-week window so more range would be unidentified. A posterior survey — 4 origins
-(2020-11-15, 2021-02-14, 2021-05-09, 2021-09-12) × 2 degree models × 2 NGMs — showed ρ_time
-**pinned against the old ceiling**: median 22.8, 99th pct 25.78, max 25.87 vs a bound of 26.0, i.e.
-the largest draw sat 0.005 nats below `log 26` (0.1% of the window). Being unidentified up there is
-not a reason to bound it there: the clamp was absorbing the likelihood's preference for a very smooth
-temporal field and reporting false confidence. For contrast, the same survey put ρ_diag in
-[3.49, 12.77] and ρ_gap in [3.02, 10.30] — both far inside `RHO_BOUNDS`, which needs no further
-change. (That survey predates `-diag`; `ρ_gap` no longer exists and ρ_diag now measures decay along
-the matrix diagonal only, so treat those intervals as an order-of-magnitude guide, not a posterior.)
+`RHO_TIME_BOUNDS` `[log 0.5, log 26]` → `[log 0.25, log 104]`, widened 2026-08-05 after a Pathfinder
+posterior survey (4 origins × 2 degree models × 2 NGMs) found ρ_time **pinned against the old
+ceiling**: median 22.8, max 25.87 against a bound of 26.0. The widening was correct as far as it went
+— a clamp absorbing the likelihood's preference reports false confidence — but it did not identify
+ρ_time, it only let the drift become visible. `gp_time_len_prior` N(log 2, 0.35²) is what actually
+bounds it now. Cholesky is safe regardless: `cholesky(Kt + 1e-4·I)` succeeds to ρ_time = 1e6.
 
-The new ceiling is ~8.7× the 12-week window, where `Kt` is numerically indistinguishable from
-all-ones (`Kt[1,12]` = 0.914 at ρ_time = 26, 0.978 at 52, 0.994 at 104), so the posterior can express
-"effectively pooled" without piling up on a bound. Restraint comes from `gp_time_len_prior`
-N(log 4, 0.75), for which log 104 is +4.3σ. Cholesky is safe regardless — `cholesky(Kt + 1e-4·I)`
-succeeds to ρ_time = 1e6 with `cond` saturating at 1.2e5.
+⚠ Widening is not free, and this is the mechanism to understand before touching either bound: a large
+ρ_time drives `Kt` toward rank-1, `Lt`'s leading column then absorbs the whole field, and `z[:,1]`
+becomes pinned ~60× tighter than the other columns — the geometry that produced 100% max-tree-depth
+and min ESS 1.9–5.4 of 500 (tasks/lessons.md 2026-08-05). The `-m32` kernel swap attacks the same
+mechanism from the other side (Matérn keeps `Kt` full rank 12 at every ρ_time in this window), but
+the two are complementary, not redundant. Do not widen past the point where the model can still
+discriminate.
 
-⚠ THE WIDENING ALONE DOES NOT FIX THIS, AND THE BOUND IS NOT THE REAL PROBLEM. The survey figures
-above are POST-clamp. Inverting the old clamp shows the RAW `log_rho_time` latent had run to
-**ρ_time ≈ 157 (median) to 1047 (max) weeks** — the old clamp was compressing 1047 down to 25.87.
-Under this new ceiling those same raw values still land at 99.5–104.0, i.e. still on the bound. The
-direction is simply **not identified above ~30 weeks**: past that `Kt` is numerically all-ones, so
-the likelihood is flat and nothing stops the latent drifting. What the widening buys is real but
-narrow — it removes a HARD pile-up at 26 and restores the gradient over the identified range
-(0.996 at ρ_time = 22.8, versus 0.505 under the old clamp) — it does not make ρ_time identified.
-
-Two consequences to weigh before touching this again:
-  • The only genuine restraint on a flat direction is `gp_time_len_prior`. N(log 4, 0.75) puts the
-    new ceiling at +4.3σ and the observed post-clamp median at +2.3σ. If ρ_time still parks on the
-    bound after a NUTS refit, revisit the PRIOR — widening this further just moves the pile-up.
-  • Widening is not free: large ρ_time makes `Kt` near rank-1, which pushes more of the `z` block
-    into prior-driven directions and so aggravates the dominant `z[·,1]` geometry problem
-    (tasks/lessons.md 2026-08-05). Do not widen past the point where the model can still
-    discriminate.
-
-⚠ PROVENANCE: the survey was run with PATHFINDER (`stage1_use_nuts = false`) because it is ~30 s vs
-~1 h per fit. In a flat direction crossed with a saturated clamp, Pathfinder's normal approximation
-has no curvature to fit and can come back arbitrarily wide, so the raw ρ_time ≈ 1047 is partly an
-artefact of that and should NOT be quoted as a posterior. The POST-clamp values are trustworthy —
-they are what actually entered `Kt` — and those are what show the bound binding. Confirm the raw
-range against a NUTS chain before acting on it.
+⚠ PROVENANCE: the ρ_time survey was run with PATHFINDER (`stage1_use_nuts = false`) because it is
+~30 s vs ~1 h per fit. In a flat direction crossed with a saturated clamp, Pathfinder's normal
+approximation has no curvature to fit and can come back arbitrarily wide, so its raw ρ_time ≈ 1047 is
+partly an artefact and should NOT be quoted as a posterior. The four NUTS values quoted above are the
+trustworthy ones.
 """
-const RHO_BOUNDS      = (log(0.5), log(500.0))   # ρ_diag — age-years (sole spatial ρ since `-diag`)
-const RHO_TIME_BOUNDS = (log(0.25), log(104.0))  # ρ_time — weeks (widened on measurement, see above)
+const RHO_BOUNDS      = (log(0.5), log(500.0))   # ρ_diag / ρ_gap — age-years (shared window)
+const RHO_TIME_BOUNDS = (log(0.25), log(104.0))  # ρ_time — weeks (inert under the current prior)
 
 """
 Soft-clamp bounds and transition width for the estimated generation interval (`model_transmission`,
@@ -220,7 +215,7 @@ Base.@kwdef struct FrameworkConfig
     # --- Stage-1 NUTS settings (2026-08-05; consulted only when `stage1_use_nuts`) ---
     # These exist because a bare `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the
     # former `n_sample = 250` gave 125 warmup iterations to adapt a step size and diagonal metric in
-    # 389 (NegBin) / 977 (hurdle-Weibull) dimensions. Stan's default is 1000; 125 is not a tuning
+    # 390 (NegBin) / 978 (hurdle-Weibull) dimensions. Stan's default is 1000; 125 is not a tuning
     # choice, it is an accident of the convenience constructor.
     stage1_nuts_adapts::Int = 1000    # warmup iterations, DISCARDED and drawn ON TOP of `stage1_nuts_draws` (AbstractMCMC applies `discard_initial` before collecting N, so total work = adapts + draws).
     stage1_nuts_draws::Int  = 500     # KEPT draws per Stage-1 fit. Must stay ≥ `n_stage1_post` (=100) or `stage1_moment_draws` cannot fill the cut's 100 imputations; `fit_stage1` enforces that with a `max`.
@@ -229,9 +224,9 @@ Base.@kwdef struct FrameworkConfig
     stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode THIS field (it encodes only `stage1_use_nuts`, since 2026-08-05), so changing it alone will silently reuse existing chains — delete them if you change it outside a token bump.
     stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (`z` 324 + `z_c` 12 = 336 of 389/977 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)   # log-ρ_diag Normal(μ,σ), age-years; the SOLE spatial length-scale since `-diag` (2026-08-05) — it smooths the 7 diagonal cells of the contact matrix along total age, and the 21 off-diagonal cells are correlated with nothing. Centre RECENTRED log(15)→log(4) earlier the same day, when there were still two length-scales, on the grounds that the naive posterior means ρ_gap≈4.65 and ρ_diag≈7.9 straddled 4; that pair no longer exists, so the centre is now UNJUSTIFIED BY MEASUREMENT and is simply carried over unchanged (deliberately: the `-diag` change was landed without a refit). ⚠ UNITS: ρ is on the `su` scale, which between diagonal cells is √2× an age difference, so ρ=4 is an effective age-difference length-scale of 4/√2 = 2.83 yr. This is UNCHANGED from the anisotropic kernel — verified, the old and new kernels agree to 0.000e+00 on every diagonal-cell pair over 30 (ρ_diag,ρ_gap) combos, because v=0 for both cells made the old gap factor exp(0)=1 there. WATCH AT THE FIRST REFIT: the closest separation the kernel can now see is the 7-year 2-10→11-15 step (9.9 in su units), where ρ=4 gives correlation only 0.047 — at the prior MODE this kernel barely smooths. What changed is not the scale but the INFORMATION: ρ is now identified by the 7 diagonal cells' 21 pairs alone. The prior does not pin it there (ρ=7.9 is +1.36σ and gives 0.456, ρ=12 is +2.2σ and gives 0.712), so the likelihood can still find a smoothing scale; but if the posterior piles up in the upper tail, RECENTRE rather than widen. THE SD STAYS 0.5 — it was briefly 0.75 and that MEASURABLY BROKE Stage-1 NUTS: at origin 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, mean tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597 (284/402 coords over 1.01). The worst blocks were log_rho_time (ESS 2.7, R̂ 1.32) and the z_c/z field it couples to through Lt (ESS 4.1/1.8, R̂ 1.23/1.60) — a looser prior let ρ_time drift toward the near-pooled region where Kt is rank-1, which collapses the map z↦Fld. DO NOT LOOSEN THIS TO BUY ρ HEADROOM; the clamp is the backstop, this prior is the restraint.
+    gp_len_prior::Tuple{Float64,Float64}   = (log(20.0), 0.35)   # log-ρ Normal(μ,σ), age-years — SHARED by BOTH spatial length-scales, `log_rho_diag` (total age) and `log_rho_gap` (age gap). SET 2026-08-05 (user request) alongside the `-m32` kernel swap and the restoration of the off-diagonal smoothing term. ⚠ UNITS: ρ lives on the rotated (su, df) scale, which is √2× an age difference, so ρ=20 is an effective age-difference length-scale of 20/√2 = 14.1 yr. WHAT IT ASSERTS: at the mode the kernel gives correlation 0.788 to the closest diagonal step (2-10→11-15, Δu=9.90) and 0.028 across the widest age gap — a MUCH smoother contact surface than the (log 4, 0.5) it replaces, which gave 0.047 at that same step, i.e. barely smoothed at all at its own mode. CONDITIONING (measured, kernel_static): under Matérn 3/2 the projected kernel `Ap` has rank 27 and min eigenvalue 2.5e-2 at the mode, 2.1e-3 at +2σ — 3-4 orders above the 1e-6 jitter, with effective rank 16.8/8.3/4.4 at −2σ/mode/+2σ. Under the OLD squared exponential the same ρ=20 gave min eigenvalue 2.9e-5 and, at +2σ, 1.5e-8, i.e. BELOW the jitter: the kernel swap is what makes this centre numerically safe, and the two changes should not be separated. ⚠ IN TENSION WITH THE EARLIER POSTERIOR, DELIBERATELY: the 2026-08-05 Pathfinder survey put ρ_diag≈7.9 and ρ_gap≈4.65, which are −2.7σ and −4.2σ here, so this prior is informative rather than weak. WATCH AT THE REFIT: if the posterior piles up against the LOWER edge, the data are disagreeing with the assumed smoothness and the centre should come down. HISTORY worth keeping: the SD was briefly 0.75 (with centre log 4) and that MEASURABLY BROKE Stage-1 NUTS — at 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597. The worst blocks were log_rho_time and the z_c/z field it couples to through Lt: a looser length-scale prior let ρ_time drift into the near-pooled region where Kt goes low-rank, collapsing the map z↦Fld. That mechanism is exactly what `-m32` and the new `gp_time_len_prior` target; do not loosen either SD to buy ρ headroom.
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
-    gp_time_len_prior::Tuple{Float64,Float64}   = (log(4.0), 0.5)   # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only. Briefly 0.75 on 2026-08-05 and reverted the same day — see `gp_len_prior` for the measurement. This is the PRIMARY suspect in that regression: ρ_time is the length-scale whose drift degenerates Kt, so its prior is what keeps the temporal GP identified. At σ=0.5 the prior puts ρ_time=26 at +3.6σ and the RHO_TIME_BOUNDS ceiling of 104 at +6.5σ, so the ceiling cannot be reached and the restraint is the prior, not the clamp — which is the intended division of labour.
+    gp_time_len_prior::Tuple{Float64,Float64}   = (log(2.0), 0.35)   # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only. SET 2026-08-05 (user request) — RECENTRED log(4)→log(2) and tightened 0.5→0.35 on direct measurement. THIS IS THE FIX FOR THE 2026-08-05 NON-CONVERGENCE. At (log 4, 0.5) the four-cell NUTS pilot put ρ_time at 24.1, 34.8, 48.0 and 62.7 weeks — +3.6σ to +5.5σ into the prior tail — over a 12-week window, where `Kt` is numerically all-ones and the likelihood is flat. Every cell came back NOT CONVERGED with 100% of iterations at max tree depth. MECHANISM: as ρ_time grows `Kt` degenerates, `Lt`'s leading column absorbs the field, and `z[:,1]` is pinned ~60× tighter than the rest — a scale disparity NUTS cannot step through. Measured `Lt` column-scale spread: 2.4 at ρ_time=2 (this mode), 6.2 at +2σ, 94 at 26 wk, 178 at 62.7 wk. At σ=0.35 this prior puts 26 wk at +7.3σ and the RHO_TIME_BOUNDS ceiling at +11.3σ, so the clamp is inert and the prior is the sole restraint — which is what the previous docstring CLAIMED at (log 4, 0.5) and was wrong about. Treat that as the standing caution: verify it against a chain rather than asserting it. The ±2σ reach is ρ_time ∈ [0.99, 4.03] wk, i.e. weekly contact structure that is correlated over roughly a fortnight and no more — a real modelling commitment, not just a numerical one, and the thing to revisit if the refit shows the likelihood fighting it.
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
@@ -322,7 +317,7 @@ so `temporal-gsar-cut-sc-p0-gi` is NOT the same model as `temporal-gsar-cut-sc`.
 `-nuts` (2026-08-05) — a SAMPLER component, appended when `cfg.stage1_use_nuts`. It is the first
 token component that does not describe the model's parameter space: Stage 1's posterior is the
 same target either way, but Pathfinder only *approximates* it with a single multivariate normal in
-389/977 dimensions, so the draws differ and everything conditioned on them differs with it. The
+390/978 dimensions, so the draws differ and everything conditioned on them differs with it. The
 component is added because `fit_or_load_stage1` short-circuits on bare `isfile`, so without it
 flipping `stage1_use_nuts` would silently reload the 504 Pathfinder chains and change nothing —
 the hazard that was already documented on the `stage1_pathfinder_runs` field.
@@ -357,22 +352,35 @@ placed BEFORE the `-nuts` sampler component so the model/sampler split stays rea
 filename. Note this stacks on the `-nuts` live migration that had not yet been fitted, so in practice
 no completed grid is discarded — see `CONTACTS_TOKEN_PF`.
 
-`-diag` (2026-08-05) — the Stage-1 spatial kernel smooths the **matrix diagonal only**. The 45°
-rotation into `u` (total age) and `v` (age gap) survives, but `v` no longer carries a length-scale:
-it only selects the diagonal, since `v = 0 ⟺ a = b`. `Kp` is an RBF in `u` over the 7 same-age cells
-and the identity elsewhere, so `log_rho_gap` is GONE and `log_rho_diag` is the sole spatial ρ.
-Stage 1 drops one scalar: **389** (NegBin) / **977** (hurdle-Weibull), from 390/978. Why: `ρ_gap`
-was one of the two worst-mixing scalars (bulk ESS 44.5 of 500), and the off-diagonal smoothing it
-bought was judged not to earn its keep. The alternative of deleting the `v` TERM instead
-(`ρ_gap → ∞`) was measured and rejected — it drops `rank(Ap)` 27→21 and makes `2-10|16-24`
-identically equal to `11-15|11-15` (both total age 26); see `tasks/lessons.md`.
+`-m32` (2026-08-05) — **Matérn 3/2** replaces the squared exponential in BOTH Stage-1 GP kernels, and
+the **off-diagonal (age-gap) smoothing term is restored**. Spatially `Kp` is again a separable
+anisotropic kernel in the rotated `(u, v)` = (total age, age gap) coordinates, now a product of two
+1-D Matérn 3/2 factors; temporally `Kt` is a 1-D Matérn 3/2 over the window weeks. So `log_rho_gap`
+is BACK and Stage 1 returns to **390** (NegBin) / **978** (hurdle-Weibull) unconstrained dimensions.
 
-Stage-1 parameter-space change again, so the same staleness rule applies, and `gp_len_prior`'s
-centre is now carried over rather than justified — see its own note. The read-only mirrors
-(`reconstruct_mu_draws`, `load_transmission_draws`) grew a `log_rho_gap ∈ pnames ⇒ refuse` sniff,
-because the `z` shape is unchanged and the existing `zrows` guard is blind to this."""
+This supersedes `-diag`, which for a few hours the same day had dropped `log_rho_gap` and smoothed the
+matrix diagonal only (389/977). Why it was reverted: a four-cell NUTS pilot (2 degree models × 2
+origins × h1) showed `-diag` did not fix the mixing problem it was aimed at — min ESS at
+negbin @ 2020-11-15 went 1.9 (pre-`s0`) → 4.0 (`-s0`) → 5.4 (`-diag`) of 500, with 100% of sampling
+iterations at max tree depth in all four cells. The measured cause was not the spatial kernel at all
+but ρ_time drifting to 24–63 weeks over a 12-week window, where the SQUARED-EXPONENTIAL `Kt` goes
+numerically rank-4-of-12 and the map `z ↦ field` becomes ~60× anisotropic. Hence the kernel family
+change rather than a further edit to the spatial structure.
+
+Measured statically (kernel_static, no MCMC): `Kt` keeps FULL rank 12 at every ρ_time in
+`RHO_TIME_BOUNDS` (SE fell to rank 10 by ρ_time = 4); `Ap` keeps rank 27 across all of `RHO_BOUNDS`
+including the ceiling, with min eigenvalue 2.5e-2 at the `gp_len_prior` mode against 2.9e-5 for SE at
+the same ρ; `Kp` is PSD (min eigenvalue 1.4e-7) and unit-diagonal exactly, and
+`cholesky(Ap + 1e-6·I)` is clean at all 625 points of a 25×25 (ρ_diag, ρ_gap) grid.
+
+Stage-1 parameter-space change again, so the same staleness rule applies: every `8j_s1_*` AND
+`8j_s2_*` under any previous token is unreachable (none deleted). Both ρ priors changed with it
+(`gp_len_prior` → N(log 20, 0.35²), `gp_time_len_prior` → N(log 2, 0.35²)); the token does not encode
+priors, but no chain was ever fitted under `-s0` or `-diag`, so nothing collides. The read-only
+mirrors (`reconstruct_mu_draws`, `load_transmission_draws`) carry the `log_rho_gap` sniff INVERTED —
+a chain LACKING it is now the stale generation."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0-diag" *
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0-m32" *
     (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`

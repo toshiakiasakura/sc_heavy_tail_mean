@@ -1181,10 +1181,10 @@ resulting names (`2-15 / 16-24 / 25-34 / 35-49 / 50+` for the default grid) and 
 grid.LAB[cfg.ref_bin]` the reference label, both threaded into the plot functions rather than
 re-derived there.
 
-`rho` holds the two GP length-scales (col 1 ρ_diag total-age, age-yrs; col 2 ρ_time weeks — `NaN`
-for pooled chains); `gamma` holds the per-contact secondary attack rate
-γ_SAR. Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
-`susc`/`inf`, `nO × grid.N` for the `*_bin` pair, `nO × 2` for `rho`, `nO × 1` for `gamma`; missing
+`rho` holds the three GP length-scales (col 1 ρ_diag total-age and col 2 ρ_gap age-gap, both
+age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the per-contact secondary
+attack rate γ_SAR. Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
+`susc`/`inf`, `nO × grid.N` for the `*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing
 artefacts leave `NaN` gaps. Reuses `load_transmission_draws` + `supergroup_split` +
 `aggregate_supergroups`.
 """
@@ -1196,7 +1196,7 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
     nG = length(sg_groups)
     mkstore(k) = Dict(l => (med = fill(NaN, nO, k), lo = fill(NaN, nO, k), hi = fill(NaN, nO, k))
                       for l in labels4)
-    susc_store, inf_store, rho_store, gamma_store = mkstore(nG), mkstore(nG), mkstore(2), mkstore(1)
+    susc_store, inf_store, rho_store, gamma_store = mkstore(nG), mkstore(nG), mkstore(3), mkstore(1)
     gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
     F_store  = mkstore(1)                               # leaky antibody-protection factor F (scalar per draw)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
@@ -1220,7 +1220,7 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
                 dstb[lbl].hi[oi, a]  = quantile(rb[:, a], 0.95)
             end
         end
-        for (g, rv) in enumerate((d.rho_diag, d.rho_time))             # ρ_diag,ρ_time → cols 1,2
+        for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.rho_time))  # ρ_diag,ρ_gap,ρ_time → cols 1,2,3
             all(isnan, rv) && continue                   # ρ_time absent (pooled) → leave NaN
             rho_store[lbl].med[oi, g] = median(rv)
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
@@ -1455,16 +1455,16 @@ end
 """
     plot_lengthscales(rho, labels4, origins; h) -> Plot
 
-One panel per config of the separable spatio-temporal-GP length-scales: ρ_diag (total-age along the
-matrix diagonal, solid) in age-years, plus ρ_time (temporal, dotted) in weeks, each with a 90%
-ribbon. The two share one axis (units age-yrs / weeks; ρ_time ∈ [0.25,104]w, the spatial ρ ∈
+One panel per config of the separable spatio-temporal-GP length-scales: ρ_diag (total-age, solid)
+and ρ_gap (age-gap, dashed) in age-years, plus ρ_time (temporal, dotted) in weeks, each with a 90%
+ribbon. All three share one axis (units age-yrs / weeks; ρ_time ∈ [0.25,104]w, the spatial ρ ∈
 [0.5,500]y); ρ_time is absent (NaN, not plotted) for pooled chains. Configs with NO Stage-1 contact
 fit at all (the NULL model) have no length-scales and are skipped entirely rather than drawn as
 blank panels.
 """
 function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
-    rho_dirs = ["ρ_diag (total age, yr)", "ρ_time (weeks)"]
-    rho_ls   = [:solid, :dot]
+    rho_dirs = ["ρ_diag (total age, yr)", "ρ_gap (age gap, yr)", "ρ_time (weeks)"]
+    rho_ls   = [:solid, :dash, :dot]
     shown = [l for l in labels4 if any(isfinite, rho[l].med)]   # drop contact-fit-free configs
     panels = Plots.Plot[]
     for lbl in shown
@@ -1481,7 +1481,7 @@ function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
     end
     nr, nc = panel_grid(length(panels))
     return plot(panels...; layout = (nr, nc), size = (575 * nc, 390 * nr),
-                plot_title = "8j — separable GP length-scales ρ_diag / ρ_time over time (h=$h)",
+                plot_title = "8j — separable GP length-scales ρ_diag / ρ_gap / ρ_time over time (h=$h)",
                 plot_titlefontsize = 11)
 end
 
