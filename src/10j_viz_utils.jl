@@ -71,10 +71,38 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     df = [(mid[p[1]] - mid[p[2]]) / sqrt(2) for p in pair_list]   # across-diagonal (age gap)
 
     pnames = string.(names(chn, :parameters))
-    # spatial Cholesky Lp for draw d (mirrors model) — shared by all regimes
-    _Lp(d) = cholesky(Symmetric(
-        [exp(-((su[m] - su[n])^2 / (2 * ρ_diag[d]^2) + (df[m] - df[n])^2 / (2 * ρ_gap[d]^2)))
-         for m in 1:P, n in 1:P]) + 1e-6 * I).L
+
+    # ---- which GP field generation is this chain? (`-s0`, 2026-08-05) ----
+    # `model_degree` constrains the structure field to sum to zero over the P pairs each week, so
+    # `z` has P−1 = 27 rows, not P = 28. Chains written before that have 28. The row count is the
+    # ONLY thing that distinguishes them, and getting it wrong is silent: `Z` below is allocated at
+    # a size derived from the GRID, so replaying a 27-row chain under the 28-row formula would leave
+    # row 28 as uninitialised memory and every μ / C* / CCDF would contain garbage without so much
+    # as a warning. Sniff it and dispatch, in the same spirit as the `c2` `-rhs` guard in
+    # `_read_disp_chain` below.
+    zrows = maximum((parse(Int, match(r"^z\[(\d+)", n).captures[1])
+                     for n in pnames if occursin(r"^z\[\d+", n)); init = 0)
+    if zrows == 0
+        @warn "chain has no `z[...]` structure-field columns — not a `model_degree` Stage-1 chain" path
+        return nothing
+    elseif zrows ∉ (P, P - 1)
+        @warn "chain's structure field has $zrows rows, expected $P (unconstrained) or $(P-1) \
+               (sum-to-zero `-s0`) for A=$A. Refusing to reconstruct rather than guess." path
+        return nothing
+    end
+    sum_zero = zrows == P - 1
+    sz_Q = _sum_zero_basis(P)                    # SAME helper the model uses — never re-derive it
+
+    # Spatial whitening for draw d (mirrors model) — shared by all regimes. Under `-s0` this is
+    # `Q·chol(Qᵀ·Kp·Q + 1e-6·I)`, giving Cov = M·Kp·M; before it, plain `chol(Kp + 1e-6·I)`. Either
+    # way the returned factor maps a `zrows`-vector to the P-vector field, so the call sites below
+    # are identical.
+    function _Lp(d)
+        Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag[d]^2) + (df[m] - df[n])^2 / (2 * ρ_gap[d]^2)))
+              for m in 1:P, n in 1:P]
+        sum_zero ? sz_Q * cholesky(Symmetric(sz_Q' * Kp * sz_Q) + 1e-6 * I).L :
+                   cholesky(Symmetric(Kp) + 1e-6 * I).L
+    end
     μ = Array{Float64,3}(undef, D, A, A)
 
     if any(n -> n == "log_rho_time", pnames)                 # separable spatio-temporal regime
@@ -85,7 +113,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
         ρ_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))  # D
-        Z  = Array{Float64,3}(undef, D, P, Tn)               # structure-field raw z[p,t]
+        Z  = Array{Float64,3}(undef, D, zrows, Tn)           # structure-field raw z[p,t]; `zrows`, NOT `P` — see the generation sniff above
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue
             Z[:, parse(Int, m.captures[1]), parse(Int, m.captures[2])] = vec(Array(chn[Symbol(n)]))
@@ -114,7 +142,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                                     for n in pnames if occursin(r"^c\[\d+\]$", n)))
         wk = week_index === nothing ? maximum(weeks_present) : week_index
         c_t = vec(Array(chn[Symbol("c[$wk]")]))              # D
-        z_t = Matrix{Float64}(undef, D, P)                   # D × P (field for week wk)
+        z_t = Matrix{Float64}(undef, D, zrows)               # D × zrows (field for week wk)
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n)
             m === nothing && continue
@@ -123,8 +151,8 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         end
     else                                                      # pooled regime: scalar c, z[p]
         c_t = vec(Array(chn[:c]))                            # D
-        z_t = Matrix{Float64}(undef, D, P)
-        for p in 1:P
+        z_t = Matrix{Float64}(undef, D, zrows)
+        for p in 1:zrows
             z_t[:, p] = vec(Array(chn[Symbol("z[$p]")]))
         end
     end

@@ -72,6 +72,34 @@ function _unordered_pairs(A::Int)
 end
 
 """
+    _sum_zero_basis(P)
+
+`P × (P−1)` orthonormal basis of the complement of the all-ones vector: `QᵀQ = I`, `Qᵀ1 = 0`,
+`QQᵀ = M = I − 11ᵀ/P`. Used by `model_degree` to constrain the age-pair structure field to be
+**mean-zero over the P pairs within each week** (2026-08-05), which is what makes the code's
+long-standing claim that σ_c carries the level and η "governs age-structure only" actually true.
+Without it the field's per-week mean duplicates `c_t` exactly, and the two are confounded — a ridge
+that tightens as ρ grows, because `Kp → J` (rank-1) in that limit (see `RHO_BOUNDS`' docstring).
+
+**Helmert contrasts, NOT `qr(ones(P))`** — and that is load-bearing, not taste. QR's column signs
+come from LAPACK. The *model* is invariant to a sign flip (it is absorbed by flipping the matching
+row of `z`), but `reconstruct_mu_draws` is NOT: it rebuilds the basis to replay a saved chain, so a
+basis that differed by a sign between the fitting run and the replay would silently produce a
+different μ with nothing raising. Helmert is closed-form and byte-identical on every machine.
+
+Verified orthonormal / annihilating-1 / `QQᵀ = M` to ≤4.4e-16 at P = 28.
+"""
+function _sum_zero_basis(P::Int)
+    Q = zeros(P, P - 1)
+    for k in 1:(P - 1)
+        s = sqrt(k * (k + 1))
+        Q[1:k, k] .= 1 / s
+        Q[k + 1, k] = -k / s
+    end
+    return Q
+end
+
+"""
     build_degree_stats(dm, apd, cfg)
 
 Precompute the fixed per-cell inputs the model needs: degree distributions, empirical
@@ -100,8 +128,14 @@ function build_degree_stats(dm::ContactDegreeModel, apd::AgePairData, cfg::Frame
         log_emp[i, j] = log(base)
     end
     pair_list, pair_index = _unordered_pairs(A)
+    # Sum-to-zero basis for the structure field, precomputed ONCE. Both `sz_Q` and its transpose are
+    # stored as plain dense `Matrix{Float64}`: an `Adjoint` wrapper inside the model body is exactly
+    # what ReverseDiff cannot write a dense cotangent into (see the `La` densification note in
+    # `model_degree`), and `Q'` would create one on every gradient evaluation.
+    sz_Q = _sum_zero_basis(length(pair_list))
     common = (; log_emp = log_emp, A = A, weeks = apd.weeks,
-                mid = cis_age_midpoints(), pair_list = pair_list, pair_index = pair_index)
+                mid = cis_age_midpoints(), pair_list = pair_list, pair_index = pair_index,
+                sz_Q = sz_Q, sz_Qt = Matrix(sz_Q'))
     if cfg.constant_contacts
         return (; dd_count = p.dd_count, pos_weight = p.pos_weight, p0 = p.p0,
                   n = p.n, common...)
@@ -206,9 +240,9 @@ end
     # (across the diagonal = age gap), each with its OWN length-scale — ρ_diag on the
     # total-age direction, ρ_gap on the age-gap direction (assortativity). Because the
     # rotation is orthonormal, (Δu)²+(Δv)² = (Δx)²+(Δy)², so ρ_diag=ρ_gap recovers the old
-    # isotropic RBF exactly. `ρ_diag`, `ρ_gap`, `η` and the 28×28 Cholesky `Lp` are SHARED
+    # isotropic RBF exactly. `ρ_diag`, `ρ_gap`, `η` and the 27×27 Cholesky `La` are SHARED
     # across weeks. In the per-week regime the weekly fields are no longer iid: they are
-    # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Lp·z·Ltᵀ) with a
+    # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Q·La·z·Ltᵀ) with a
     # shared temporal Cholesky Lt(ρ_time) and a decoupled temporal level cₜ = c + σ_c·(Lt·z_c).
     # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
     # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
@@ -231,12 +265,41 @@ end
     # 28×28 anisotropic separable RBF in diagonal coordinates
     Kp = [exp(-((su[m] - su[n])^2 / (2 * ρ_diag^2) + (df[m] - df[n])^2 / (2 * ρ_gap^2)))
           for m in 1:P, n in 1:P]
+    # ---- SUM-TO-ZERO over the P pairs, within each week (2026-08-05) ----
+    # `Q = ds.sz_Q` is the constant P×(P−1) Helmert basis of 1^⊥ (`_sum_zero_basis`), so QQᵀ = M =
+    # I − 11ᵀ/P. Whitening in that subspace instead of the full one gives
+    #     Cov(vec R) = η²·(Kt ⊗ Q·Ap·Qᵀ) = η²·(Kt ⊗ M·Kp·M),
+    # i.e. the EXACT GP conditioned on mean_p R_{p,t} = 0 — not an approximation, and not a soft
+    # penalty. Verified to 6.7e-16 against `M·Kp·M + jitter·M` at the range corners, with the field's
+    # per-week mean zero to ≤7.4e-16.
+    #
+    # WHY: nothing previously constrained the field's per-week mean over the pairs, and that mean is
+    # exactly what `c_t = c + σ_c·(Lt·z_c)_t` already parameterises — so η and σ_c were confounded,
+    # increasingly so as ρ grows (`Kp → J`, rank-1; see `RHO_BOUNDS`' docstring). The comment below
+    # has claimed since the temporal GP landed that σ_c exists "so η governs age-structure only";
+    # this is what makes that true. `z` drops from P×Tn to (P−1)×Tn ⇒ Stage 1 goes 402→390 (NegBin)
+    # and 990→978 (hurdle-Weibull). The dimension saving is incidental; identifiability is the point.
+    #
+    # η IS NO LONGER THE MARGINAL SD. `Kp` has unit diagonal, `M·Kp·M` does not — the field's SD is
+    # η·sqrt(diag(M·Kp·M)). Measured on this design: ×0.964 at the posterior (ρ_diag 7.9, ρ_gap 4.65)
+    # and ×0.825 at ρ=17.9 (the +2σ reach of `gp_len_prior`), i.e. well inside a prior that spans
+    # ×0.6–×1.65 at ±1σ, so `gp_scale_prior` is left alone. Do NOT "fix" this by renormalising `Ap`
+    # by tr(Ap)/P: as ρ→∞ that is a 0/0 dominated by the jitter and the field degenerates to WHITE
+    # NOISE of scale η — the opposite of the correct limit, which is the one below (field → 0,
+    # measured ×0.052 at ρ=500, with `c_t` carrying everything).
+    Ap = ds.sz_Qt * Kp * ds.sz_Q                        # (P−1)×(P−1) projected kernel
     # DENSE Cholesky factor (Matrix, not the LowerTriangular `.L`): the per-week structure field
-    # forms the matrix product Lp·z·Ltᵀ, and ReverseDiff cannot write a dense cotangent into a
+    # forms the matrix product Q·La·z·Ltᵀ, and ReverseDiff cannot write a dense cotangent into a
     # triangular-typed factor (`… * Ltᵀ` → "cannot set index in the lower triangular part of an
     # UpperTriangular matrix"). Densifying both factors is the RD-safe form; gradients w.r.t.
     # ρ_diag/ρ_gap still flow through `Matrix(cholesky(...).L)`. (Verified vs triangular variants.)
-    Lp = Matrix(cholesky(Symmetric(Kp) + 1e-6 * I).L)
+    #
+    # Jitter stays 1e-6. `Ap` reaches near-singularity SOONER than `Kp` does — its eigenvalues are
+    # `Kp`'s NON-CONSTANT ones, and `Kp → J` means `Ap → 0` — so this was checked rather than
+    # assumed: swept over 25×25 ρ values spanning all of `RHO_BOUNDS`, `min eigval(Ap) = −1.3e-15`
+    # (numerical zero, at ρ_diag=500) and even a 1e-8 jitter gave 0/625 `PosDefException`s. That
+    # margin matters because the Pathfinder call is not try/caught (cf. `Kt`'s 1e-4 below).
+    La = Matrix(cholesky(Symmetric(Ap) + 1e-6 * I).L)
 
     # per-cell log-rate → directional mean μ_{i→j}. Soft-clamped (not `clamp`, so ReverseDiff-safe)
     # to μ ∈ ≈[3e-4, 400]: the relative-population offset keeps the healthy log-rate O(1) (deep in
@@ -332,7 +395,7 @@ end
     if cfg.constant_contacts
         # pooled: one latent field, one moment set reused for every renewal week.
         c ~ Normal(c0, 3.0)
-        z ~ filldist(Normal(0, 1), P)                     # 28 iid (non-centred GP)
+        z ~ filldist(Normal(0, 1), P - 1)                 # 27 iid (non-centred, sum-to-zero GP)
         # Dispersion: block-linear only, no per-cell term (§4.3).
         if is_weighted(dm)
             log_kappa ~ filldist(Normal(0.0, 0.5), 2, 2)  # Weibull shape by child/adult block
@@ -342,7 +405,12 @@ end
             log_k ~ filldist(Normal(0.0, 1.0), 2, 2)      # NegBin dispersion by block
             β_disp = vec(log_k); p0v = nothing            # NegBin models its zeros directly
         end
-        μ = _mu_matrix(c .+ η .* (Lp * z))
+        # Constrained here too, though this regime is inactive: the same c↔field-mean confound
+        # exists (one flat direction rather than Tn), and leaving the two branches structurally
+        # different would be a trap for whoever revives `constant_contacts=true`. Note that
+        # `reconstruct_mu_draws`' pooled branch is deliberately NOT updated to match — it reads the
+        # `dt_intermediate_old/` generation, which is unconstrained.
+        μ = _mu_matrix(c .+ η .* (ds.sz_Q * (La * z)))
         ETp = promote_type(eltype(μ), eltype(β_disp), _p0_eltype(p0v))
         K1 = Matrix{ETp}(undef, A, A); K2 = Matrix{ETp}(undef, A, A); G = Matrix{ETp}(undef, A, A)
         # vec(2×2)→bl is column-major (off-diagonal blocks bl=2/3 labelled by that order); harmless
@@ -353,12 +421,18 @@ end
     else
         # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over
         # weeks by a temporal RBF over week indices 1:Tn, sharing one length-scale ρ_time
-        # across all age-pairs; the spatial kernel (ρ_diag, ρ_gap, η, Lp) is shared as before.
+        # across all age-pairs; the spatial kernel (ρ_diag, ρ_gap, η, La) is shared as before.
         #   • temporal kernel  Kt[s,t] = exp(-(s-t)²/(2ρ_time²)),  Lt = chol(Kt + jitter)
-        #   • structure field  R = η·(Lp·z·Ltᵀ)   (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ Kage)
-        #     each age-pair a temporally-correlated GP, each week the spatial RBF.
+        #   • structure field  R = η·(Q·La·z·Ltᵀ)  (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ M·Kage·M),
+        #     each age-pair a temporally-correlated GP, each week the spatial RBF conditioned to
+        #     sum to zero over the P pairs (see the `Ap`/`La` block above).
         #   • decoupled level  cₜ = c + σ_c·(Lt·z_c)  — scalar intercept c + a 1-D temporal GP
-        #     with its OWN amplitude σ_c (so η governs age-structure only), sharing ρ_time.
+        #     with its OWN amplitude σ_c. The sum-to-zero constraint is what makes "η governs
+        #     age-structure only" true rather than aspirational: without it the field's per-week
+        #     mean is a second copy of cₜ and the two amplitudes are confounded.
+        # STILL CONFOUNDED, DELIBERATELY LEFT: `c` and the temporal mean of σ_c·(Lt·z_c) duplicate
+        # each other the same way — one flat direction on the Tn axis, fixable with the identical
+        # `_sum_zero_basis` machinery. Held back so the Tn-axis change can be measured separately.
         # ρ_diag=ρ_gap recovers the isotropic spatial kernel; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
         log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
         ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
@@ -366,7 +440,7 @@ end
         # rank-1 at the upper clamp (near-pooled) and the Pathfinder call is not try/caught,
         # so a PosDefException would abort the whole fit (see tasks/lessons.md).
         Kt = [exp(-((s - t)^2) / (2 * ρ_time^2)) for s in 1:Tn, t in 1:Tn]
-        Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see Lp note above): Ltᵀ must not be a triangular type
+        Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see La note above): Ltᵀ must not be a triangular type
 
         c ~ Normal(c0, 3.0)                               # scalar level intercept (stored)
         log_sigma_c ~ Normal(cfg.gp_level_scale_prior[1], cfg.gp_level_scale_prior[2])
@@ -374,7 +448,11 @@ end
         z_c ~ filldist(Normal(0, 1), Tn)                  # temporal-level raw (non-centred)
         c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
 
-        z ~ filldist(Normal(0, 1), P, Tn)                 # structure field raw (shared spatial+temporal kernel)
+        # (P−1)×Tn, NOT P×Tn: the field lives in the sum-to-zero subspace. Keep the name `z` —
+        # `_stage1_init` selects the non-centred blocks by the PREFIX `startswith(string(k), "z")`
+        # and would silently return `nothing` (⇒ Pathfinder falls back to `UniformSampler(2)`, no
+        # warning) if this were renamed to something outside that prefix.
+        z ~ filldist(Normal(0, 1), P - 1, Tn)             # structure field raw (shared spatial+temporal kernel)
         # Dispersion: block-linear × week, NO per-cell term (§4.3). `log_k`/`log_kappa` is a 4×Tn
         # array (block-linear rows × week), so every ordered cell in a child/adult block shares that
         # week's value:  log_disp_{ij,t} = β[bl,t]. It is per-week iid — NOT temporally smoothed,
@@ -392,7 +470,7 @@ end
         # precompute the whole spatio-temporal field ONCE (the temporal coupling means each
         # week's column depends on ALL columns of z, so it can't be sliced per week). Fld
         # already carries η; don't re-apply it below.
-        Fld = η .* (Lp * z * Lt')                          # P×Tn
+        Fld = η .* (ds.sz_Q * (La * z * Lt'))              # P×Tn, columns sum to 0 exactly
         # Miss any of these and K1/K2/G are allocated as Float64, which silently cuts the AD tape
         # for that latent. `β_disp` reaches K1/K2/G only through `_cell_moments!`, whose own
         # `zero(eltype(K1))` then has to carry it — so it must be in this promotion too.
