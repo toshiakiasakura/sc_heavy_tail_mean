@@ -2,6 +2,59 @@
 
 Accumulated gotchas so the same mistake isn't repeated. Newest first.
 
+## A flat direction the code had already identified sat unfixed for weeks — measure the ones you know about 2026-08-06 (`joint_model.jl`)
+
+`model_degree` carried this comment from the day the temporal GP landed:
+
+> STILL CONFOUNDED, DELIBERATELY LEFT: `c` and the temporal mean of `σ_c·(Lt·z_c)` duplicate each
+> other the same way — one flat direction on the Tn axis, fixable with the identical
+> `_sum_zero_basis` machinery. Held back so the Tn-axis change can be measured separately.
+
+Deferring it was reasonable. Not *measuring* it was not. Two lines of code against four existing
+chains:
+
+| chain | corr(c, time-mean of σ_c·Lt·z_c) | SD(c) | SD(dev) | **SD(sum)** |
+|---|---|---|---|---|
+| negbin @ 2020-11-15 | **−1.000** | 0.379 | 0.379 | **0.007** |
+| negbin @ 2021-05-09 | **−1.000** | 0.379 | 0.379 | **0.007** |
+| hweibull @ 2020-11-15 | **−1.000** | 0.668 | 0.668 | **0.007** |
+| hweibull @ 2021-05-09 | **−1.000** | 0.725 | 0.725 | **0.007** |
+
+Correlation −1.000 **exactly**, in every chain. The two components cancel to 1–2% of their own
+spread: the mean weekly level is pinned by the data (SD 0.007) while its two parameterisations
+wander ±0.4–0.7 along the ridge. Meanwhile three rounds of model surgery (`-s0`, `-diag`, `-m32`)
+went into *other* parts of the geometry.
+
+**The lesson: a known-but-unfixed flat direction is a measurement waiting to be made, not a note to
+carry.** It cost minutes to quantify from chains already on disk, and the answer was the strongest
+signal in the whole diagnostic sweep.
+
+**Corollary — apply the constraint only where something is genuinely duplicated.** The obvious
+over-reach here is to project the STRUCTURE FIELD's time axis too, by symmetry with `-s0`. That is
+wrong: `R`'s per-pair mean over weeks duplicates nothing (no other parameter carries persistent
+age-pair structure), so constraining it would force every age pair's structure to average to zero
+across the window — a model restriction masquerading as a reparameterisation. Sum-to-zero is only a
+free reparameterisation when a second parameter already carries the removed direction. Here `c` does
+for the level; nothing does for the field.
+
+**Also measured in the same sweep, and worth not re-deriving:**
+- **ρ_time is NOT in a ridge**: |corr(log_rho_time, log‖z‖)| ≤ 0.06, |corr(log_rho_time, c)| ≤ 0.13
+  across all four chains. When it sits at +7σ of its prior for hurdle-Weibull, that is the likelihood
+  talking, not geometry.
+- **The η↔z non-centred funnel is a NEGBIN problem, not a hurdle-Weibull one** (corr −0.55 vs −0.26
+  to −0.30) — the opposite of the intuition that the bigger, sicker model must have the worse funnel.
+- **hurdle-Weibull instead has an η↔ρ_diag ridge** (+0.47), the classic GP amplitude/length-scale
+  trade-off, which none of the sum-to-zero work touches.
+- **Response SCALE does not motivate different priors.** Under a log link every GP prior in this model
+  is scale-invariant: `c0` is a data-driven anchor that shifts with the units, η/σ_c are log-scale
+  deviation amplitudes, and the ρ live on the age and week axes. Multiplying the response by any
+  constant changes none of them. What is NOT invariant is the μ soft-clamp `[-8, 6]`, an absolute
+  bound in response units — but measured margins are 4.6–6.7 nats (lower) and 4.7–5.5 (upper) for
+  BOTH models, so it is nowhere near binding. And the two responses turn out to be on a *comparable*
+  scale anyway (empirical cell means 0.74 weighted vs 0.76 unweighted): the raw per-person
+  duration-weighted degree is far smaller than the count, but that does not propagate to what
+  `model_degree` parameterises, because the hurdle hives the zeros off into p⁰.
+
 ## The kernel FAMILY, not the kernel structure, was the mixing problem — `-m32` 2026-08-05 (`joint_model.jl`, `framework.jl`)
 
 Stage-1 NUTS had failed to converge in every cell of a four-cell pilot (2 degree models × 2 origins ×

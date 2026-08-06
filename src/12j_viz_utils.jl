@@ -86,12 +86,13 @@ _pcol(chn, p) = collect(skipmissing(vec(Array(chn[:, Symbol(p), :]))))
 
 Parameter block a chain column belongs to: `"z[3,7]" → "z"`. `model_degree` samples 6 scalars
 (`c`, `log_eta`, `log_rho_diag`, `log_rho_gap`, `log_rho_time`, `log_sigma_c`) plus the blocks
-`z_c` (Tn), `z` ((P−1)×Tn) and the dispersion (`log_k` for NegBin, `log_kappa`+`p0f` for
-hurdle-Weibull) — 390 and 978 coordinates respectively. Three changes on 2026-08-05 moved this
-around: `-s0` dropped `z` from 28 to 27 rows (402/990 → 390/978), `-diag` briefly removed the
-`log_rho_gap` scalar (→ 389/977), and `-m32` restored it (→ 390/978) while swapping both GP kernels
-to Matérn 3/2. So the CURRENT count matches `-s0`'s, and a chain is told apart from that generation
-by its cache token, not by its shape. Archived pilot chains: `dt_intermediate_nuts_pilot_pre_s0/`
+`z_c` (Tn−1), `z` ((P−1)×Tn) and the dispersion (`log_k` for NegBin, `log_kappa`+`p0f` for
+hurdle-Weibull) — 389 and 977 coordinates respectively. Four changes moved this around: `-s0`
+dropped `z` from 28 to 27 rows (402/990 → 390/978), `-diag` briefly removed the `log_rho_gap` scalar
+(→ 389/977), `-m32` restored it (→ 390/978) while swapping both GP kernels to Matérn 3/2, and `-t0`
+(2026-08-06) took `z_c` from Tn to Tn−1 (→ 389/977). ⚠ The current count therefore COINCIDES with
+`-diag`'s; the models are unrelated. In-chain signals: `log_rho_gap` present (absent under `-diag`)
+and `z_c` = Tn−1 (Tn before `-t0`). Archived pilot chains: `dt_intermediate_nuts_pilot_pre_s0/`
 has 28 `z` rows, `dt_intermediate_nuts_pilot_diag/` has 27 rows and NO `log_rho_gap`. Per-parameter
 tables are unreadable at this size, so almost everything here is reported BY GROUP.
 """
@@ -283,7 +284,7 @@ end
     plot_ess_rhat_dist(tbl; ess_min=100, rhat_max=1.01, title="") -> Plots.Plot
 
 Three panels over ALL parameters: bulk-ESS histogram, tail-ESS histogram, split-R̂ histogram, each
-with its threshold marked. This is how a 390/978-coordinate chain gets read at a glance — the
+with its threshold marked. This is how a 389/977-coordinate chain gets read at a glance — the
 per-parameter table is for the offenders the histograms reveal.
 """
 function plot_ess_rhat_dist(tbl::DataFrame; ess_min::Real = 100, rhat_max::Real = 1.01,

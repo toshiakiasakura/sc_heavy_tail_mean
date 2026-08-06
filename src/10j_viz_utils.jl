@@ -33,7 +33,8 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
       σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=m32(|s-t|/ρ_time);  Lt=chol(Kt+1e-4 I).L
-      rvec = ( c + σ_c·(Lt[wk,:]·z_c) )  .+  η·( Lp · (z · Lt[wk,:]) )
+      Qt = _sum_zero_basis(Tn);  Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L            # `-t0`, level only
+      rvec = ( c + σ_c·(Qt·Lc·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )
 
 - **Legacy per-week iid** (`c[t]`, `z[p,t]`): `rvec = c[wk] .+ η .* (Lp * z[:,wk])`.
 - **Pooled** (scalar `c`, `z[p]`): `rvec = c .+ η .* (Lp * z)`.
@@ -152,16 +153,32 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue
             Z[:, parse(Int, m.captures[1]), parse(Int, m.captures[2])] = vec(Array(chn[Symbol(n)]))
         end
-        Zc = Matrix{Float64}(undef, D, Tn)                   # temporal-level raw z_c[t]
+        # ---- `-t0` (2026-08-06): the LEVEL's temporal deviation is sum-to-zero over the weeks ----
+        # `z_c` therefore has Tn−1 columns, not Tn, and the level is rebuilt through the temporal
+        # Helmert basis. A chain with Tn columns is the pre-`-t0` generation; refuse rather than
+        # guess, exactly as the `zrows` sniff does spatially. (The STRUCTURE FIELD is unaffected —
+        # it keeps the full `Lt` — so `Z` above is still Tn-wide.)
+        zc_cols = maximum((parse(Int, match(r"^z_c\[(\d+)\]$", n).captures[1])
+                           for n in pnames if occursin(r"^z_c\[", n)); init = 0)
+        if zc_cols != Tn - 1
+            @warn "chain's temporal level has $zc_cols z_c columns, expected $(Tn-1) (sum-to-zero \
+                   `-t0`). $(zc_cols == Tn ? "This is the pre-`-t0` generation. " : "")Refusing to \
+                   reconstruct rather than guess." path
+            return nothing
+        end
+        Zc = Matrix{Float64}(undef, D, zc_cols)              # temporal-level raw z_c[t], Tn−1 wide
         for n in pnames
             m = match(r"^z_c\[(\d+)\]$", n); m === nothing && continue
             Zc[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
         end
+        tz_Q = _sum_zero_basis(Tn)                           # SAME helper the model uses — never re-derive
         for d in 1:D
             Kt = [_m32(abs(s - t) / ρ_time[d]) for s in 1:Tn, t in 1:Tn]   # Matérn 3/2, mirrors model
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
-            c_wk = cc[d] + σ_c[d] * dot(ltrow, @view Zc[d, :])
+            # level: cₜ = c + σ_c·(tz_Q·Lc·z_c)_wk, with Lc = chol(Qᵀ·Kt·Q + 1e-4·I) (mirrors model)
+            Lc = cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L
+            c_wk = cc[d] + σ_c[d] * dot(view(tz_Q, wk, :), Lc * (@view Zc[d, :]))
             rvec = c_wk .+ η[d] .* (_Lp(d) * (@view(Z[d, :, :]) * ltrow))    # cₜ + η·(Lp·(z·Lt[wk,:]))
             for i in 1:A, j in 1:A
                 μ[d, i, j] = exp(_softclamp(rvec[pair_index[i, j]] + logpop[j], -8.0, 6.0))

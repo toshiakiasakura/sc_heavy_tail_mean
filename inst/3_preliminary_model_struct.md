@@ -647,8 +647,9 @@ increasingly so as the length-scales grow. It is what makes the
 "decoupled amplitude" claim below true rather than aspirational. $Z$ loses a row, so Stage 1 is
 **390** (NegBin) / **978** (hurdle-Weibull) unconstrained dimensions rather than 402/990; the
 dimension saving is incidental, identifiability is the point. (`-diag` briefly removed the
-$\log\rho_{\text{gap}}$ scalar as well, giving 389/977, and `-m32` restored it — so the current count
-is again 390/978. The confounding becomes total as $\rho\to\infty$, since $K^{\text{age}}\to J$,
+$\log\rho_{\text{gap}}$ scalar as well, giving 389/977, and `-m32` restored it, giving 390/978 again;
+`-t0` then took $z_c$ from $T$ to $T-1$, so the CURRENT count is **389/977** — numerically equal to
+`-diag`'s but a different model. The confounding becomes total as $\rho\to\infty$, since $K^{\text{age}}\to J$,
 rank-1, and the field would collapse to an exact copy of $c_t$; under Matérn 3/2 that limit is far
 outside `RHO_BOUNDS`, but the constraint is still what makes $\eta$ and $\sigma_c$ separately
 meaningful.)
@@ -665,7 +666,17 @@ unchanged — but this is now a measured tolerance, not a negligible correction.
 Do **not** renormalise $A$ by $\operatorname{tr}(A)/P$ to restore the unit diagonal: as
 $\rho\to\infty$ that ratio is dominated by the jitter and the field degenerates to *white noise* of
 scale $\eta$. The **overall weekly level** is likewise temporally smoothed, but with its own
-amplitude $\sigma_c$ **decoupled** from $\eta$: a scalar intercept $c$ plus a 1-D temporal GP sharing
+amplitude $\sigma_c$ **decoupled** from $\eta$, and — since `-t0` (2026-08-06) — **conditioned to
+sum to zero over the $T$ window weeks**, by the temporal analogue of the constraint above:
+$c_t = c + \sigma_c\,(Q_t L_c z_c)_t$ with $Q_t = $ `_sum_zero_basis(T)` and
+$L_c = \mathrm{chol}(Q_t^\top K^{\text{time}} Q_t + 10^{-4} I)$, giving
+$\mathrm{Cov}(\sigma_c\,\text{dev}) = \sigma_c^2 (M_t K^{\text{time}} M_t)$. Without it, $c$ and the
+time-mean of $\sigma_c (L_{\text{time}} z_c)$ are two parameterisations of one quantity: measured on
+all four `-m32` chains at correlation $-1.000$ exactly, with $\mathrm{SD}(c)\approx
+\mathrm{SD}(\text{dev})\approx 0.38$–$0.73$ but $\mathrm{SD}$ of their sum $=0.007$. $z_c$ drops
+$T \to T-1$. **The constraint is applied to the LEVEL only** — the structure field's per-pair mean
+over weeks duplicates nothing, so constraining it would be a model restriction rather than a
+reparameterisation. Concretely, a scalar intercept $c$ plus a 1-D temporal GP built on
 $L_{\text{time}}$,
 
 $$
@@ -955,7 +966,7 @@ For one $(dm, nb, \text{origin}, h)$:
    `stage1_use_nuts = false` for the Pathfinder-only preliminary. NUTS is configured explicitly —
    `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.9`, `_max_depth = 10` —
    because the convenience constructor `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, i.e.
-   only $125$ warmup iterations to adapt a step size and diagonal metric in $390$/$978$ dimensions.
+   only $125$ warmup iterations to adapt a step size and diagonal metric in $389$/$977$ dimensions.
    **One chain per fit**, so there is no $\hat R$; health is reported by `_nuts_diagnostics`
    (divergence count, fraction of transitions saturating `max_depth`, minimum ESS).
    `stage1_moment_draws` then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments

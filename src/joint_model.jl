@@ -474,13 +474,11 @@ end
         #   • structure field  R = η·(Q·La·z·Ltᵀ)  (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ M·Kage·M),
         #     each age-pair a temporally-correlated GP, each week the spatial RBF conditioned to
         #     sum to zero over the P pairs (see the `Ap`/`La` block above).
-        #   • decoupled level  cₜ = c + σ_c·(Lt·z_c)  — scalar intercept c + a 1-D temporal GP
-        #     with its OWN amplitude σ_c. The sum-to-zero constraint is what makes "η governs
-        #     age-structure only" true rather than aspirational: without it the field's per-week
-        #     mean is a second copy of cₜ and the two amplitudes are confounded.
-        # STILL CONFOUNDED, DELIBERATELY LEFT: `c` and the temporal mean of σ_c·(Lt·z_c) duplicate
-        # each other the same way — one flat direction on the Tn axis, fixable with the identical
-        # `_sum_zero_basis` machinery. Held back so the Tn-axis change can be measured separately.
+        #   • decoupled level  cₜ = c + σ_c·(Qt·Lc·z_c)  — scalar intercept c + a 1-D temporal GP
+        #     CONDITIONED TO SUM TO ZERO over the Tn weeks (`-t0`, see below). The spatial
+        #     sum-to-zero constraint is what makes "η governs age-structure only" true rather than
+        #     aspirational: without it the field's per-week mean is a second copy of cₜ and the two
+        #     amplitudes are confounded.
         # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
         log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
         ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
@@ -496,11 +494,36 @@ end
         Kt = [_m32(abs(s - t) / ρ_time) for s in 1:Tn, t in 1:Tn]
         Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see La note above): Ltᵀ must not be a triangular type
 
+        # ---- SUM-TO-ZERO over the Tn weeks, for the LEVEL (`-t0`, 2026-08-06) ----
+        # `tz_Q = _sum_zero_basis(Tn)` is the constant Tn×(Tn−1) Helmert basis of 1^⊥, so Qt·Qtᵀ =
+        # Mt = I − 11ᵀ/Tn. Whitening the temporal deviation in that subspace gives
+        #     Cov(σ_c·dev) = σ_c²·(Qt·Lc·Lcᵀ·Qtᵀ) = σ_c²·(Mt·Kt·Mt),
+        # i.e. the SAME temporal GP conditioned on Σ_t dev_t = 0 — exact, not an approximation, and
+        # not a soft penalty. Identical construction to the spatial `-s0` above, one axis over.
+        #
+        # WHY: `c` and the time-MEAN of σ_c·(Lt·z_c) were two parameterisations of the same quantity,
+        # and the flat direction that creates was measured on all four `-m32` chains at
+        # corr(c, time-mean deviation) = −1.000 EXACTLY, with SD(c) ≈ SD(deviation) ≈ 0.38–0.73 but
+        # SD(their sum) = 0.007 — the components cancel to 1–2% of their own spread while the mean
+        # level itself is pinned by the data. `z_c` drops Tn → Tn−1 ⇒ Stage 1 goes 390→389 (NegBin)
+        # and 978→977 (hurdle-Weibull). The dimension saving is incidental; identifiability is the
+        # point. ⚠ Those counts coincide with the short-lived `-diag` generation's; the models are
+        # unrelated — tell them apart by `log_rho_gap` (present here) and by the token.
+        #
+        # LEVEL ONLY — do NOT also project the structure field's time axis. `R`'s per-pair mean over
+        # weeks duplicates nothing (no other parameter carries persistent age-pair structure), so
+        # constraining it would force every pair's structure to average to zero across the window:
+        # a model restriction, not a reparameterisation. The field keeps the full `Lt`.
         c ~ Normal(c0, 3.0)                               # scalar level intercept (stored)
         log_sigma_c ~ Normal(cfg.gp_level_scale_prior[1], cfg.gp_level_scale_prior[2])
         σ_c = exp(_softclamp(log_sigma_c, -3.0, 2.0))     # temporal-level amplitude, soft-bounded (mirrors η)
-        z_c ~ filldist(Normal(0, 1), Tn)                  # temporal-level raw (non-centred)
-        c_vec = c .+ σ_c .* (Lt * z_c)                     # per-week level cₜ (temporally smooth)
+        tz_Q = _sum_zero_basis(Tn)                        # Tn×(Tn−1), constant — same helper as the spatial basis
+        # NB `tz_Q` is the TEMPORAL basis; `ds.sz_Q`/`ds.sz_Qt` are the SPATIAL one and its transpose.
+        # Jitter 1e-4 matches `Lt`'s, not the spatial 1e-6: `Qtᵀ·Kt·Qt` inherits Kt's non-constant
+        # eigenvalues, which are the small ones, and the Pathfinder call is not try/caught.
+        Lc = Matrix(cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L)
+        z_c ~ filldist(Normal(0, 1), Tn - 1)              # temporal-level raw (non-centred, sum-to-zero)
+        c_vec = c .+ σ_c .* (tz_Q * (Lc * z_c))            # per-week level cₜ, deviation sums to 0 over t
 
         # (P−1)×Tn, NOT P×Tn: the field lives in the sum-to-zero subspace. Keep the name `z` —
         # `_stage1_init` selects the non-centred blocks by the PREFIX `startswith(string(k), "z")`
@@ -703,7 +726,7 @@ Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vect
 
 Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
 variable whose name starts with `z` (`z`, `z_c`) — which are drawn from `N(0, z_scale²)` instead of
-`N(0,1)`. These dominate the parameter space (336 of 390/978 unconstrained coordinates) and are only
+`N(0,1)`. These dominate the parameter space (335 of 389/977 unconstrained coordinates) and are only
 weakly identified, so where the path starts largely decides where it ends.
 
 The name filter is a **prefix**, not a fixed list, so it automatically covers any future `z*` block;
@@ -898,7 +921,7 @@ Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` defau
 the NUTS cost is ADDITIVE on top of the Pathfinder cost, not a replacement for it. The sampler is
 built from explicit `cfg.stage1_nuts_*` settings rather than a bare `NUTS()`: the convenience
 constructor derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the old `n_sample = 250` gave
-**125** warmup iterations to adapt a step size and metric in 390/978 dimensions (Stan's default is
+**125** warmup iterations to adapt a step size and metric in 389/977 dimensions (Stan's default is
 1000). ONE chain per fit — see `_nuts_diagnostics` for why, and for what that costs in diagnostics.
 
 A NUTS failure **propagates**. It used to be caught and replaced by `pf.draws_transformed`, which
