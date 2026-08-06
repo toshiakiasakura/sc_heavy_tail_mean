@@ -1578,3 +1578,50 @@ mixing; the two criteria in `convergence_verdict` can and do disagree.
 **Still open, unchanged by `-t0`:** hweibull's ρ_time is **27.1 / 21.0 weeks** (negbin: 2.30 / 2.19),
 so the hurdle model's posterior still says "constant contacts" over a 12-week window. `-t0` was never
 going to touch that — it is the p⁰-versus-μ decomposition question, not a geometry question.
+
+---
+
+## 2026-08-06 — InverseGamma length-scale priors (`-ig`): tail-match, don't just swap the family
+
+User request: move all three GP length-scale priors from `Normal` on `log ρ` to **InverseGamma on ρ**.
+Two things about that are worth keeping.
+
+**1. Swapping a prior family silently changes the SPREAD unless you pin it.** The obvious
+implementation — pick α, β from some rule of thumb — would have confounded "InverseGamma vs
+log-normal" with "wider vs narrower", and this model has already been broken once by exactly that
+(SD 0.5 → 0.75 took min ESS 118 → 1.8 and pinned 100 % of iterations at the depth cap). So the
+calibration was **tail-matched**: solve α, β so the 5 %/95 % points reproduce the log-normal's
+`[11.246, 35.569]` (spatial) and `[1.1246, 3.5569]` (temporal) EXACTLY. Then the family is the only
+thing that moved and any behaviour change is attributable to it.
+
+Useful identity: for `X ~ InverseGamma(α, β)`, `β/X ~ Gamma(α, 1)`, so `x_q = β / quantile(Gamma(α,1), 1−q)`.
+The 95/5 RATIO therefore depends on **α alone** — solve it by bisection, then β is a pure scale.
+Here both old priors had σ = 0.35 ⇒ the same ratio 3.1629 ⇒ **the same α = 8.5814** for both, with
+β = 156.2941 and 15.6294 (exactly β_s/10). Achieved to 2.2e-04.
+
+**2. InverseGamma's right tail is HEAVIER than log-normal's, which is the opposite of the intuition
+that it is "the safe GP length-scale prior".** It is boundary-avoiding at ρ→0 (density ~exp(−β/ρ)),
+but its right tail is polynomial (∝ρ^−α−1) where log-normal's is not. Measured, ρ_time:
+
+| P(ρ_time >) | log-Normal | InverseGamma | ratio |
+|---|---|---|---|
+| 4 wk | 2.38e-02 | 2.76e-02 | 1.2× |
+| 11 wk (window extent) | 5.56e-07 | 4.04e-05 | 73× |
+| 26 wk (the observed drift) | 1.17e-13 | 5.20e-08 | **446 000×** |
+
+That matters here specifically because ρ_time drifting to 20–27 weeks over a 12-week window is this
+model's recurring failure. Tail-matching kept the ABSOLUTE mass past the window at ~1 in 25 000, which
+is why it was judged acceptable — but the standing check is now: **if a refit puts ρ_time past ~4 wk,
+the prior family is the cause and α must rise.** Conversely the lower tail is much thinner
+(P(ρ_diag < 5) 3.7e-05 → 4.5e-07), which is the property being bought. **Always tabulate BOTH tails
+against the prior you are replacing; "boundary-avoiding" describes one end only.**
+
+**3. The rename is the whole lockstep cost, and the latent COUNT no longer dates a chain.** Sampling
+`rho_diag ~ InverseGamma(...)` instead of `log_rho_diag ~ Normal(...)` makes Turing store the
+CONSTRAINED ρ, so the chain columns lose their `log_` prefix — 13 files reference them. Every
+read-only mirror must now do `exp(_softclamp(log(rho), …))`, taking `log` FIRST, or it silently
+replays a different kernel. And because the count stays 389/977, the only in-chain discriminator is
+the NAME: `rho_gap` ⇒ `-ig`, `log_rho_gap` ⇒ `-m32`/`-t0`, absent ⇒ `-diag`. The generation guards in
+`10j_viz_utils.jl` / `8j_viz_utils.jl` were updated in the same commit — note they have now been
+inverted twice, so **check the direction before editing them**. `tmp/verify_sumzero.jl` is the only
+runtime cross-check on the 10j mirror; it passed at 2.685e-15 after the rewrite.

@@ -106,10 +106,21 @@ every reconstructed length-scale and contact matrix is silently wrong and NOTHIN
 why these were hoisted out of five separate literals on 2026-08-05.
 
 Both `RHO_BOUNDS` and `RHO_TIME_BOUNDS` are **INERT under the current priors** and are kept only as
-overflow guards. `gp_len_prior` N(log 20, 0.35²) puts the `RHO_BOUNDS` floor 10.5σ below and the
-ceiling 9.2σ above; `gp_time_len_prior` N(log 2, 0.35²) puts the `RHO_TIME_BOUNDS` floor 5.9σ below
-and the ceiling 11.3σ above. Neither clamp can bind, which is the intended division of labour: the
-PRIOR restrains the length-scale, the clamp only stops a stray optimiser step from overflowing.
+overflow guards. Under `-ig` (2026-08-06) the priors are InverseGamma on ρ itself, so σ-distances no
+longer apply; the inertness is stated as MEASURED prior mass outside each clamp window:
+
+| clamp | window | P(below) | P(above) |
+|---|---|---|---|
+| `RHO_BOUNDS` (`gp_len_prior`, InvGamma(8.5814, 156.2941)) | ρ ∈ [0.5, 500] | 8.9e-122 | 2.5e-10 |
+| `RHO_TIME_BOUNDS` (`gp_time_len_prior`, InvGamma(8.5814, 15.6294)) | ρ ∈ [0.25, 104] | 2.0e-18 | 5.3e-13 |
+
+Neither clamp can bind, which is the intended division of labour: the PRIOR restrains the
+length-scale, the clamp only stops a stray optimiser step from overflowing. Note the LOWER figures
+are far smaller than under the log-normals they replace (spatial 2.8e-26 → 8.9e-122) — that is
+InverseGamma's boundary-avoiding tail, the reason it was chosen. The UPPER figures moved the other
+way (log-normal underflowed to exactly 0; InvGamma gives 2.5e-10) because its right tail is
+polynomial. Both are negligible against the clamp, but see `gp_time_len_prior` for where that
+heavier right tail is NOT negligible.
 
 ⚠ That was NOT true of the previous generation, and the failure was measured. With
 `gp_time_len_prior` at N(log 4, 0.5²) the four-cell NUTS pilot of 2026-08-05 put ρ_time at 24.1,
@@ -224,9 +235,9 @@ Base.@kwdef struct FrameworkConfig
     stage1_pathfinder_runs::Int = 1   # Stage-1 Pathfinder paths. >1 ⇒ `multipathfinder` (independent LBFGS runs pooled by Pareto-smoothed importance resampling); 1 ⇒ single-path. RESET TO 1 on 2026-07-30 (user request, and the measurement agrees). It was briefly 4, to insure against the single-path divergence seen BEFORE the κ clamp was corrected to [-4.3,5]. Once the clamp was fixed the premise vanished: measured head-to-head on hurdle-Weibull, 5 seeds, corrected clamp — nruns=1 gave 0/5 diverged in 17–186 s; nruns=4 gave 0/3 diverged in 560–653 s, i.e. ~4–10× the cost for no divergence benefit, AND with Pareto k = 9.7/13.0/14.5 (≫0.7), so the importance resampling across paths was not valid anyway. High k is expected here: Pathfinder fits a NORMAL approximation in ~1000–1600 dimensions, where importance weights are near-degenerate by construction — multipathfinder is a poor fit for a model this size. Stability now comes from `stage1_z_init_scale` instead. NOTE the cache token does NOT encode THIS field (it encodes only `stage1_use_nuts`, since 2026-08-05), so changing it alone will silently reuse existing chains — delete them if you change it outside a token bump.
     stage1_z_init_scale::Float64 = 1.0 # SD of the N(0,σ²) initial values given to the STANDARD-NORMAL non-centred random terms (`z`, `z_c`) at the start of the Stage-1 LBFGS path; ≤0 disables the explicit init and restores Pathfinder's own default (`UniformSampler(2)`, i.e. U(-2,2) per coordinate in unconstrained space). These blocks dominate Stage 1 (`z` 324 + `z_c` 11 = 335 of 389/977 unconstrained coordinates) and are only weakly identified, so where the path STARTS largely decides where it ends. SET TO 1.0 on 2026-08-02: this is the z's OWN PRIOR, so the init is a draw from the prior like every other latent rather than a deliberately shrunken one. HISTORY: it was 0.1 while the dispersion carried a per-cell random effect (`z_kappa`/`z_k`, 588 further coordinates) — a diffuse start over that many weakly-identified coordinates lengthened the path and let early LBFGS steps swing the RE scale before the likelihood constrained it. That RE was removed on 2026-08-02 (dispersion is now block-linear × week only), so the argument for shrinking the init no longer applies and only the GP's own `z`/`z_c` remain. NOTE the cache token does NOT encode this, so changing it silently reuses existing chains: DELETE the affected `8j_s1_*` files before refitting.
     # --- separable spatio-temporal GP smoothing of the age-pair mean (inst/1e, §5) ---
-    gp_len_prior::Tuple{Float64,Float64}   = (log(20.0), 0.35)   # log-ρ Normal(μ,σ), age-years — SHARED by BOTH spatial length-scales, `log_rho_diag` (total age) and `log_rho_gap` (age gap). SET 2026-08-05 (user request) alongside the `-m32` kernel swap and the restoration of the off-diagonal smoothing term. ⚠ UNITS: ρ lives on the rotated (su, df) scale, which is √2× an age difference, so ρ=20 is an effective age-difference length-scale of 20/√2 = 14.1 yr. WHAT IT ASSERTS: at the mode the kernel gives correlation 0.788 to the closest diagonal step (2-10→11-15, Δu=9.90) and 0.028 across the widest age gap — a MUCH smoother contact surface than the (log 4, 0.5) it replaces, which gave 0.047 at that same step, i.e. barely smoothed at all at its own mode. CONDITIONING (measured, kernel_static): under Matérn 3/2 the projected kernel `Ap` has rank 27 and min eigenvalue 2.5e-2 at the mode, 2.1e-3 at +2σ — 3-4 orders above the 1e-6 jitter, with effective rank 16.8/8.3/4.4 at −2σ/mode/+2σ. Under the OLD squared exponential the same ρ=20 gave min eigenvalue 2.9e-5 and, at +2σ, 1.5e-8, i.e. BELOW the jitter: the kernel swap is what makes this centre numerically safe, and the two changes should not be separated. ⚠ IN TENSION WITH THE EARLIER POSTERIOR, DELIBERATELY: the 2026-08-05 Pathfinder survey put ρ_diag≈7.9 and ρ_gap≈4.65, which are −2.7σ and −4.2σ here, so this prior is informative rather than weak. WATCH AT THE REFIT: if the posterior piles up against the LOWER edge, the data are disagreeing with the assumed smoothness and the centre should come down. HISTORY worth keeping: the SD was briefly 0.75 (with centre log 4) and that MEASURABLY BROKE Stage-1 NUTS — at 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597. The worst blocks were log_rho_time and the z_c/z field it couples to through Lt: a looser length-scale prior let ρ_time drift into the near-pooled region where Kt goes low-rank, collapsing the map z↦Fld. That mechanism is exactly what `-m32` and the new `gp_time_len_prior` target; do not loosen either SD to buy ρ headroom.
+    gp_len_prior::Tuple{Float64,Float64}   = (8.5814, 156.2941)   # ⚠ SEMANTICS CHANGED 2026-08-06 (`-ig`, user request): this is now **(α, β) of an InverseGamma on ρ ITSELF**, NOT (μ, σ) of a Normal on log ρ. The Tuple type is unchanged, so nothing breaks at compile time — read the token before interpreting these two numbers. SHARED by BOTH spatial length-scales, `rho_diag` (total age) and `rho_gap` (age gap); note the sampled names lost their `log_` prefix. CALIBRATION: tail-matched to the log-Normal it replaces, i.e. α, β solved so the 5%/95% points reproduce N(log 20, 0.35²)'s [11.246, 35.569] EXACTLY (achieved 5%=11.2457, 50%=18.9437, 95%=35.5693, mode 16.31, mean 20.62). α is shared with `gp_time_len_prior` because both old priors had σ=0.35 ⇒ the same 95/5 ratio 3.1629; only β scales (β_t = β_s/10). The point of tail-matching is that the FAMILY changes while location and spread do not, so any behaviour change is attributable to the shape alone. WHAT THE SHAPE BUYS: InverseGamma is boundary-avoiding at ρ→0 — P(ρ_diag<5) falls 3.73e-05 → 4.50e-07 (83× less mass at the white-noise end). WHAT IT COSTS: the right tail is polynomial (∝ρ^{-α-1}) and so HEAVIER than log-normal — P(ρ_diag>126, the u-extent) 7.3e-08 → 1.5e-05. ⚠ UNITS unchanged: ρ lives on the rotated (su, df) scale, √2× an age difference, so ρ=20 ⇒ effective age-difference length-scale 20/√2 = 14.1 yr. HISTORY worth keeping: under the log-Normal the SD was briefly 0.75 (centre log 4) and that MEASURABLY BROKE Stage-1 NUTS — min ESS 118→1.8 of 500, step size 1.51e-2→1.17e-3, tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597, via ρ_time drifting into the near-pooled region where Kt goes low-rank. That is why this prior is tail-matched rather than widened; do not loosen it to buy ρ headroom.
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
-    gp_time_len_prior::Tuple{Float64,Float64}   = (log(2.0), 0.35)   # log-ρ_time Normal(μ,σ), weeks; temporal length-scale (shared across age-pairs), per-week regime only. SET 2026-08-05 (user request) — RECENTRED log(4)→log(2) and tightened 0.5→0.35 on direct measurement. THIS IS THE FIX FOR THE 2026-08-05 NON-CONVERGENCE. At (log 4, 0.5) the four-cell NUTS pilot put ρ_time at 24.1, 34.8, 48.0 and 62.7 weeks — +3.6σ to +5.5σ into the prior tail — over a 12-week window, where `Kt` is numerically all-ones and the likelihood is flat. Every cell came back NOT CONVERGED with 100% of iterations at max tree depth. MECHANISM: as ρ_time grows `Kt` degenerates, `Lt`'s leading column absorbs the field, and `z[:,1]` is pinned ~60× tighter than the rest — a scale disparity NUTS cannot step through. Measured `Lt` column-scale spread: 2.4 at ρ_time=2 (this mode), 6.2 at +2σ, 94 at 26 wk, 178 at 62.7 wk. At σ=0.35 this prior puts 26 wk at +7.3σ and the RHO_TIME_BOUNDS ceiling at +11.3σ, so the clamp is inert and the prior is the sole restraint — which is what the previous docstring CLAIMED at (log 4, 0.5) and was wrong about. Treat that as the standing caution: verify it against a chain rather than asserting it. The ±2σ reach is ρ_time ∈ [0.99, 4.03] wk, i.e. weekly contact structure that is correlated over roughly a fortnight and no more — a real modelling commitment, not just a numerical one, and the thing to revisit if the refit shows the likelihood fighting it.
+    gp_time_len_prior::Tuple{Float64,Float64}   = (8.5814, 15.6294)   # ⚠ (α, β) of an InverseGamma on ρ_time ITSELF — see `gp_len_prior` for the semantics change (`-ig`, 2026-08-06). Tail-matched to N(log 2, 0.35²): achieved 5%=1.1246, 50%=1.8944, 95%=3.5569 (targets 1.1246/3.5569, exact). β = β_spatial/10; α shared. ⚠ THIS IS THE RISK POINT OF `-ig`. ρ_time drifting to 20–27 weeks over a 12-week window is this model's recurring failure, and InverseGamma's polynomial right tail is heavier than the log-normal's: measured P(ρ_time>4 wk) 2.38e-02 → 2.76e-02 (1.2×), P(>11 wk, the window extent) 5.56e-07 → 4.04e-05 (73×), P(>26 wk) 1.17e-13 → 5.20e-08 (446 000×). In ABSOLUTE terms ~1 in 25 000 past the window, which is why tail-matching was judged tight enough — but it is 5 orders looser than before out at 26 wk. WATCH AT EVERY REFIT: if the ρ_time posterior climbs past ~4 wk, the prior family is the cause and α must rise. The previous docstring's claim that the clamp is inert and the prior is the sole restraint still holds (RHO_TIME_BOUNDS sits far into the tail), but verify it against a chain rather than asserting it — that claim was measured FALSE once already at (log 4, 0.5).
     gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled temporal level GP c_t = c + σ_c·(Lt·z_c)
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
@@ -377,8 +388,8 @@ Stage-1 parameter-space change again, so the same staleness rule applies: every 
 `8j_s2_*` under any previous token is unreachable (none deleted). Both ρ priors changed with it
 (`gp_len_prior` → N(log 20, 0.35²), `gp_time_len_prior` → N(log 2, 0.35²)); the token does not encode
 priors, but no chain was ever fitted under `-s0` or `-diag`, so nothing collides. The read-only
-mirrors (`reconstruct_mu_draws`, `load_transmission_draws`) carry the `log_rho_gap` sniff INVERTED —
-a chain LACKING it is now the stale generation.
+mirrors (`reconstruct_mu_draws`, `load_transmission_draws`) carry the age-gap-scale sniff INVERTED —
+a chain LACKING it is now the stale generation. (Since `-ig` that sniff looks for `rho_gap`.)
 
 `-t0` (2026-08-06) — **t**ime sum-to-**0**: the per-week LEVEL's temporal deviation is now constrained
 to be mean-zero over the Tn window weeks, `cₜ = c + σ_c·(Qt·Lc·z_c)` with `Qt = _sum_zero_basis(Tn)`
@@ -393,16 +404,47 @@ measured separately") since the temporal GP landed; this is that change.
 
 ⚠ The latent counts 389/977 COINCIDE with the short-lived `-diag` generation's. The models are
 unrelated: `-diag` had one spatial length-scale and a squared-exponential kernel, this has two and
-Matérn 3/2. Distinguish by `log_rho_gap` (present here, absent under `-diag`) and by the token — the
-`z_c` row count (Tn−1 vs Tn) is the other in-chain signal.
+Matérn 3/2. Distinguish by the age-gap length-scale (absent under `-diag`; `log_rho_gap` here,
+`rho_gap` since `-ig`) and by the token — the `z_c` row count (Tn−1 vs Tn) is the other in-chain
+signal.
 
 Applies to the LEVEL ONLY. The structure field keeps the full `Lt`: its per-pair mean over weeks
 duplicates nothing, so constraining it would be a model restriction rather than a reparameterisation.
 
+`-ig` (2026-08-06) — **I**nverse **G**amma length-scale priors (user request). All three GP
+length-scales move from a `Normal` on `log ρ` to an **InverseGamma on ρ itself**, sampled directly so
+Turing's bijector supplies positivity and the Jacobian. The sampled columns are therefore RENAMED
+`log_rho_diag`/`log_rho_gap`/`log_rho_time` → `rho_diag`/`rho_gap`/`rho_time`, and every read-only
+mirror must take `log` before re-applying the soft-clamp (the model computes
+`exp(_softclamp(log(rho), …))`).
+
+⚠ **The latent count does NOT change** (still 389/977 — three scalars either way), so the count can
+no longer date a chain at all. The in-chain signal is the NAME: `rho_gap` unprefixed ⇒ `-ig`,
+`log_rho_gap` ⇒ `-m32`/`-t0`, absent ⇒ `-diag`. Both mirrors' sniffs were updated accordingly, and
+`load_transmission_draws`' token check moved `-m32` → `-ig`.
+
+CALIBRATION — tail-matched, so the FAMILY changes but the location and spread do not:
+`gp_len_prior` InverseGamma(8.5814, 156.2941) reproduces N(log 20, 0.35²)'s 5%/95% points
+[11.246, 35.569] exactly; `gp_time_len_prior` InverseGamma(8.5814, 15.6294) reproduces
+N(log 2, 0.35²)'s [1.1246, 3.5569]. α is shared because both old priors had σ = 0.35 ⇒ the same
+95/5 ratio 3.1629; only β scales (β_t = β_s/10). Any behaviour change is thus attributable to the
+shape alone, not to a simultaneous loosening — the mistake that broke NUTS at SD 0.75.
+
+⚠ **The right tail is HEAVIER**, polynomial (∝ρ^{-α-1}) rather than log-normal. Measured for ρ_time:
+P(>4 wk) 2.38e-02 → 2.76e-02, P(>11 wk, the window extent) 5.56e-07 → 4.04e-05, P(>26 wk)
+1.17e-13 → 5.20e-08. Absolutely still ~1 in 25 000 past the window, which is why tail-matching was
+judged sufficient — but ρ_time drifting to 20–27 wk is this model's recurring failure, so if a refit
+puts the posterior past ~4 wk the prior family is the cause and α must rise. Conversely the LOWER
+tail is much thinner, which is the point: P(ρ_diag < 5) 3.73e-05 → 4.50e-07.
+
+Stage-1 parameter-space change again ⇒ every `8j_s1_*`/`8j_s2_*` under a previous token is
+unreachable. The 4 `8j_s1_*` and 1 `8j_s2_*` staged under `-t0` were deleted rather than left to
+accumulate as a second unusable generation.
+
 Stage-1 parameter-space change, so the same staleness rule applies: every `8j_s1_*`/`8j_s2_*` under
 any previous token is unreachable (none deleted)."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0-m32-t0" *
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-gsar-cut-sc-p0-gi-s0-m32-t0-ig" *
     (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`

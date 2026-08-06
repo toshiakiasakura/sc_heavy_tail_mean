@@ -66,7 +66,8 @@ Load the two-stage artefacts for `(lbl, origin, h)` and return per-draw transmis
 The infection block (susc / inf / `gamma_sar`) comes from the **Stage-2 pooled** file — susc/inf are
 the stored `N×A` pooled draws (relative to the reference bin `cfg.ref_bin`, default 4 = "25-34", = 1), `gamma_sar` the pooled per-contact
 secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **Stage-1 chain**:
-`rho_diag`/`rho_gap`/`rho_time[d] = exp(softclamp(log_rho_diag|log_rho_gap|log_rho_time,…))`
+`rho_diag`/`rho_gap`/`rho_time[d] = exp(softclamp(log(rho_diag|rho_gap|rho_time),…))` — since `-ig`
+the chain stores the CONSTRAINED ρ, so the mirror takes `log` first
 (total-age, age-gap and — in the separable spatio-temporal regime — temporal directions;
 `rho_time` is `NaN` for pooled chains). Note susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ
 (Stage-1, ~200 draws) have different draw counts — they are consumed by separate figures.
@@ -103,7 +104,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F are Stage-2, always there
     end
     s1names = string.(names(chn, :parameters))
-    # `-diag` chains (2026-08-05, short-lived) LACK `log_rho_gap`: their spatial kernel smoothed the
+    # `-diag` chains (2026-08-05, short-lived) LACK an age-gap length-scale: their spatial kernel smoothed the
     # matrix diagonal only with a single length-scale, so `rho_diag` means something different there
     # and reporting it beside current-token length-scales would silently mix generations. Same guard
     # as `reconstruct_mu_draws` — and note it was INVERTED when `-m32` restored the second ρ.
@@ -111,19 +112,24 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     # identical to the current one (same names, same shapes) and so invisible to any `s1names` sniff.
     # ρ is on the same scale in both, but it means a different correlation function, so plotting the
     # two together on one axis would silently mix kernel families. Same fork as `reconstruct_mu_draws`.
-    if !("log_rho_gap" in s1names) || !occursin("-m32", contacts)
-        @warn "Stage-1 chain is not the `-m32` generation (no `log_rho_gap`, or pre-`-m32` token); \
-               ρ set to NaN" s1p contacts
+    # `-ig` (2026-08-06): the age-gap length-scale is now the CONSTRAINED `rho_gap`; a chain
+    # carrying `log_rho_gap` is a pre-`-ig` generation and must not be replayed through the
+    # InverseGamma parameterisation. The token check additionally catches the pre-`-diag`
+    # squared-exponential chains, which are parametrically indistinguishable by name alone.
+    if !("rho_gap" in s1names) || !occursin("-ig", contacts)
+        @warn "Stage-1 chain is not the `-ig` generation (no `rho_gap` — either `-diag`, or a \
+               pre-`-ig` chain carrying `log_rho_gap` — or a pre-`-ig` token); ρ set to NaN" s1p contacts
         nan1 = fill(NaN, 1)
         return (; susc, inf, gamma_sar, F = pooled.F, rho_diag = nan1, rho_gap = nan1, rho_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)
     end
     # `RHO_BOUNDS`/`RHO_TIME_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree`
     # or every reconstructed length-scale is silently wrong. See the constants' docstring.
-    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))  # total-age dir, mirrors model
-    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))  # age-gap dir, mirrors model
-    rho_time = ("log_rho_time" in s1names) ?                                     # temporal dir (weeks); NaN if pooled
-        exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...)) : fill(NaN, length(rho_diag))
+    # `-ig`: chain stores the CONSTRAINED ρ, so log first — mirrors the model exactly.
+    rho_diag = exp.(_softclamp.(log.(vec(Array(chn[:rho_diag]))), RHO_BOUNDS...))  # total-age dir, mirrors model
+    rho_gap  = exp.(_softclamp.(log.(vec(Array(chn[:rho_gap]))),  RHO_BOUNDS...))  # age-gap dir, mirrors model
+    rho_time = ("rho_time" in s1names) ?                                          # temporal dir (weeks); NaN if pooled
+        exp.(_softclamp.(log.(vec(Array(chn[:rho_time]))), RHO_TIME_BOUNDS...)) : fill(NaN, length(rho_diag))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
     return (; susc, inf, gamma_sar, F = pooled.F, rho_diag, rho_gap, rho_time, w_mu, w_sigma)
 end
