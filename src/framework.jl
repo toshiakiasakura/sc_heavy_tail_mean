@@ -445,6 +445,34 @@ measurement, not a failure.
 and φ^k cannot overflow. Stage-1 parameter-space change again, so every `8j_s1_*`/`8j_s2_*` under a
 previous token is unreachable (none deleted).
 
+**REFIT OUTCOME (2026-08-06), against the `-t0` @ target_accept 0.95 generation it replaced:**
+
+| cell | min ESS | coords ESS<100 | split-R̂>1.01 | φ median | effrank | Lt sprd |
+|---|---|---|---|---|---|---|
+| negbin @ 2020-11-15 | 61.0 → **126.2** | 3 → **0** | 45 → **25** | 0.891 | 2.07 | 4.7 |
+| negbin @ 2021-05-09 | 47.6 → **78.4** | 10 → **5** | 51 → **36** | 0.891 | 2.07 | 4.7 |
+| hweibull @ 2020-11-15 | 30.7 → **56.4** | 14 → **8** | 96 → 106 | **0.9998** | 1.00 | **147.3** |
+| hweibull @ 2021-05-09 | 59.7 → 48.5 | 11 → 16 | 90 → 98 | **0.9985** | 1.01 | **61.6** |
+
+Better in 3 of 4 cells, sub-100 coordinates 38 → 29 overall, and **zero divergences in all four** at
+tree depth 7.00 with 0 % at the cap. NegBin gained most (1.6–2.1×), which was NOT the prediction.
+
+⚠ **THE Lc PREDICTION HELD EXACTLY; THE Lt ONE DID NOT, AND THE REASON IS A MEASUREMENT GAP.** `Lc`'s
+spread is **1.8 at every cell including φ = 0.9998** — flat, as the static table said. But `Lt`'s
+spread at hurdle-Weibull's posterior is **147.3**, i.e. back in Matérn 3/2 territory (94–183 at its
+own posterior), so the field-side advantage evaporated. Why: the conditioning sweep covered
+φ ∈ (0, 0.999) and reported a worst-case `Lt` spread of 73.5 — **the posterior went to 0.9998, past
+the swept range.** Do not extrapolate a conditioning advantage beyond the grid you measured; with a
+Uniform prior the likelihood is free to walk past it.
+
+⚠ **THE SUBSTANTIVE FINDING: hurdle-Weibull's temporal process collapses to EXACTLY constant.**
+effrank 1.00, lag-8 correlation 0.999, P(φ > 0.99) = 1.000. This is now the THIRD independent
+measurement of the same preference (ρ_time 20–27 wk under the tight log-normal, 47–66 wk under the
+reverted `-ig`, φ → 1 here) and the cleanest, because the prior is not fighting it. The indicated
+action is not another temporal prior or kernel: it is to run hurdle-Weibull with
+`constant_contacts = true`, which is what its posterior has now said three times — see
+`tasks/todo.md` open items 1/3.
+
 Stage-1 parameter-space change, so the same staleness rule applies: every `8j_s1_*`/`8j_s2_*` under
 any previous token is unreachable (none deleted)."""
 contacts_label(cfg::FrameworkConfig) =

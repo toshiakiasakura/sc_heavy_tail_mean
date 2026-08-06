@@ -1744,3 +1744,36 @@ weeks; φ is a dimensionless correlation. `plot_lengthscales` (9j) drew all thre
 bottom. Split into a spatial panel (0–50 age-years) and a φ panel (0–1, with the φ=1 pooled limit
 marked). **When a parameter's UNITS change, grep the plotting layer, not just the model and mirrors**;
 a renamed field throws, but a re-scaled one just draws a misleading picture.
+
+### `-ar1` refit outcome (2026-08-06) — two prediction failures, one of them methodological
+
+Measured against the `-t0` @ target_accept 0.95 generation it replaced: **better in 3 of 4 cells**
+(min ESS 61.0→126.2, 47.6→78.4, 30.7→56.4, 59.7→48.5), sub-100 coordinates **38 → 29**, NegBin's
+split-R̂ failures 45→25 and 51→36, and **zero divergences in all four** at depth 7.00, 0 % at cap.
+
+**Failure 1 — I predicted the wrong beneficiary.** The pre-registered expectation was "improved ESS
+for hurdle-Weibull, roughly neutral for NegBin". NegBin gained MOST (1.6–2.1×) and hurdle-Weibull
+gained less and inconsistently. The reasoning had been "AR(1)'s conditioning advantage is largest at
+high pooling, and hurdle-Weibull is the one that pools" — correct about the static table, wrong about
+what the sampler would do with it.
+
+**Failure 2 — I extrapolated a conditioning advantage past the grid I measured.** The static sweep
+covered φ ∈ (0, 0.999) and reported a worst-case `Lt` column spread of 73.5. Hurdle-Weibull's
+posterior landed at **φ = 0.9998**, beyond the sweep, where `Lt`'s spread is **147.3** — back in
+Matérn 3/2's range (94–183 at its own posterior). The field-side advantage did not evaporate because
+the theory was wrong; it evaporated because the posterior walked past where I had checked, and a
+Uniform prior gave it nothing to stop against. **When a weak prior is chosen deliberately, sweep the
+diagnostic to the boundary the prior actually permits, not to a round number.**
+
+The `Lc` prediction, by contrast, held exactly: **1.8 at every cell including φ = 0.9998**, flat as
+the static table said. That is presumably why the level-side gains (NegBin, and hurdle-Weibull at
+2020-11-15) materialised at all.
+
+**The substantive finding is worth more than either prediction.** With a prior that does not fight it,
+hurdle-Weibull's temporal process collapses to EXACTLY constant: effrank 1.00, lag-8 correlation
+0.999, P(φ>0.99) = 1.000. That is the third independent measurement of the same preference —
+ρ_time 20–27 wk under the tight log-normal, 47–66 wk under the reverted `-ig`, φ → 1 here — and the
+cleanest of the three. Three kernels and three priors have now been asked the same question and given
+the same answer. The indicated action is not a fourth temporal prior: it is to run hurdle-Weibull with
+`constant_contacts = true`. Chasing this through the temporal specification has cost several refits;
+the model has been saying the same thing throughout.
