@@ -92,23 +92,51 @@ Archive `-m32` first (`dt_intermediate_nuts_pilot_m32/`, `tmp/pilot_baseline_m32
 `res/12j_m32_baseline/`), then the same 4 cells via `tmp/pilot_nuts_timing.jl`
 (2 degree models × {2020-11-15, 2021-05-09} × h1), then 12j on both origins.
 
-## Verification
+## Verification — ALL DONE (commit `e9b2606`)
 
-- [ ] Static: `Mt·Kt·Mt` reproduced to <1e-12; deviation sums to zero to machine precision; `Lc`
-      Cholesky clean across all of `RHO_TIME_BOUNDS`.
-- [ ] Gradient smoke: **389/977** dims, `log_rho_gap` still present, Mooncake finite, ∂logp/∂ each ρ nonzero.
-- [ ] `tmp/verify_sumzero.jl` — mirror vs model to <1e-10 over all 12 weeks (the only guard on the mirror).
-- [ ] `tmp/verify_wiring.jl` — token, AD dispatch, `prefit_stage1!` artefacts.
-- [ ] Post-fit: **corr(c, time-mean deviation) must no longer be −1.000**, and SD(c) should collapse
-      toward SD(mean level) ≈ 0.007. The direct test that the ridge is gone.
-- [ ] 12j both origins + `tmp/verify_12j.jl`.
+- [x] Static: `Mt·Kt·Mt` reproduced to **7.772e-16**; deviation sums to zero to **2.609e-15**; `Lc`
+      Cholesky clean at all 200 ρ_time (min eigenvalue 4.163e-07); flat direction SD **0.578 → 4.743e-17**.
+- [x] Gradient smoke: **389/977** dims, `z_c` = 11, `log_rho_gap` present, Mooncake finite.
+- [x] `tmp/verify_sumzero.jl` — mirror vs model **2.946e-15**.
+- [x] `tmp/verify_wiring.jl` — ALL PASS.
+- [x] Post-fit ridge test — see below. Note the planned "corr must no longer be −1.000" is **vacuous
+      under `-t0`**: the deviation's time-mean is zero *by construction*, so the correlation is 0/0.
+      The test that carries the information is SD(c), which was predicted to land near 0.007.
+- [x] 12j both origins (28 figures) + `tmp/verify_12j.jl` exit 0, ALL PASS.
 
-## Success criteria
+## Outcome
 
-The ridge is removed (the corr test above) — that is the deliverable, checkable regardless of what
-happens to ESS. Secondary: NegBin's split-R̂ failures (24–31 of 390) should fall and `z_c` should
-leave the worst-mixing blocks. Hurdle-Weibull's 100 %-at-cap is **not** expected to resolve here; its
-η↔ρ_diag ridge and the p⁰-versus-μ question are separate and still open.
+**The deliverable — ridge removed, all four cells.** Sum-to-zero exact (max|time-mean deviation|
+6.2e-18 … 6.0e-17), and SD(c) collapses onto the predicted pinned scale:
+
+| chain | SD(c) `-m32` → `-t0` | factor | ESS(c) |
+|---|---|---|---|
+| negbin @ 2020-11-15 | 0.379 → **0.0063** | 60× | 217 → **984** |
+| negbin @ 2021-05-09 | 0.379 → **0.0073** | 52× | 292 → **1113** |
+| hweibull @ 2020-11-15 | 0.668 → **0.0066** | 102× | 228 → **1234** |
+| hweibull @ 2021-05-09 | 0.725 → **0.0070** | 103× | 307 → **805** |
+
+**Hurdle-Weibull's 100 %-at-cap DID resolve — the "not expected" scope note above was wrong.**
+Mean depth 10.00/9.99 → **6.99/6.98**, 0 % at cap; step size ≈10× larger; fit 8316/7949 s →
+**2232/2201 s**; min ESS 18.2/45.4 → **69.6/99.8**; coords ESS<100 16/978 and 8/978 → **1/977** each.
+The scope note reasoned from *which block mixed worst*, which does not hold under a single global
+step size — see `tasks/lessons.md` 2026-08-06.
+
+NegBin: depth 8.95 → 7.00, fits 2.2× faster, min ESS 135.5 → 115.9 and 112.6 → 69.3 (ESS *per second*
+1.9× and 1.4× better; the per-draw drop is what 4× shorter trajectories do at a fixed 500-draw budget).
+`z_c` left the worst-mixing blocks for hweibull (236 → 415, 207 → 438); for negbin it is still the
+worst block but above threshold (116/119).
+
+**All four verdicts: NOT CONVERGED**, in every case on split-R̂. Failures rose (31→37, 24→39,
+98→126, 79→136). But they **do not track low ESS**: among coordinates with ESS ≥ 400, 6.5–13.9 % fail,
+and the largest R̂ per hweibull chain is at **ESS 1349 (1.060)** and **ESS 1023 (1.085)**. That is
+first-half/second-half drift, not autocorrelation — a different defect from the one ESS measures.
+Divergences: negbin 0/0; hweibull 0→4 and 3→5.
+
+**Next step, in order.** (1) Re-run with more kept draws — now cheap at 2.2–3.7× the speed — which
+discriminates short-run drift from genuine non-stationarity and is the only way to settle the R̂
+signal. (2) Then the η↔ρ_diag ridge, now the binding constraint in *all four* chains
+(corr +0.40…+0.45), not just hweibull.
 
 ---
 
@@ -119,5 +147,11 @@ leave the worst-mixing blocks. Hurdle-Weibull's 100 %-at-cap is **not** expected
    escape valve. If weekly behaviour change shows up as "more people at zero contacts" rather than
    "shorter contacts", p⁰ absorbs it and ρ_time → 20–27 wk legitimately. Decomposing the weekly
    change in the cell mean into its p⁰ and μ parts would settle it.
-2. **hweibull's η↔ρ_diag ridge** (r = +0.47) — the classic GP amplitude/length-scale trade-off.
+   Unchanged by `-t0`: hweibull's ρ_time is still **27.1 / 21.0 weeks** (negbin **2.30 / 2.19**).
+2. **The η↔ρ_diag ridge** — the classic GP amplitude/length-scale trade-off. No longer hweibull-only:
+   after `-t0` it is present in **all four** chains at corr **+0.40 … +0.45**, and it is now the
+   binding constraint (worst coords are `log_rho_gap` 69.3, `log_rho_diag` 69.6, `log_eta` 99.8).
 3. **Whether hweibull should simply run `constant_contacts=true`**, which is what its posterior says.
+4. **Whether the split-R̂ signal survives a longer run.** R̂ failures sit at high ESS (up to 1349), so
+   they are drift, not autocorrelation. `-t0` made the fits 2.2–3.7× faster, so more kept draws is
+   now the cheap discriminating experiment.

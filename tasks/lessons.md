@@ -1518,3 +1518,63 @@ the code change, just fix F to be 1.0 temporarily in this stage."* One line chan
   contradict the code (`plot_F`, the 9j notebook cell, `inst/3` §3.2 / §6 priors / §diagnostics /
   "remaining seams"). Same discipline as deleting the false "GAUGE-INVARIANT" claim in the ref-bin
   task above.
+
+---
+
+## 2026-08-06 — `-t0` refit outcome: removing a flat direction moved the binding constraint
+
+The temporal sum-to-zero (`-t0`, commit `e9b2606`) was planned to fix the `c` ↔ `z_c` ridge and
+**explicitly predicted not to help hurdle-Weibull's 100 %-at-cap** (`tasks/todo.md` "Scope, stated
+honestly"). The prediction was wrong in the useful direction, and the way it was wrong is the lesson.
+
+**The targeted fix worked exactly as designed**, all four cells:
+
+| chain | SD(c) `-m32` → `-t0` | max\|time-mean dev\| | ESS(c) `-m32` → `-t0` |
+|---|---|---|---|
+| negbin @ 2020-11-15 | 0.379 → **0.0063** | 4.0e-17 | 217 → **984** |
+| negbin @ 2021-05-09 | 0.379 → **0.0073** | 6.0e-17 | 292 → **1113** |
+| hweibull @ 2020-11-15 | 0.668 → **0.0066** | 6.2e-18 | 228 → **1234** |
+| hweibull @ 2021-05-09 | 0.725 → **0.0070** | 7.6e-18 | 307 → **805** |
+
+`-m32` had measured the mean level pinned at SD 0.007 while `c` wandered at 0.38–0.73. `c` **is** the
+mean level now, and all four land on 0.0063–0.0073 — the predicted value, not merely a smaller one.
+A reparameterisation that is a pure conditioning has a *quantitative* acceptance test; use it, rather
+than settling for "the correlation is no longer −1" (which under `-t0` is 0/0 and therefore vacuous —
+the deviation's time-mean is zero **by construction**, so the correlation cannot be computed at all).
+
+**The unpredicted result: hurdle-Weibull's depth saturation vanished.**
+
+| | `-m32` | `-t0` |
+|---|---|---|
+| hweibull mean tree depth | 10.00 / 9.99, **100 % / 99.4 % at cap** | 6.99 / 6.98, **0 % at cap** |
+| hweibull step size | 3.2e-03 / 3.8e-03 | **3.8e-02 / 3.7e-02** (≈10×) |
+| hweibull fit total | 8316 s / 7949 s | **2232 s / 2201 s** |
+| hweibull min ESS | 18.2 / 45.4 | **69.6 / 99.8** |
+| hweibull coords ESS<100 | 16/978, 8/978 | **1/977, 1/977** |
+
+**Why the prediction failed.** The scope note reasoned from *which coordinates mixed worst* — for
+hweibull those were `log_rho_gap`, `z`, `log_eta`, `log_rho_diag`, not `c`/`z_c` — and concluded a
+`c`/`z_c` fix was off-target. That inference does not hold under a **single global step size**: NUTS
+adapts one ε for all coordinates, so the *worst-conditioned direction anywhere in the model* caps ε
+for every direction. Removing a flat direction raises the achievable ε and shortens every trajectory,
+which helps coordinates that were never near that direction. **Do not predict the reach of a geometry
+fix from the identity of the worst-mixing block.** The blast radius of a conditioning change is the
+whole parameter space whenever the sampler shares one step size or one mass matrix.
+
+**Where the constraint went.** In all four `-t0` chains the worst coordinate is now a GP
+hyperparameter — `log_rho_gap` 69.3, `log_rho_diag` 69.6, `log_eta` 99.8 — with
+corr(log_eta, log_rho_diag) = **+0.40 … +0.45 in every chain** (previously flagged for hweibull only).
+That is the classic GP amplitude ↔ length-scale ridge, and it is now the binding one.
+
+**split-R̂ rose in all four** (31→37, 24→39, 98→126, 79→136) and is the sole failing criterion for
+negbin @ 2020-11-15, which passes divergences, E-BFMI and ESS. Do not read that as a mixing
+regression without checking: **R̂ failures do not track low ESS here.** Among coordinates with
+ESS ≥ 400, 6.5–13.9 % fail R̂ > 1.01, and the largest R̂ in each hweibull chain sits at
+**ESS 1349 (R̂ 1.060)** and **ESS 1023 (R̂ 1.085)**. High ESS with high R̂ is a slow first-half /
+second-half drift, not autocorrelation — a different defect that more *thinning* would not touch and
+more *draws* would diagnose. Always cross-tabulate R̂ against ESS before attributing an R̂ failure to
+mixing; the two criteria in `convergence_verdict` can and do disagree.
+
+**Still open, unchanged by `-t0`:** hweibull's ρ_time is **27.1 / 21.0 weeks** (negbin: 2.30 / 2.19),
+so the hurdle model's posterior still says "constant contacts" over a 12-week window. `-t0` was never
+going to touch that — it is the p⁰-versus-μ decomposition question, not a geometry question.
