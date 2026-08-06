@@ -85,7 +85,7 @@ _pcol(chn, p) = collect(skipmissing(vec(Array(chn[:, Symbol(p), :]))))
     param_group(p) -> String
 
 Parameter block a chain column belongs to: `"z[3,7]" → "z"`. `model_degree` samples 6 scalars
-(`c`, `log_eta`, `log_rho_diag`, `log_rho_gap`, `log_rho_time`, `log_sigma_c`) plus the blocks
+(`c`, `log_eta`, `log_rho_diag`, `log_rho_gap`, `phi_time`, `log_sigma_c`) plus the blocks
 `z_c` (Tn−1), `z` ((P−1)×Tn) and the dispersion (`log_k` for NegBin, `log_kappa`+`p0f` for
 hurdle-Weibull) — 389 and 977 coordinates respectively. Four changes moved this around: `-s0`
 dropped `z` from 28 to 27 rows (402/990 → 390/978), `-diag` briefly removed the `log_rho_gap` scalar

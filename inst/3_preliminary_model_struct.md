@@ -1130,7 +1130,14 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   GP prior $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log20,0.35^2)$ (both spatial
   length-scales share `gp_len_prior`; **set 2026-08-05** with the `-m32` kernel swap, see §5),
   $\log\eta\sim\mathcal N(0,0.5^2)$,
-  $\log\rho_{\text{time}}\sim\mathcal N(\log2,0.35^2)$ (`gp_time_len_prior`, weeks; recentred and
+  $\phi\sim\text{Beta}(1,1)=\mathcal U(0,1)$ (`ar1_phi_prior`, dimensionless; **`-ar1`, 2026-08-06**:
+  the temporal correlation is AR(1), $K_t[s,t]=\phi^{|s-t|}$ — which IS the exponential/Matérn 1/2
+  kernel — replacing the Matérn 3/2 length-scale in weeks. TIME DIRECTION ONLY; the spatial kernel
+  is untouched, and the separable field already gave each age pair its own temporal path under one
+  shared $\eta$. Measured at matched effective rank: $K_t$ min eigenvalue $2.7\!\times\!10^{-5}\to5.1\!\times\!10^{-3}$,
+  $L_t$ column spread $94.2\to23.1$, and the level's $L_c$ spread flat at 1.6–1.8 across all $\phi$
+  (vs 13.5). The prior is deliberately weak — see `framework.jl`. HISTORY: previously
+  $\log\rho_{\text{time}}\sim\mathcal N(\log2,0.35^2)$ (`gp_time_len_prior`), recentred and
   tightened 2026-08-05 — at $\mathcal N(\log4,0.5^2)$ the posterior drifted to 24–63 weeks over a
   12-week window and every cell failed to converge),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),

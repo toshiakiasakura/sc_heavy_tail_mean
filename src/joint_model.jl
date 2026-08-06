@@ -467,31 +467,68 @@ end
         K1w = [K1 for _ in 1:Tn]; K2w = [K2 for _ in 1:Tn]; Gw = [G for _ in 1:Tn]
         return (; K1 = K1w, K2 = K2w, G = Gw)
     else
-        # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over
-        # weeks by a temporal RBF over week indices 1:Tn, sharing one length-scale ρ_time
-        # across all age-pairs; the spatial kernel (ρ_diag, η, La) is shared as before.
-        #   • temporal kernel  Kt[s,t] = exp(-(s-t)²/(2ρ_time²)),  Lt = chol(Kt + jitter)
+        # per-week: SEPARABLE spatio-temporal field (§5). The age-pair field is smoothed over
+        # weeks by an AR(1) over week indices 1:Tn, sharing one coefficient φ across all age-pairs;
+        # the spatial kernel (ρ_diag, ρ_gap, η, La) is shared as before.
+        #   • temporal kernel  Kt[s,t] = φ^|s−t|  (AR(1) ≡ exponential),  Lt = chol(Kt + jitter)
         #   • structure field  R = η·(Q·La·z·Ltᵀ)  (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ M·Kage·M),
-        #     each age-pair a temporally-correlated GP, each week the spatial RBF conditioned to
-        #     sum to zero over the P pairs (see the `Ap`/`La` block above).
-        #   • decoupled level  cₜ = c + σ_c·(Qt·Lc·z_c)  — scalar intercept c + a 1-D temporal GP
-        #     CONDITIONED TO SUM TO ZERO over the Tn weeks (`-t0`, see below). The spatial
-        #     sum-to-zero constraint is what makes "η governs age-structure only" true rather than
-        #     aspirational: without it the field's per-week mean is a second copy of cₜ and the two
-        #     amplitudes are confounded.
-        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
-        log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
-        ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
-        # temporal Cholesky over the Tn window weeks — Matérn 3/2, matching `Kp` (see `_m32`).
-        # THIS IS THE KERNEL THAT WAS BREAKING NUTS. Under the squared exponential `Kt` went
-        # numerically low-rank as ρ_time grew (rank 10 of 12 by ρ_time = 4, rank 4 by 63), `Lt`'s
-        # first column absorbed the whole field, and `z[:,1]` was pinned ~60× tighter than the rest
-        # — the scale disparity that forced a 1e-3 step size and 100% max-tree-depth on 2026-08-05.
-        # Matérn 3/2 keeps FULL rank 12 at every ρ_time in `RHO_TIME_BOUNDS`; at the
-        # `gp_time_len_prior` mode `Lt`'s column-scale spread is 2.4, against 228–274 measured in the
-        # chains that failed to mix. Jitter stays 1e-4 (not 1e-6): the Pathfinder call is not
-        # try/caught, so a PosDefException would abort the whole fit (see tasks/lessons.md).
-        Kt = [_m32(abs(s - t) / ρ_time) for s in 1:Tn, t in 1:Tn]
+        #     each age-pair its OWN AR(1) path in time, each week the spatial kernel conditioned to
+        #     sum to zero over the P pairs (see the `Ap`/`La` block above). "Independently per age
+        #     pair" is the temporal factor; the pairs remain CORRELATED across age through `La`.
+        #   • decoupled level  cₜ = c + σ_c·(Qt·Lc·z_c)  — scalar intercept c + a 1-D temporal
+        #     process on the SAME Kt, CONDITIONED TO SUM TO ZERO over the Tn weeks (`-t0`, below).
+        #     The spatial sum-to-zero constraint is what makes "η governs age-structure only" true
+        #     rather than aspirational: without it the field's per-week mean is a second copy of cₜ
+        #     and the two amplitudes are confounded.
+        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; φ→0 ⇒ iid weeks, φ→1 ⇒ pooled.
+        # ---- TEMPORAL CORRELATION IS AR(1) (`-ar1`, 2026-08-06, user request) ----
+        # An AR(1) correlation matrix IS the exponential (Matérn 1/2) kernel, `Kt[s,t] = φ^|s−t|`,
+        # so "AR(1) per age pair, sharing the variance" needs no structural change: the separable
+        # matrix-normal below already gives every pair its own temporal trajectory under one shared
+        # amplitude η, and only the correlation FUNCTION moves. The SPATIAL kernel is untouched —
+        # pairs remain correlated through `La` (this is a time-direction change only).
+        #
+        # WHY, measured statically (no MCMC) against the Matérn 3/2 it replaces, compared at MATCHED
+        # effective rank — i.e. the same amount of temporal pooling, which is what the likelihood
+        # actually picks. `spread` is `Lt`'s column-scale ratio, the quantity that broke NUTS on
+        # 2026-08-05 (2.4 in healthy chains, 228–274 in the chains that would not mix):
+        #
+        #   effrank | Matérn 3/2 | AR(1)     | Kt min eig        | Lt spread   | Lc cond
+        #   --------|------------|-----------|-------------------|-------------|-----------------
+        #   ≈4.5    | ρ=2        | φ=0.785   | 5.0e-2 → 1.2e-1   | 2.4 → 2.6   | 61 → 21
+        #   ≈1.4    | ρ=10       | φ=0.95    | 4.6e-4 → 2.6e-2   | 26.8 → 8.6  | 3.5e3 → 45
+        #   ≈1.08   | ρ=26       | φ=0.99    | 2.7e-5 → 5.1e-3   | 94.2 → 23.1 | 1.6e4 → 55
+        #   ≈1.03   | ρ=47       | φ=0.995   | 4.5e-6 → 2.6e-3   | 151.5→ 33.4 | 3.5e4 → 56
+        #
+        # A wash in NegBin's regime (ρ_time ≈ 2.2); 4–6× better column spread and 2–3 orders better
+        # min eigenvalue in hurdle-Weibull's (ρ_time 20–66 wk, effrank 1.01–1.08). MECHANISM: AR(1)
+        # is MARKOV — tridiagonal precision, eigenvalues decaying only polynomially — so it keeps
+        # spectral mass in the non-constant directions even at φ = 0.995, where Matérn 3/2's spectrum
+        # has collapsed onto one direction and `Lt`'s first column absorbs the whole field.
+        #
+        # ⚠ This is a MODELLING change too, not only a numerical one: AR(1) paths are
+        # non-differentiable (rougher week to week) and memory is LONGER at long lag — at matched
+        # lag-1 correlation 0.785, lag-4 is 0.380 against Matérn 3/2's 0.140 and lag-8 is 0.115
+        # against 0.008.
+        # ⚠ It does NOT change what the likelihood wants. Hurdle-Weibull prefers near-constant weekly
+        # contacts (ρ_time 20–27 wk under the tight log-normal, 47–66 wk under the reverted `-ig`
+        # InverseGamma); AR(1) lets the sampler represent that regime without the geometry punishing
+        # it. Expect φ ≈ 0.99+ there and ≈0.75–0.80 for NegBin — a high φ is the measurement, not a
+        # failure. See tasks/todo.md open items 1/3 (the p⁰-versus-μ decomposition).
+        #
+        # HISTORY worth keeping: the squared exponential was replaced by Matérn 3/2 on 2026-08-05
+        # (`-m32`) for exactly this class of reason — under SE, `Kt` went numerically rank-4-of-12 as
+        # ρ_time drifted, forcing a 1e-3 step size and 100% max-tree-depth. AR(1) continues that
+        # direction rather than reversing it: SE → Matérn 3/2 → Matérn 1/2, each rougher and better
+        # conditioned in the near-constant limit.
+        #
+        # NO SOFT-CLAMP: φ ∈ (0,1) by construction (Turing's bijector), and φ^k cannot overflow, so
+        # there is nothing for `_softclamp` to guard — unlike `log ρ_time`, where a stray LBFGS step
+        # could overflow `exp`. `RHO_TIME_BOUNDS` is consequently UNUSED by this path.
+        # Jitter stays 1e-4 (not 1e-6): the Pathfinder call is not try/caught, so a PosDefException
+        # would abort the whole fit (see tasks/lessons.md).
+        phi_time ~ Beta(cfg.ar1_phi_prior...)              # AR(1) coefficient, (0,1)
+        Kt = [phi_time^abs(s - t) for s in 1:Tn, t in 1:Tn]
         Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see La note above): Ltᵀ must not be a triangular type
 
         # ---- SUM-TO-ZERO over the Tn weeks, for the LEVEL (`-t0`, 2026-08-06) ----

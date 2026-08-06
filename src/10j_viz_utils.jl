@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
+# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, phi_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -26,9 +26,10 @@ matrix μ_{i→j} for one week, once per posterior draw:
 
 with the per-week rate `rvec` built for the requested `week` (`wk`):
 
-- **Separable spatio-temporal regime** (`log_rho_time` present; the cached `contacts="temporal"`
+- **Separable spatio-temporal regime** (`phi_time` present; the cached `contacts="temporal"`
   chains): scalar intercept `c`, temporal-level GP and matrix-normal structure field share the
-  temporal Cholesky `Lt` built from `ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))` over the
+  temporal Cholesky `Lt` built from the AR(1) kernel `Kt[s,t] = phi_time^|s−t|` (read CONSTRAINED,
+  no exp/softclamp) over the
   full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
@@ -89,6 +90,17 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # Without it, `reconstruct_mu_draws(…; contacts = CONTACTS_TOKEN_PF)` — a supported way to read
     # the retained Pathfinder grid — would silently replay SE draws through a Matérn kernel and
     # every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
+    # ---- which TEMPORAL kernel? (`-ar1`, 2026-08-06) ----
+    # A pre-`-ar1` chain carries `log_rho_time` (Matérn 3/2 length-scale in weeks) instead of
+    # `phi_time` (AR(1) coefficient). Replaying one through `Kt = φ^|s−t|` would treat a
+    # length-scale of e.g. 26 weeks as a correlation of 26 — nonsense that raises nothing. Caught
+    # by NAME here; the token check below additionally covers same-name/different-kernel forks.
+    if !any(n -> n == "phi_time", pnames)
+        @warn "chain has no `phi_time`: a pre-`-ar1` chain whose temporal kernel was a Matérn 3/2 \
+               length-scale (`log_rho_time`), not an AR(1) coefficient. Refusing to reconstruct \
+               rather than replay it through the wrong temporal kernel." path
+        return nothing
+    end
     if !occursin("-m32", contacts)
         @warn "contacts token `$contacts` predates `-m32`, so this chain's kernel was the squared \
                exponential, not Matérn 3/2. The chain columns are indistinguishable from a current \
@@ -140,14 +152,16 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     end
     μ = Array{Float64,3}(undef, D, A, A)
 
-    if any(n -> n == "log_rho_time", pnames)                 # separable spatio-temporal regime
+    if any(n -> n == "phi_time", pnames)                     # separable spatio-temporal regime (`-ar1`)
         # infer Tn from the structure-field names z[p,t] (z_c[t]/z_s/z_i don't match "^z\[")
         Tn = maximum(parse(Int, match(r"^z\[\d+\s*,\s*(\d+)\]$", n).captures[1])
                      for n in pnames if occursin(r"^z\[\d+\s*,\s*\d+\]$", n))
         wk = week_index === nothing ? Tn : week_index
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
-        ρ_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))  # D
+        # `-ar1`: the chain stores the CONSTRAINED φ ∈ (0,1) directly — no exp, no softclamp
+        # (`model_degree` has none either: φ^k cannot overflow, so RHO_TIME_BOUNDS is unused).
+        φ_time = vec(Array(chn[:phi_time]))                                             # D
         Z  = Array{Float64,3}(undef, D, zrows, Tn)           # structure-field raw z[p,t]; `zrows`, NOT `P` — see the generation sniff above
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue
@@ -173,7 +187,7 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         end
         tz_Q = _sum_zero_basis(Tn)                           # SAME helper the model uses — never re-derive
         for d in 1:D
-            Kt = [_m32(abs(s - t) / ρ_time[d]) for s in 1:Tn, t in 1:Tn]   # Matérn 3/2, mirrors model
+            Kt = [φ_time[d]^abs(s - t) for s in 1:Tn, t in 1:Tn]           # AR(1), mirrors model
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
             # level: cₜ = c + σ_c·(tz_Q·Lc·z_c)_wk, with Lc = chol(Qᵀ·Kt·Q + 1e-4·I) (mirrors model)

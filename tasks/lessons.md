@@ -1693,3 +1693,54 @@ across every block. Reverting restores that conflict; it does not resolve it.
 That makes `tasks/todo.md` open items 1 and 3 sharper rather than softer: decompose the weekly change
 into its p⁰ and μ parts, and decide whether hurdle-Weibull should simply run `constant_contacts = true`,
 which is what its posterior says under any prior loose enough to let it speak.
+
+---
+
+## 2026-08-06 — AR(1) temporal correlation (`-ar1`): an AR(1) IS a kernel, and Markov buys conditioning
+
+User request: smooth the time direction with an AR(1) per age pair, sharing the variance.
+
+**1. An AR(1) correlation matrix IS `φ^|s−t|` — the exponential (Matérn 1/2) kernel.** So there was no
+state-space machinery to write: the change is a one-line kernel swap inside the existing separable
+matrix-normal, `Kt = [phi_time^abs(s-t) …]`, with `phi_time` replacing `log_rho_time`. Before writing
+a new sampler formulation for an AR/state-space process on a short regular grid, check whether its
+covariance has a closed form you can drop into the kernel you already have — for AR(1), AR(2),
+random walk and OU it does.
+
+**2. "Independently per age pair, sharing the variance" was ALREADY the structure.** The field
+`R = η·(Q·La·z·Ltᵀ)` is separable, so `Cor(R[p,s], R[q,t]) = S[p,q]·Kt[s,t]`: every pair already had
+its own temporal trajectory under one shared amplitude η. Only the correlation FUNCTION moved. Worth
+checking what a requested structure already implies before assuming it needs new parameters — and
+worth saying so, because the user's question ("isn't Matérn 3/2 already independent smoothing?") was
+half right: temporally yes, spatially no.
+
+**3. Markov structure is what buys the conditioning, and the LEVEL benefits most.** Measured
+statically at MATCHED effective rank (equal temporal pooling — the fair comparison, since the
+likelihood picks how much pooling it wants):
+
+| effrank | Matérn 3/2 | AR(1) | Kt min eig | Lt spread | Lc spread |
+|---|---|---|---|---|---|
+| ≈4.5 (NegBin) | ρ=2 | φ=0.785 | 5.0e-2 → 1.2e-1 | 2.4 → 2.6 | 1.7 → 1.6 |
+| ≈1.08 (hweibull) | ρ=26 | φ=0.99 | 2.7e-5 → 5.1e-3 | 94.2 → 23.1 | 12.5 → **1.8** |
+| ≈1.03 | ρ=47 | φ=0.995 | 4.5e-6 → 2.6e-3 | 151.5 → 33.4 | 13.5 → **1.8** |
+
+AR(1)'s precision is tridiagonal and its eigenvalues decay only polynomially, so spectral mass stays
+in the non-constant directions even at φ = 0.995 — where Matérn 3/2's spectrum has collapsed onto one
+direction and `Lt`'s first column absorbs the whole field (the 2026-08-05 failure mode). After the
+`-t0` projection the level's `Lc` spread is FLAT at 1.6–1.8 across every φ tested (1000 values),
+against 13.5 for Matérn 3/2. **That flatness is what decided the scope**: apply AR(1) to both `Lt`
+and `Lc`, not just the field. Deciding scope on a measurement beat deciding it on which object the
+phrase "per age pair" grammatically referred to.
+
+**4. Measure through the SHIPPED code path, not a re-spelled equivalent.** The plan's `Lc` figures
+used an ad-hoc QR basis of 1^⊥; the model uses the Helmert `_sum_zero_basis`. Same subspace, same
+eigenvalues — but different `Lc` column norms, and the shipped basis is BETTER (spread 1.8 vs 3.3 at
+φ=0.99, 12.5 vs 19.1 for Matérn). Conclusions that depend on a factorisation rather than a spectrum
+must be computed with the factorisation the model actually uses.
+
+**5. Units changed, so a shared plot axis became wrong, and it would NOT have raised.** ρ_time was
+weeks; φ is a dimensionless correlation. `plot_lengthscales` (9j) drew all three on one axis with
+`ylims = (0, 50)` labelled "age-yrs / weeks" — φ would have rendered as an invisible flat line at the
+bottom. Split into a spatial panel (0–50 age-years) and a φ panel (0–1, with the φ=1 pooled limit
+marked). **When a parameter's UNITS change, grep the plotting layer, not just the model and mirrors**;
+a renamed field throws, but a re-scaled one just draws a misleading picture.
