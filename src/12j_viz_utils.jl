@@ -161,7 +161,7 @@ Sampler-level health of a NUTS chain, beyond what `_nuts_diagnostics` reports:
   (`_nuts_diagnostics` reports the observed-max flavour, which is why it read 1.0 on the 25-adapt
   wiring checks.)
 - `step_size`, `accept_rate` — the adapted step size and realised acceptance (compare against
-  `cfg.stage1_nuts_target_accept = 0.9`).
+  `cfg.stage1_nuts_target_accept = 0.95`).
 - `ebfmi` — energy-based Bayes fraction of missing information, `mean(ΔE²)/var(E)` over the
   marginal energy. **Below ~0.3 (Betancourt 2016) the momentum resampling is not moving the chain
   between energy levels**, i.e. heavy tails the sampler cannot climb. This is the one HMC pathology

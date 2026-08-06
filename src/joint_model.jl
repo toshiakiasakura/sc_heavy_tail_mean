@@ -971,11 +971,13 @@ end
     fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
-(`jldsave(path; result=chn, sampler, diag, ad_backend)`). Idempotent skip ⇒ resumable prefit.
+(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept)`). Idempotent skip ⇒ resumable
+prefit.
 
-`sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`) and `ad_backend` (`cfg.ad_backend`)
-are written alongside `result` so an artefact is self-describing. The cache filename encodes the
-SAMPLER via `contacts_label`, but deliberately NOT the AD backend, so for the backend the file's own
+`sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`), `ad_backend` (`cfg.ad_backend`) and
+`target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06) are written
+alongside `result` so an artefact is self-describing. The cache filename encodes the SAMPLER via
+`contacts_label`, but deliberately NOT the AD backend or the NUTS tuning, so for those the file's own
 contents are the *only* record — which is what makes a mixed-provenance grid auditable:
 
 ```julia
@@ -991,8 +993,13 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
                             cfg::FrameworkConfig; adtype = ad_type(cfg), rng = nothing)
     isfile(path) && return (; chn = load(path, "result"))
     res = fit_stage1(dm, ds, pop, cfg; use_nuts = cfg.stage1_use_nuts, adtype = adtype, rng = rng)
+    # `target_accept` is recorded for the same reason as `ad_backend`: `contacts_label` encodes only
+    # the SAMPLER (`-nuts`), not its tuning, so a grid refitted in part after a target_accept change
+    # is silently mixed-provenance. The file's own contents are the only record. Audit exactly as
+    # for the backend, swapping the key.
     jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
-                  ad_backend = res.ad_backend)
+                  ad_backend = res.ad_backend,
+                  target_accept = cfg.stage1_nuts_target_accept)
     return (; chn = res.chn)
 end
 

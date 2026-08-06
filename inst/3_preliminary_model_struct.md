@@ -964,7 +964,7 @@ For one $(dm, nb, \text{origin}, h)$:
    Pathfinder runs first regardless, and NUTS starts from its `fit_distribution` mean in the
    *unconstrained* space, so the cost is **additive**, not a replacement. Set
    `stage1_use_nuts = false` for the Pathfinder-only preliminary. NUTS is configured explicitly —
-   `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.9`, `_max_depth = 10` —
+   `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.95`, `_max_depth = 10` —
    because the convenience constructor `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, i.e.
    only $125$ warmup iterations to adapt a step size and diagonal metric in $389$/$977$ dimensions.
    **One chain per fit**, so there is no $\hat R$; health is reported by `_nuts_diagnostics`
