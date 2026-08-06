@@ -1128,9 +1128,9 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   *prior* on the estimated $w_\mu,w_\sigma$, not a fixed $w$), `child_bins` $=2$, quantiles $0.05{:}0.05{:}0.95$, cut sizes
   `n_stage1_post` $=100$ / `n_stage2_draws` $=100$ (⟹ 10 000 pooled), `stage1_use_nuts` $=$ `false`,
   GP prior $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log20,0.35^2)$ (both spatial
-  length-scales share `gp_len_prior`; **superseded 2026-08-06 by `-ig`**: now $\rho_{\text{diag}},\rho_{\text{gap}}\sim\text{InverseGamma}(8.5814, 156.2941)$ on $\rho$ ITSELF, sampled directly and renamed `rho_diag`/`rho_gap`, tail-matched so the 5%/95% points reproduce the log-normal's $[11.246, 35.569]$ exactly),
+  length-scales share `gp_len_prior`; **set 2026-08-05** with the `-m32` kernel swap, see §5),
   $\log\eta\sim\mathcal N(0,0.5^2)$,
-  $\rho_{\text{time}}\sim\text{InverseGamma}(8.5814, 15.6294)$ (`gp_time_len_prior`, weeks; `-ig` 2026-08-06, tail-matched to the previous $\mathcal N(\log2,0.35^2)$ whose 90% interval $[1.1246, 3.5569]$ it reproduces exactly. ⚠ its right tail is polynomial and so heavier: $P(\rho>11\text{ wk})$ 5.6e-07 → 4.0e-05. Previously recentred and
+  $\log\rho_{\text{time}}\sim\mathcal N(\log2,0.35^2)$ (`gp_time_len_prior`, weeks; recentred and
   tightened 2026-08-05 — at $\mathcal N(\log4,0.5^2)$ the posterior drifted to 24–63 weeks over a
   12-week window and every cell failed to converge),
   $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),

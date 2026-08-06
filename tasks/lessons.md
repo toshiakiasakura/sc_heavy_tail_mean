@@ -1583,6 +1583,12 @@ going to touch that — it is the p⁰-versus-μ decomposition question, not a g
 
 ## 2026-08-06 — InverseGamma length-scale priors (`-ig`): tail-match, don't just swap the family
 
+> **REVERTED the same day (user request).** The code is back on `Normal` on `log ρ`
+> (`gp_len_prior` N(log 20, 0.35²), `gp_time_len_prior` N(log 2, 0.35²), token `…-t0-nuts`).
+> Everything below is kept as the record of what was measured — the calibration method and
+> the tail arithmetic are reusable, and the refit produced a genuine modelling finding.
+> See the revert note at the end of this entry.
+
 User request: move all three GP length-scale priors from `Normal` on `log ρ` to **InverseGamma on ρ**.
 Two things about that are worth keeping.
 
@@ -1659,3 +1665,31 @@ the finding, not a prior to retune.
 **Also:** a pre-registered acceptance criterion is worth keeping even when it fails, because the
 failure is what forced the diagnosis. But state it as "watch X" rather than "if X then do Y" — the
 remedy is exactly the part that cannot be known in advance.
+
+### `-ig` REVERTED (2026-08-06, user request) — what the experiment bought
+
+The InverseGamma priors were reverted to `Normal` on `log ρ` immediately after the refit. The code is
+back to the `-t0` state at `target_accept = 0.95`; the four `-ig` chains are archived in
+`dt_intermediate_nuts_pilot_ig/`, and the log-normal chains that match the reverted model were
+restored from `dt_intermediate_nuts_pilot_ta95/` — so **no refit was needed to get back**, because the
+token (`…-s0-m32-t0-nuts`) and the model are byte-identical to the state those chains were fitted under.
+
+Kept from the reverted work, because it is right independently of the prior:
+- **the `dt_intermediate/` correction** — the 504-file Pathfinder grid is in `dt_intermediate_GP_RBP/`,
+  not `dt_intermediate/` (which holds only the two `df_dds` CSVs). `verify_wiring.jl` now searches both
+  and reports where it found the grid.
+- **the measurements** — the tail arithmetic, the calibration recipe, and the refit result.
+
+What the experiment established, and it outlives the revert:
+
+**Hurdle-Weibull's ρ_time problem is the LIKELIHOOD, not the prior.** Under the tight log-normal
+ρ_time sits at 20–27 wk, already +7σ into that prior's tail; given a heavier-tailed prior it goes to
+47–66 wk and *mixes three times better* (ESS 76–80 → 188–278), taking the rest of the model with it
+(sub-100 coordinates 38 → 10, divergences 1 → 0). NegBin is unmoved at ~2.2 wk under either prior.
+So the two degree families genuinely disagree about temporal structure, and the current NegBin-tuned
+temporal prior is actively fighting the hurdle-Weibull likelihood — paying for it in effective samples
+across every block. Reverting restores that conflict; it does not resolve it.
+
+That makes `tasks/todo.md` open items 1 and 3 sharper rather than softer: decompose the weekly change
+into its p⁰ and μ parts, and decide whether hurdle-Weibull should simply run `constant_contacts = true`,
+which is what its posterior says under any prior loose enough to let it speak.

@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (rho_diag, rho_gap, log_eta; and, for the separable spatio-temporal regime, rho_time,
+# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -16,7 +16,7 @@
 Load the cached chain for `(lbl, origin, h)` and rebuild the smoothed directional contact-mean
 matrix μ_{i→j} for one week, once per posterior draw:
 
-    ρ_diag = exp(softclamp(log(rho_diag), RHO_BOUNDS...));  ρ_gap = exp(softclamp(log(rho_gap), RHO_BOUNDS...))
+    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...));  ρ_gap = exp(softclamp(log_rho_gap, RHO_BOUNDS...))
     η = exp(softclamp(log_eta, -3, 2))  (mirrors model)
     u = (mid_p1+mid_p2)/√2 (total age);  v = (mid_p1-mid_p2)/√2 (age gap)
     m32(x) = (1+√3 x)·exp(-√3 x)                                    # Matérn 3/2 (`-m32`, 2026-08-05)
@@ -26,9 +26,9 @@ matrix μ_{i→j} for one week, once per posterior draw:
 
 with the per-week rate `rvec` built for the requested `week` (`wk`):
 
-- **Separable spatio-temporal regime** (`rho_time` present; the cached `contacts="temporal"`
+- **Separable spatio-temporal regime** (`log_rho_time` present; the cached `contacts="temporal"`
   chains): scalar intercept `c`, temporal-level GP and matrix-normal structure field share the
-  temporal Cholesky `Lt` built from `ρ_time = exp(softclamp(log(rho_time), RHO_TIME_BOUNDS...))` over the
+  temporal Cholesky `Lt` built from `ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))` over the
   full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
@@ -66,23 +66,20 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # reconstructed μ / C* is silently wrong. See the constants' docstring.
     pnames = string.(names(chn, :parameters))
 
-    # ---- which LENGTH-SCALE generation is this chain? (`-m32` 2026-08-05, `-ig` 2026-08-06) ----
-    # `model_degree` uses a SEPARABLE ANISOTROPIC kernel with TWO length-scales, so the age-gap
-    # length-scale must be present — and since `-ig` it is sampled as the CONSTRAINED `rho_gap`,
-    # not `log_rho_gap`. So this one sniff now rejects TWO wrong generations:
-    #   • `-diag` (short-lived, 2026-08-05) had no age-gap length-scale at all; and
-    #   • `-m32`/`-t0` had it as `log_rho_gap` (Normal on log ρ) rather than InverseGamma on ρ.
-    # Replaying either through the formula below rebuilds a DIFFERENT kernel — every μ / C* /
-    # contact matrix / CCDF would be wrong with nothing raised. The `zrows` sniff below cannot
-    # catch it (the `z` shape is identical across all three), so it needs its own.
-    # NOTE this guard has been INVERTED once already (2026-08-05, when it refused chains that
-    # CARRIED `log_rho_gap`) — check the direction before editing.
+    # ---- which SPATIAL KERNEL generation is this chain? (`-m32`, 2026-08-05) ----
+    # `model_degree` uses a SEPARABLE ANISOTROPIC kernel with TWO length-scales, so `log_rho_gap`
+    # must be present. A chain lacking it was fitted under the short-lived `-diag` generation
+    # (diagonal-only smoothing, one length-scale), and replaying it through the formula below would
+    # silently rebuild a DIFFERENT kernel — every μ / C* / contact matrix / CCDF would be wrong with
+    # nothing raised. The `zrows` sniff below cannot catch this (the `z` shape is identical to
+    # `-diag`'s), so it needs its own. NOTE this guard was INVERTED on 2026-08-05: it previously
+    # refused chains that CARRIED `log_rho_gap`.
     # ⚠ It does NOT distinguish `-m32` from the pre-`-diag` squared-exponential generation, which
-    # also carried two length-scales under the same names — that fork is caught by the token below.
-    if !any(n -> n == "rho_gap", pnames)
-        @warn "chain has no `rho_gap`: either the `-diag` diagonal-only kernel, or a pre-`-ig` \
-               chain carrying `log_rho_gap` (Normal on log ρ) instead of InverseGamma on ρ. \
-               Refusing to reconstruct rather than replay it through the wrong parameterisation." path
+    # also carried two length-scales — that fork is caught by the cache token instead, since `-m32`
+    # renamed it. Do not rely on this sniff alone if you stage a chain under a hand-written filename.
+    if !any(n -> n == "log_rho_gap", pnames)
+        @warn "chain has no `log_rho_gap`, i.e. the `-diag` diagonal-only spatial kernel. \
+               Refusing to reconstruct rather than replay it through the two-length-scale kernel." path
         return nothing
     end
     # ---- which KERNEL FAMILY? (`-m32`, 2026-08-05) ----
@@ -99,10 +96,8 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         return nothing
     end
 
-    # `-ig`: the chain stores the CONSTRAINED ρ (InverseGamma + Turing bijector), so take log first —
-    # the model computes exp(_softclamp(log(rho_*), …)) and this must reproduce it exactly.
-    ρ_diag = exp.(_softclamp.(log.(vec(Array(chn[:rho_diag]))), RHO_BOUNDS...))   # soft-bounded, mirrors model
-    ρ_gap  = exp.(_softclamp.(log.(vec(Array(chn[:rho_gap]))),  RHO_BOUNDS...))   # soft-bounded, mirrors model
+    ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))   # soft-bounded, mirrors model
+    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))   # soft-bounded, mirrors model
     η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
     D = length(ρ_diag)
     # rotated (diagonal / anti-diagonal) coordinates for the 28 pairs, √2-normalised (mirrors model).
@@ -145,14 +140,14 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     end
     μ = Array{Float64,3}(undef, D, A, A)
 
-    if any(n -> n == "rho_time", pnames)                     # separable spatio-temporal regime
+    if any(n -> n == "log_rho_time", pnames)                 # separable spatio-temporal regime
         # infer Tn from the structure-field names z[p,t] (z_c[t]/z_s/z_i don't match "^z\[")
         Tn = maximum(parse(Int, match(r"^z\[\d+\s*,\s*(\d+)\]$", n).captures[1])
                      for n in pnames if occursin(r"^z\[\d+\s*,\s*\d+\]$", n))
         wk = week_index === nothing ? Tn : week_index
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
-        ρ_time = exp.(_softclamp.(log.(vec(Array(chn[:rho_time]))), RHO_TIME_BOUNDS...))  # D
+        ρ_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))  # D
         Z  = Array{Float64,3}(undef, D, zrows, Tn)           # structure-field raw z[p,t]; `zrows`, NOT `P` — see the generation sniff above
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue

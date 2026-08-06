@@ -287,21 +287,14 @@ end
     # latent level c/c0 to O(1) (absolute log(pop)≈15.6 otherwise forces c≈−15.6 and, at the
     # old clamp, the degenerate μ≡403 saturation; see tasks/lessons.md).
     logpop = log.(pop ./ pop[1])
-    # `-ig` (2026-08-06, user request): ρ is sampled DIRECTLY from an InverseGamma, not as a Normal
-    # on log ρ. Turing's bijector supplies the positivity constraint and the Jacobian, so the chain
-    # column is the CONSTRAINED `rho_diag` — note the names lost their `log_` prefix, which is the
-    # in-chain signal distinguishing this generation (the latent COUNT is unchanged at 389/977).
-    rho_diag ~ InverseGamma(cfg.gp_len_prior...)   # total-age direction
-    rho_gap  ~ InverseGamma(cfg.gp_len_prior...)   # age-gap direction (assortativity)
+    log_rho_diag ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # total-age direction
+    log_rho_gap  ~ Normal(cfg.gp_len_prior[1], cfg.gp_len_prior[2])   # age-gap direction (assortativity)
     log_eta ~ Normal(cfg.gp_scale_prior[1], cfg.gp_scale_prior[2])
     # UNITS: both ρ live on the rotated (`su`, `df`) scale, which is √2× an age difference — so
     # ρ = 20 is an effective age-difference length-scale of 20/√2 = 14.1 yr. The two share ONE prior
     # (`gp_len_prior`), as they did before `-diag`.
-    # ⚠ THE SOFT-CLAMPS STAY. The prior discourages extreme ρ but does not bound it: Turing samples
-    # these in an unconstrained log space, and Pathfinder's LBFGS overflows `exp` on aggressive steps
-    # (tasks/lessons.md 2026-07-11). `log(rho_*)` is safe — the bijector guarantees ρ > 0.
-    ρ_diag = exp(_softclamp(log(rho_diag), RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
-    ρ_gap  = exp(_softclamp(log(rho_gap),  RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
+    ρ_diag = exp(_softclamp(log_rho_diag, RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
+    ρ_gap  = exp(_softclamp(log_rho_gap,  RHO_BOUNDS...))   # length-scale (age-yrs), soft-bounded
     η = exp(_softclamp(log_eta, -3.0, 2.0))               # GP marginal scale, soft-bounded
     c0 = mean(ds.log_emp .- logpop')                      # smooth mean-fn anchor (pooled c0)
     mid = ds.mid
@@ -487,16 +480,8 @@ end
         #     aspirational: without it the field's per-week mean is a second copy of cₜ and the two
         #     amplitudes are confounded.
         # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled.
-        # `-ig`: InverseGamma on ρ_time itself (see the rho_diag/rho_gap note above). ⚠ The
-        # InverseGamma right tail is POLYNOMIAL and so heavier than the log-normal it replaces —
-        # measured P(ρ_time > 11 wk) 5.6e-07 → 4.0e-05, P(> 26 wk) 1.2e-13 → 5.2e-08. Tail-matching
-        # the old 90% interval kept the absolute mass past the window at ~1 in 25 000, but ρ_time
-        # drifting to 20–27 wk is this model's recurring failure, so THIS is the number to watch at
-        # a refit. ⚠ CORRECTED after the refit — see framework.jl `gp_time_len_prior`:
-        # ρ_time went to 66.2/47.3 wk (hweibull) but its ESS TRIPLED and sub-100 coords fell 38→10.
-        # The drift predates `-ig` (+7σ in the OLD prior); do NOT raise α to chase a passing number.
-        rho_time ~ InverseGamma(cfg.gp_time_len_prior...)
-        ρ_time = exp(_softclamp(log(rho_time), RHO_TIME_BOUNDS...))   # weeks, soft-bounded
+        log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
+        ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
         # temporal Cholesky over the Tn window weeks — Matérn 3/2, matching `Kp` (see `_m32`).
         # THIS IS THE KERNEL THAT WAS BREAKING NUTS. Under the squared exponential `Kt` went
         # numerically low-rank as ρ_time grew (rank 10 of 12 by ρ_time = 4, rank 4 by 63), `Lt`'s
@@ -523,7 +508,7 @@ end
         # level itself is pinned by the data. `z_c` drops Tn → Tn−1 ⇒ Stage 1 goes 390→389 (NegBin)
         # and 978→977 (hurdle-Weibull). The dimension saving is incidental; identifiability is the
         # point. ⚠ Those counts coincide with the short-lived `-diag` generation's; the models are
-        # unrelated — tell them apart by `rho_gap` (present and UNPREFIXED here since `-ig`) and the token.
+        # unrelated — tell them apart by `log_rho_gap` (present here) and by the token.
         #
         # LEVEL ONLY — do NOT also project the structure field's time axis. `R`'s per-pair mean over
         # weeks duplicates nothing (no other parameter carries persistent age-pair structure), so
