@@ -85,7 +85,12 @@ src/
                                1j data explore · 2j duration · 3j effective degree · 4j Danon [legacy] ·
                                5j group contacts · 6j fitting dist · 7j weekly age-pair · 8j forecast fitting ·
                                9j forecast diagnostics/scoring · 10j model diagnostics · 11j weekly identifiability + shrinkage ·
-                               12j Stage-1 NUTS chain convergence (one origin × both degree models)
+                               12j Stage-1 NUTS chain convergence (one origin × both degree models) ·
+                               13j model diagnostics, h=1 ONLY — a variant of 10j for generations fitted at a single
+                                 horizon. Generated from 10j by `tmp/build_13j_nb.py` (never hand-edit); the h1 lever is
+                                 `FrameworkConfig(horizons=1:1)` and figures go to `res/13j/`. EXISTS BECAUSE running 10j
+                                 against h1-only artefacts does not fail loudly — `two_stage_forecast` → `fit_or_load_stage2`
+                                 FITS a missing artefact, silently launching NUTS for h=2,3,4.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 
