@@ -107,12 +107,36 @@ One commit. Then archive the 0.95 baseline and refit the same 4 cells
       (measured above) and α must rise — that is the one predicted failure mode.
 - [ ] 12j both origins + `tmp/verify_12j.jl`.
 
-## Success criteria
+## Success criteria — RESULT (refit 2026-08-06)
 
-The prior family changes with the calibration held fixed, and nothing silently reads a stale chain.
-Secondary, and genuinely open: whether the boundary-avoiding lower tail helps the GP hyperparameters'
-mixing — `log_rho_diag`/`log_eta` are the binding constraint (`ESS 38–92` at `target_accept = 0.95`).
-There is no strong prior reason it will; this is a measurement, not a prediction.
+**Sampling improved substantially; the ρ_time acceptance test FAILED for hurdle-Weibull.** Both are
+real and they point the same way.
+
+| cell | coords ESS<100 (0.95 → `-ig`) | min ESS | ρ_time median (0.95 → `-ig`) | ρ_time ESS |
+|---|---|---|---|---|
+| negbin @ 2020-11-15 | 3 → **2** | 47.6 → **68.9** | 2.27 → 2.24 ✓ | 129.2 |
+| negbin @ 2021-05-09 | 10 → **5** | 61.0 → 58.2 | 2.13 → 2.16 ✓ | 107.2 |
+| hweibull @ 2020-11-15 | 14 → **1** | 30.7 → **93.1** | 26.79 → **66.20** ✗ | **277.7** |
+| hweibull @ 2021-05-09 | 11 → **2** | 59.7 → **75.8** | 20.42 → **47.30** ✗ | **188.3** |
+
+Sub-100 coordinates fell **38 → 10** overall, divergences 1 → 0, depth still 7.0–7.5 with 0 % at cap.
+
+**The ρ_time failure is NOT a prior-calibration failure, and the documented remedy ("α must rise") is
+the wrong reading.** ρ_time was ALREADY at 20–27 wk for hurdle-Weibull under the tight log-normal —
+i.e. **+7σ into that prior's tail**. `-ig` did not create the drift; its heavier polynomial tail
+merely stopped the prior from fighting the likelihood so hard, and ρ_time moved to where the
+likelihood actually wants it (~47–66 wk). The decisive evidence is that **ρ_time's own ESS more than
+tripled** (76–80 → 188–278) and every other block improved with it: a prior–likelihood conflict was
+costing mixing everywhere, and removing it helped.
+
+So raising α would buy a passing number by fighting the data — exactly what `framework.jl`'s
+`RHO_BOUNDS` docstring warns against ("a length-scale is only restrained by its prior if the
+likelihood is informative about it"). ⚠ Update that "α must rise" note: the honest conclusion is that
+**the hurdle-Weibull likelihood wants near-constant contacts over a 12-week window**, which is open
+item 1/3 below (the p⁰-versus-μ decomposition), not a prior problem.
+
+NegBin is untouched by all of this (2.24/2.16, unchanged), so the two degree families genuinely
+disagree about temporal structure — that is the finding.
 
 ---
 

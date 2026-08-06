@@ -492,7 +492,9 @@ end
         # measured P(ρ_time > 11 wk) 5.6e-07 → 4.0e-05, P(> 26 wk) 1.2e-13 → 5.2e-08. Tail-matching
         # the old 90% interval kept the absolute mass past the window at ~1 in 25 000, but ρ_time
         # drifting to 20–27 wk is this model's recurring failure, so THIS is the number to watch at
-        # a refit: if the posterior climbs past ~4 wk, the prior family is the cause and α must rise.
+        # a refit. ⚠ CORRECTED after the refit — see framework.jl `gp_time_len_prior`:
+        # ρ_time went to 66.2/47.3 wk (hweibull) but its ESS TRIPLED and sub-100 coords fell 38→10.
+        # The drift predates `-ig` (+7σ in the OLD prior); do NOT raise α to chase a passing number.
         rho_time ~ InverseGamma(cfg.gp_time_len_prior...)
         ρ_time = exp(_softclamp(log(rho_time), RHO_TIME_BOUNDS...))   # weeks, soft-bounded
         # temporal Cholesky over the Tn window weeks — Matérn 3/2, matching `Kp` (see `_m32`).

@@ -1612,7 +1612,9 @@ but its right tail is polynomial (∝ρ^−α−1) where log-normal's is not. Me
 That matters here specifically because ρ_time drifting to 20–27 weeks over a 12-week window is this
 model's recurring failure. Tail-matching kept the ABSOLUTE mass past the window at ~1 in 25 000, which
 is why it was judged acceptable — but the standing check is now: **if a refit puts ρ_time past ~4 wk,
-the prior family is the cause and α must rise.** Conversely the lower tail is much thinner
+CHECK ρ_time's ESS before blaming the prior.** At the refit it went to 66.2/47.3 wk
+(hweibull) — but its ESS TRIPLED and sub-100 coords fell 38 → 10, i.e. the OLD prior had been
+fighting the likelihood. Raising α would fight the data. Conversely the lower tail is much thinner
 (P(ρ_diag < 5) 3.7e-05 → 4.5e-07), which is the property being bought. **Always tabulate BOTH tails
 against the prior you are replacing; "boundary-avoiding" describes one end only.**
 
@@ -1625,3 +1627,35 @@ the NAME: `rho_gap` ⇒ `-ig`, `log_rho_gap` ⇒ `-m32`/`-t0`, absent ⇒ `-diag
 `10j_viz_utils.jl` / `8j_viz_utils.jl` were updated in the same commit — note they have now been
 inverted twice, so **check the direction before editing them**. `tmp/verify_sumzero.jl` is the only
 runtime cross-check on the 10j mirror; it passed at 2.685e-15 after the rewrite.
+
+### Refit outcome (2026-08-06) — the acceptance test failed and the acceptance test was wrong
+
+`-ig`'s predicted failure mode fired: ρ_time went to **66.2 / 47.3 wk** for hurdle-Weibull, past the
+"≲ 4 wk" bar written into the plan. The pre-registered remedy was "α must rise". **That remedy was
+wrong, and the reason is worth keeping.**
+
+| cell | ρ_time (log-normal → `-ig`) | ρ_time ESS | coords ESS<100 | min ESS |
+|---|---|---|---|---|
+| negbin @ 2020-11-15 | 2.27 → 2.24 | 129 | 3 → 2 | 47.6 → 68.9 |
+| negbin @ 2021-05-09 | 2.13 → 2.16 | 107 | 10 → 5 | 61.0 → 58.2 |
+| hweibull @ 2020-11-15 | 26.79 → **66.20** | **278** | 14 → **1** | 30.7 → **93.1** |
+| hweibull @ 2021-05-09 | 20.42 → **47.30** | **188** | 11 → **2** | 59.7 → **75.8** |
+
+ρ_time was **already at 20–27 wk under the tight log-normal — +7σ into that prior's tail.** The drift
+therefore predates `-ig` entirely; the heavier polynomial tail did not create it, it stopped the prior
+from fighting the likelihood so hard. The decisive evidence is not the location but the **mixing**:
+ρ_time's own ESS TRIPLED (76–80 → 188–278), sub-100 coordinates fell **38 → 10** across the four
+chains, divergences went 1 → 0, and min ESS rose in three cells of four. A prior–likelihood conflict
+was costing effective samples *everywhere in the model*, and relieving it helped every block.
+
+**Generalisable:** when a length-scale posterior sits far into its prior's tail, look at that
+parameter's ESS before tightening the prior. Tightening buys a passing number by fighting the data,
+and `framework.jl`'s own `RHO_BOUNDS` docstring already warned it ("a length-scale is only restrained
+by its prior if the likelihood is informative about it"). Here the honest conclusion is a MODELLING
+one: the hurdle-Weibull likelihood wants near-constant contacts over a 12-week window, while NegBin
+(2.24/2.16, unmoved) does not. The two degree families disagree about temporal structure — that is
+the finding, not a prior to retune.
+
+**Also:** a pre-registered acceptance criterion is worth keeping even when it fails, because the
+failure is what forced the diagnosis. But state it as "watch X" rather than "if X then do Y" — the
+remedy is exactly the part that cannot be known in advance.
