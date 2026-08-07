@@ -70,6 +70,17 @@ say("="^96)
 # `Base._include_dependency` pushes each included file's path as it goes.
 const SRC_ANCHOR = joinpath("/workdir/src", basename(PATH) * ".jl")
 
+# ⚠ Julia BUFFERS stdout/stderr when they are redirected to a file rather than a TTY, so `@info`
+# from inside a long-running cell — `prefit_stage1!`'s per-origin heartbeat, and any
+# `@warn "stage1 fit failed"` — sits in the process buffer indefinitely. Measured: the log stopped
+# growing the moment cell 4 began and had written nothing 24 minutes later, while 24 chains had
+# been fitted. `say()` flushes BETWEEN cells, which is no help when one cell runs for days.
+# A background flusher fixes it for every writer at once, whatever produces the output.
+Threads.@spawn while true
+    flush(stdout); flush(stderr)
+    sleep(5)
+end
+
 t_all = time()
 for (n, i) in enumerate(keep)
     say("\n" * "-"^96)

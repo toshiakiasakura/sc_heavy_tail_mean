@@ -27,12 +27,21 @@ count() { ls -1 "$DIR" 2>/dev/null | grep -c -- "^8j_${1}_.*_${TOKEN}_[0-9-]*_h[
 
 t_start=$(date +%s)
 c1_start=$(count s1); c2_start=$(count s2)
+based=0     # has the rate baseline been re-anchored to the first observed progress?
 printf '=== watch_grid %s | start s1=%d/%d s2=%d/%d | every %ds ===\n' \
        "$TOKEN" "$c1_start" "$N1" "$c2_start" "$N2" "$IVL" | tee -a "$LOG"
 
 while true; do
     now=$(date +%s); el=$(( now - t_start ))
     c1=$(count s1); c2=$(count s2)
+    # Re-anchor the baseline the FIRST time progress is seen. The watcher is usually started before
+    # the fits are (package load alone is minutes), and averaging the rate over that dead time makes
+    # the ETA meaningless — measured 29.9 h against an actual ~4 h because 28 idle minutes were in
+    # the denominator. From here the rate is over fitting time only.
+    if [ "$based" -eq 0 ] && { [ "$c1" -gt "$c1_start" ] || [ "$c2" -gt "$c2_start" ]; }; then
+        based=1; t_start=$(( now - 1 )); c1_start=$c1; c2_start=$c2; el=1
+        echo "    (rate baseline anchored at first observed progress)" | tee -a "$LOG"
+    fi
     # Rate over THIS run only (c*_start), so a resumed run is not flattered by what it inherited.
     d1=$(( c1 - c1_start )); d2=$(( c2 - c2_start ))
     stage="s1"; done_n=$d1; todo_n=$(( N1 - c1 ))
