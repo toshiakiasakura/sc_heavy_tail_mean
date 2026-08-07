@@ -1887,3 +1887,57 @@ that metric only, and count what you changed.
 
 ⚠ Do not read the smoke's coverage numbers as production results: 3 origins × 7 ages × 4 horizons is
 84 units per model, against the 560 units CLAUDE.md's 0.498/0.896 figure was measured on.
+
+---
+
+## 2026-08-07 — The 63-origin grid OOMs a single process; batch it, and GC per origin
+
+**Symptom.** The Pathfinder grid ran fine for 15 origins and then the process **vanished** — no
+error, no stack trace, nothing in its own log, the last line a routine Pathfinder warning. It sat
+dead for 6.5 h at 151/504 while the watcher happily logged "s1 151/504" every ten minutes.
+
+**Cause, from the watcher's own memory column** (which is why that column is there):
+
+| time | s1 | julia RSS | per-origin wall |
+|---|---|---|---|
+| 06:03 | 55 | 10.3 GiB | 224 s |
+| 06:23 | 95 | 17.8 GiB | 242 s |
+| 06:43 | 128 | 21.8 GiB | 283 s |
+| 06:53 | 136 | 23.7 GiB | 566 s |
+| 07:13 | 144 | **25.0 GiB** | **1134 s** |
+| 07:23 | 151 | 1.2 GiB | — (killed 07:16) |
+
+Monotonic growth of ~1 GiB **per origin**, against 27.4 GiB of RAM, with per-origin wall time
+inflating 5× as the GC thrashed on the way up. This is not the per-fit working set — concurrency was
+7 Pathfinder fits, ~1 GiB each. The per-origin data (`wd0`, `apd_by_h`, and the `do_fit` closures
+over them) *is* garbage once the `@sync` returns, but Julia will not run a full collection while the
+heap still looks healthy, so it accumulates until the kernel intervenes.
+
+**Two fixes, deliberately both.**
+
+1. **`GC.gc()` at the end of each origin** in `prefit_stage1!` and `prefit_stage2!`, plus
+   `Sys.maxrss()` in the per-origin `@info` so the next occurrence is visible in the fit log itself
+   rather than only in the watcher. Costs ~a second against a 4-minute origin.
+2. **`tmp/run_grid_batched.sh`** — run the grid in batches of N origins, each batch a **fresh Julia
+   process**, sliced with the existing `ORIGIN_MIN`/`FIT_END` env knobs. A process that exits every
+   8 origins cannot accumulate *whatever* the underlying cause, and the run is fully resumable, so a
+   batch boundary costs only the ~30 s package load. It stops on the first non-zero batch exit
+   rather than powering through, because a batch that dies has either hit the same wall (the next
+   will too) or found a real fit error.
+
+Fix 1 alone might be enough. Fix 2 is what makes that not matter.
+
+**The transferable lessons.**
+
+- **A SIGKILL leaves nothing in the victim's log.** "No error message" is evidence *for* OOM, not
+  against it. Look at the memory trace, not the stack trace that isn't there.
+- **A progress watcher that only counts artefacts cannot tell "finished" from "died".** Ours logged
+  a flat 151/504 for six hours and read as normal. The memory and load columns are what diagnosed
+  it; a liveness check on the fit PID is what should have *reported* it — the counter alone is not
+  a health check.
+- **Rising per-iteration time is the early warning.** 224 → 242 → 262 → 283 → 566 → 1134 s was
+  visible in the log for an hour before the kill, and is the signature of GC pressure. Worth
+  alerting on, not just recording.
+- ⚠ **This directly threatens Phase 3.** The formal NUTS run is the same 63 origins with fits that
+  are ~10× longer and a working set ~4× larger. It would have hit this wall too, just later and
+  after far more wasted compute.

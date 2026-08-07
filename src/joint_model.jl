@@ -1348,7 +1348,16 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
             # prints NOTHING between the two warm-fit lines (first origin only) and the final
             # summary — over a 63-origin Stage-1 NUTS grid that is days of silence, and the artefact
             # count on disk becomes the only way to tell a running fit from a hung one.
-            @info "prefit_stage1!: origin $(win_o.origin) done ($(oi)/$(length(wins)), $(length(specs)) fits, $(round(time() - t_origin; digits = 1)) s, $(fitted[]) fitted / $(failed[]) failed so far)"
+            # ⚠ FULL COLLECTION PER ORIGIN, and it is not defensive clutter. Measured 2026-08-07 on
+            # the 63-origin Pathfinder grid: RSS climbed monotonically 10.3 -> 13.6 -> 17.8 -> 20.7
+            # -> 21.8 -> 23.7 -> 25.0 GiB over ~12 origins against 27.4 GiB of RAM, per-origin wall
+            # time went 224 s -> 1134 s as the GC thrashed, and the process was OOM-killed at
+            # origin 16 with no error, no stack trace and nothing in its log. The per-origin working
+            # set (`wd0`, `apd_by_h`, and the `do_fit` closures over them) IS garbage once the
+            # `@sync` returns, but Julia's heuristic will not run a full collection while the heap
+            # looks healthy, so it accumulates. `GC.gc()` costs ~a second against a 4-minute origin.
+            GC.gc()
+            @info "prefit_stage1!: origin $(win_o.origin) done ($(oi)/$(length(wins)), $(length(specs)) fits, $(round(time() - t_origin; digits = 1)) s, $(fitted[]) fitted / $(failed[]) failed so far, RSS $(round(Sys.maxrss() / 2^30; digits = 1)) GiB)"
         end
     finally
         LinearAlgebra.BLAS.set_num_threads(old_blas)
@@ -1407,7 +1416,8 @@ function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                 @warn "stage2 fit failed" origin=win_o.origin degree=degree_label(s.dm) ngm=ngm_label(s.nb) h=s.h exception=(err, catch_backtrace())
             end
         end
-        @info "prefit_stage2!: origin $(win_o.origin) done ($fitted fitted, $failed failed)"
+        GC.gc()   # same reason as prefit_stage1! — see the note there
+        @info "prefit_stage2!: origin $(win_o.origin) done ($fitted fitted, $failed failed, RSS $(round(Sys.maxrss() / 2^30; digits = 1)) GiB)"
     end
     return (; fitted, failed, skipped, concurrency = K)
 end
