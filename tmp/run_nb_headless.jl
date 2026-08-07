@@ -60,6 +60,16 @@ for k in ("STAGE1_USE_NUTS", "FIT_END", "ORIGIN_MIN", "S1_CONCURRENCY", "S2_CONC
 end
 say("="^96)
 
+# Anchor relative `include` at src/, as a Jupyter kernel does. Cell 1's bare
+# `include("forecast_utils.jl")` resolves against `dirname(task_local_storage(:SOURCE_PATH))` —
+# and `Base.include_string` does NOT set `:SOURCE_PATH`, so it inherits THIS script's, i.e.
+# /workdir/tmp, and dies on /workdir/tmp/forecast_utils.jl. Passing an absolute `filename` to
+# `include_string` does not help (it only labels line numbers), and `include` cannot be shadowed in
+# `Main` ("cannot define function include; it already has a value"). Setting the storage directly is
+# the actual mechanism; nested includes inside forecast_utils.jl then resolve on their own, because
+# `Base._include_dependency` pushes each included file's path as it goes.
+const SRC_ANCHOR = joinpath("/workdir/src", basename(PATH) * ".jl")
+
 t_all = time()
 for (n, i) in enumerate(keep)
     say("\n" * "-"^96)
@@ -69,7 +79,13 @@ for (n, i) in enumerate(keep)
     try
         # `include_string` into Main evaluates at top level, exactly as a kernel evaluates a cell —
         # so `let` blocks, function definitions and soft scope all behave the same.
-        Base.include_string(Main, srcs[i], "$(basename(PATH)):cell$(i)")
+        # ⚠ The filename must be ABSOLUTE and under src/: a nested `include("forecast_utils.jl")`
+        # resolves relative to `dirname(filename)`, NOT to `pwd()` as it would in a kernel. With a
+        # bare basename it resolved against this script's own directory and died on
+        # `/workdir/tmp/forecast_utils.jl`.
+        task_local_storage(:SOURCE_PATH, SRC_ANCHOR) do
+            Base.include_string(Main, srcs[i], "$(basename(PATH)):cell$(i)")
+        end
     catch err
         say("\n*** CELL $(n) FAILED after $(hms(round(Int, time() - t0))) ***")
         showerror(stdout, err, catch_backtrace()); println(); flush(stdout)
