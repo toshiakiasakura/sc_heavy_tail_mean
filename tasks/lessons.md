@@ -1925,7 +1925,17 @@ heap still looks healthy, so it accumulates until the kernel intervenes.
    rather than powering through, because a batch that dies has either hit the same wall (the next
    will too) or found a real fit error.
 
-Fix 1 alone might be enough. Fix 2 is what makes that not matter.
+**Fix 1 alone is NOT enough — measured.** Batch 3 (8 fresh origins, `GC.gc()` per origin) grew
+current RSS 10.2 → 18.8 GiB, i.e. **1.08 GiB/origin**, against 1.2 GiB/origin before the fix.
+Essentially unchanged. What `GC.gc()` *did* buy is that per-origin wall time stayed flat at
+190–251 s instead of inflating to 1134 s, because the batch ends before the process reaches the
+pressure zone. **The batching is what makes the run survivable; the per-origin GC only keeps it
+fast.** Keep both, but do not mistake which one is load-bearing.
+
+⚠ **Do not read `Sys.maxrss()` as current usage.** It is a high-water mark and therefore monotone by
+construction, so it can neither confirm nor refute accumulation — it will rise even for a process
+whose live set is flat. The watcher's current-RSS column is the measurement that settles it. I
+misread this once and briefly concluded the opposite of the truth.
 
 **The transferable lessons.**
 
