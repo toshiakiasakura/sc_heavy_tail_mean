@@ -964,11 +964,22 @@ For one $(dm, nb, \text{origin}, h)$:
    Pathfinder runs first regardless, and NUTS starts from its `fit_distribution` mean in the
    *unconstrained* space, so the cost is **additive**, not a replacement. Set
    `stage1_use_nuts = false` for the Pathfinder-only preliminary. NUTS is configured explicitly —
-   `cfg.stage1_nuts_adapts = 1000`, `_draws = 500`, `_target_accept = 0.95`, `_max_depth = 10` —
+   `cfg.stage1_nuts_adapts = 1000`, `_draws = 2000`, `_target_accept = 0.95`, `_max_depth = 10` —
    because the convenience constructor `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, i.e.
    only $125$ warmup iterations to adapt a step size and diagonal metric in $389$/$977$ dimensions.
    **One chain per fit**, so there is no $\hat R$; health is reported by `_nuts_diagnostics`
-   (divergence count, fraction of transitions saturating `max_depth`, minimum ESS).
+   (divergence count, fraction of transitions saturating `max_depth`, minimum ESS) and, split at the
+   half-way point, by 12j's split-$\hat R$. `_draws` was raised $500 \to 2000$ on 2026-08-07 for the
+   formal 63-origin run: only the sampling leg scales, so the per-fit total goes
+   $1118/1436/1779/1930\,\mathrm{s} \to \approx 1692/2509/2806/3027\,\mathrm{s}$ ($\times 1.60$,
+   $219 \to 351$ CPU-hours over the 504-fit grid), buying $\approx 4\times$ ESS (pilot minimum
+   $48.5$–$126.2 \Rightarrow \approx 195$–$505$). It is also the discriminating experiment for the
+   split-$\hat R$ failures, which sit at *high* ESS (max $1.085$ at ESS $1023$) and therefore look
+   like first-half/second-half drift rather than autocorrelation: if the $\hat R > 1.01$ count does
+   not fall roughly in proportion to the extra draws, drift is confirmed. Neither the draw count nor
+   `target_accept` nor `ad_backend` is in the cache token, so each is recorded *inside* every
+   `8j_s1_*` artefact (`nuts_draws`, `nuts_adapts`, `target_accept`, `ad_backend`) and audited by
+   `tmp/check_grid.jl`.
    `stage1_moment_draws` then takes $M = $ `cfg.n_stage1_post` $= 100$ posterior draws' raw moments
    (deterministic even-grid subsample).
 2. **Stage 2** — `fit_stage2_pooled(nb, moment_draws, wd, cfg)` forms $\{C^\ast_t\}$ for each Stage-1
