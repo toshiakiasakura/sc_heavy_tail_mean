@@ -1951,3 +1951,48 @@ misread this once and briefly concluded the opposite of the truth.
 - ⚠ **This directly threatens Phase 3.** The formal NUTS run is the same 63 origins with fits that
   are ~10× longer and a working set ~4× larger. It would have hit this wall too, just later and
   after far more wasted compute.
+
+---
+
+## 2026-08-07 — `weighted-hweibull|neighbourhood` is degenerate in the `-ar1` Pathfinder generation
+
+**What the full 63-origin grid shows.** Of that model's 1 764 forecast units (63 origins × 7 ages ×
+4 horizons), **1 029 — 58.3 % — have a wholly non-finite predictive fan**: `±Inf` at every one of the
+19 quantile levels (9 519 `+Inf`, 10 032 `−Inf`, 19 551 rows, 9.7 % of the whole `qall` table). No
+other model has a single non-finite value. On the 41.7 % of units that ARE finite it scores natural
+WIS **1.03e45** and log WIS **9.54**, against 0.40–0.72 log for the other five.
+
+For contrast, the archived pre-`-ar1` generation (`res/pre_ar1_baseline/8j_scores_by_model.csv`,
+the `-hd` Pathfinder grid) scored this same pairing at natural WIS **31 145** and log **0.358** — the
+*best* log-scale WIS of the six. So this is a regression, not a standing property.
+
+⚠ **Do not attribute it to `-ar1` alone.** `-s0`, `-m32`, `-t0` and `-ar1` all separate the two
+generations, and this is the **Pathfinder** pass — Pathfinder fits a normal approximation in 977
+dimensions, which this repo already documents as unreliable there (Pareto k = 9.7/13.0/14.5 ≫ 0.7,
+see `stage1_pathfinder_runs`). The NUTS generation is the experiment that separates "the model is
+broken" from "Pathfinder cannot fit this model", and it costs nothing extra to look, because it is
+being run anyway.
+
+**Mechanism, most likely.** `NeighbourhoodDegreeNGM` uses `C0 = ⟨k²⟩/⟨k⟩`, and hurdle-Weibull's
+second moment carries `gamma(1 + 2/κ)`, which explodes as κ → 0. CLAUDE.md already records that this
+"pushes the optimiser to extremes" and that it "bit the neighbourhood NGM hardest". An extreme κ draw
+gives a supercritical NGM, the renewal iterate overflows, and `two_stage_forecast` — deliberately —
+keeps the `±Inf` rather than fabricating a NaN.
+
+**Scoring consequence, and the bug it exposed.** A single non-finite predicted value makes
+`scoringutils` silently DROP the `bias` column from **every** returned frame while emitting only a
+warning. `score_wis`'s guard asserted on seven metrics and `bias` was the one it omitted, so the
+frame came back well-formed and 9j died three cells later inside `plot_rwis_bias_by_horizon` with
+`column name "bias" not found`. Two fixes:
+
+- whole **units** with any non-finite quantile are dropped (never individual quantiles — a partial
+  fan is an asymmetric interval set, which breaks WIS itself), counted, returned as
+  `n_nonfinite`/`nonfinite_by_model`/`units_by_model`, and `@warn`ed with the per-model percentage;
+- the required-metric assertion now includes `bias` **and runs over all five frames**, because a
+  metric can survive in `by_model` and vanish from `by_model_h`.
+
+**The transferable lesson.** The guard was written for exactly this class of failure and still missed
+it, because it enumerated the metrics someone thought of rather than the metrics the figures
+actually read, and checked one frame of five. When a library reports failure by *omission*, the
+assertion has to be exhaustive on both axes — every metric, every frame — or it merely moves the
+crash somewhere less legible.

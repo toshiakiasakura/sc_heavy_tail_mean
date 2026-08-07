@@ -74,6 +74,25 @@ function score_wis(df_quant::DataFrame)
     # quantiles, log from a copy truncated at 0. Truncation is COUNTED and returned, never silent —
     # the same rule `to_sample_long` follows for its own sanitisations. On data with no negatives
     # this reproduces `transform_forecasts(fun = log_shift, offset = 1)` to 1e-12, verified.
+    # NON-FINITE PREDICTED QUANTILES. `two_stage_forecast` deliberately KEEPS +/-Inf draws (a
+    # pathological Pathfinder draw can give a supercritical NGM, and fabricating a NaN there would
+    # hide it), so a wholly degenerate forecast unit arrives here as Inf at every quantile level.
+    # scoringutils cannot score that, and — worse — a single non-finite value makes it silently DROP
+    # `bias` from EVERY returned frame while emitting only a warning, which is how 9j came to die
+    # three cells later on a missing column rather than here. Whole UNITS are dropped, never
+    # individual quantiles: removing part of a fan would leave an asymmetric interval set, which
+    # breaks WIS itself (see the `round(q; digits=2)` note below for the same failure mode).
+    # Counted and returned per model, because "this model produced an unusable forecast for N% of
+    # its units" is a more important result than the WIS of the remainder.
+    dt[, .bad := !is.finite(predicted)]
+    dt[, .unit_bad := any(.bad), by = FU]
+    n_nonfinite  <- sum(dt$.bad)
+    nonfinite_rows <- if (n_nonfinite > 0) as.data.frame(dt[(.unit_bad),
+                          .(units_dropped = uniqueN(.SD), rows = .N), by = .(model), .SDcols = FU]) else
+                          data.frame(model = character(0), units_dropped = integer(0), rows = integer(0))
+    units_total <- as.data.frame(dt[, .(units_total = uniqueN(.SD)), by = .(model), .SDcols = FU])
+    dt <- dt[!(.unit_bad)][, c(".bad", ".unit_bad") := NULL]
+
     n_neg    <- sum(dt$predicted < 0)
     neg_rows <- if (n_neg > 0) as.data.frame(dt[predicted < 0,
                     .(n = .N, worst = min(predicted)), by = .(model)]) else
@@ -102,6 +121,17 @@ function score_wis(df_quant::DataFrame)
     by_model_h_age = rcopy(R"by_model_h_age")
     n_neg          = Int(rcopy(R"n_neg"))
     neg_by_model   = rcopy(R"neg_rows")
+    n_nonfinite    = Int(rcopy(R"n_nonfinite"))
+    nonfinite_by_model = rcopy(R"nonfinite_rows")
+    units_by_model     = rcopy(R"units_total")
+
+    if n_nonfinite > 0
+        df = leftjoin(nonfinite_by_model, units_by_model; on = :model)
+        df.pct_units_dropped = round.(100 .* df.units_dropped ./ df.units_total; digits = 1)
+        @warn "score_wis: $(n_nonfinite) predicted quantiles were NON-FINITE (±Inf). The whole " *
+              "forecast UNIT was dropped in each case — a partial fan would break WIS's interval " *
+              "structure. These models are NOT scored on the same units as the others:" df
+    end
 
     # Report the truncation loudly. 159 of 9576 rows on the 2026-08-07 three-origin smoke, ALL of
     # them `weighted-hweibull|neighbourhood` at quantile levels 0.05-0.30, worst -2.03e6 against a
@@ -119,9 +149,15 @@ function score_wis(df_quant::DataFrame)
     # quantile endpoint (0.75 -> 0.7500000000000001) makes the interval set asymmetric and reduces
     # `by_model` to ["model","scale","bias"] — wis, both coverages, all 3 WIS components and
     # ae_median gone. Fail loudly instead; see CLAUDE.md "scoringutils v2 quantile levels".
-    required = ["wis", "overprediction", "underprediction", "dispersion",
+    # `bias` is in this list since 2026-08-07: it was the ONE metric not asserted on, and it was
+    # exactly the one scoringutils dropped (on non-finite predictions), so the frame came back
+    # well-formed and 9j died three cells later inside a plotting function. Assert on every metric
+    # any downstream figure reads, across EVERY returned frame — a metric can survive in `by_model`
+    # and vanish from `by_model_h`.
+    required = ["wis", "overprediction", "underprediction", "dispersion", "bias",
                 "interval_coverage_50", "interval_coverage_90", "ae_median"]
-    missing_cols = setdiff(required, names(by_model))
+    missing_cols = union([setdiff(required, names(f)) for f in
+                          (by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)]...)
     if !isempty(missing_cols)
         qs = sort(unique(df_quant.quantile_level))
         error("""
@@ -135,7 +171,8 @@ function score_wis(df_quant::DataFrame)
               Fix: round the levels (`to_quantile_long` does this via `round(q; digits=2)`).""")
     end
     return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age,
-              n_negative = n_neg, negative_by_model = neg_by_model)
+              n_negative = n_neg, negative_by_model = neg_by_model,
+              n_nonfinite, nonfinite_by_model, units_by_model)
 end
 
 # ======================================================================================
