@@ -1839,3 +1839,51 @@ smoke was deleted rather than kept.
 committing 10 h and then ~4 days. It cost ~1 h and caught a 17-day regression that no amount of
 reading would have found — the failure is invisible in the code and contradicts the repository's own
 documented benchmark. Run the cheap end-to-end pass first.
+
+---
+
+## 2026-08-07 — `score_wis` cannot log-transform a Gaussian fan that goes negative
+
+**Symptom.** 9j died in `score_wis` with
+`REvalError: Error in fun(): ! Detected input values < 0`, from
+`transform_forecasts(fq, fun = log_shift, offset = 1)`. `log_shift(x, offset=1) = log(x+1)` is
+undefined below 0, and **scoringutils v2.2.0 errors rather than warning** — earlier versions did not,
+which is why this never surfaced before.
+
+**Why the forecasts go negative, and why it is not noise.** `two_stage_forecast` adds a **Gaussian**
+observation fan (`σ = max(sigma_inf[d]·p, 1e-6)`), so a sufficiently overdispersed cell puts its
+lower quantiles below zero. Measured on the three-origin smoke: **159 of 9576 rows (1.66 %)**, and
+they are not spread around —
+
+- **all 159 in ONE model**, `weighted-hweibull|neighbourhood`
+- **only quantile levels 0.05–0.30** (the lower tail), spread evenly over all 7 ages and all 4 horizons
+- worst **−2.03e6** against a *typical positive forecast of 2.7e4*, i.e. 75× the forecast's own scale
+- observed truth in those very rows is an unremarkable 4.4e3–1.0e5
+
+So this is a real property of that model's predictive — its fan is far too wide — not a rounding
+artefact. It is the same combination CLAUDE.md already flags as the numerically hardest (the
+neighbourhood NGM's `gamma(1+2/κ)` second moment pushing the optimiser to extremes).
+
+**Fix — and why the two scales are now scored from two objects.** The natural scale *must* see the
+raw fan: predicting impossible values is exactly what WIS should penalise, and truncating first would
+flatter the worst model. The log scale cannot represent it at all. So:
+
+- **natural** ← `score(as_forecast_quantile(dt))` on the raw quantiles, unchanged;
+- **log** ← `score(transform_forecasts(as_forecast_quantile(dt_pos), log_shift, offset = 1,
+  append = FALSE))` where `dt_pos` truncates `predicted` at 0;
+- `rbind` the two and **re-attach `attr(sc, "metrics")`** — `rbind` on a `scores` object drops it and
+  `summarise_scores()` then fails with "Input needs an attribute `metrics`";
+- the truncation is **counted, returned (`n_negative`, `negative_by_model`) and `@warn`ed**, matching
+  the rule `to_sample_long` already follows for its own sanitisations.
+
+**Verified two ways**: identical to `transform_forecasts(append = TRUE)` to 1e-12 on synthetic clean
+data, and an **exact no-op** (max |Δwis| = 0.000e+00) on the five real models that have no negative
+quantile, scored inside the full frame vs. on their own.
+
+**The general point.** A sanitisation that makes a pathological model *scoreable* must not make it
+*look better*. Truncating before the natural-scale WIS would have done exactly that, silently, to the
+one model whose predictive is broken. Apply the minimum transform the metric's domain requires, to
+that metric only, and count what you changed.
+
+⚠ Do not read the smoke's coverage numbers as production results: 3 origins × 7 ages × 4 horizons is
+84 units per model, against the 560 units CLAUDE.md's 0.498/0.896 figure was measured on.

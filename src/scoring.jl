@@ -47,8 +47,15 @@ aggregated **by horizon** across all forecast dates/origins (`by_model_h`), so t
 headline metric is the log-scale, by-horizon WIS (`scale=="log"`). Returns
 `(; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)` with WIS +
 components, bias, and interval coverage; `by_model_h_age` adds the age-stratified
-(model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics.
-Requires `scoringutils` v2 (`as_forecast_quantile`/`transform_forecasts`/`score`).
+(model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics, and
+`n_negative`/`negative_by_model` report predicted quantiles that fell below zero.
+
+⚠ **The two scales are scored from different objects.** The Gaussian observation fan of
+`two_stage_forecast` can push low quantiles below zero, which the natural scale must see and
+penalise, but which `log_shift` cannot represent (scoringutils v2 errors on it). Natural scale =
+raw quantiles; log scale = a copy truncated at 0, with the truncation counted, returned and
+`@warn`ed. Verified identical to `transform_forecasts(fun = log_shift, offset = 1)` when no
+quantile is negative. Requires `scoringutils` v2.
 """
 function score_wis(df_quant::DataFrame)
     @rput df_quant
@@ -56,13 +63,31 @@ function score_wis(df_quant::DataFrame)
     suppressMessages(library(scoringutils))
     suppressMessages(library(data.table))
     dt <- as.data.table(df_quant)
-    fq <- as_forecast_quantile(
-        dt,
-        forecast_unit = c("model","forecast_date","target_date","horizon","age_group"),
-        observed = "observed", predicted = "predicted", quantile_level = "quantile_level")
-    # append a log-scale copy (scale column: "natural" + "log"); score both (inst/1e)
-    fq <- transform_forecasts(fq, fun = log_shift, offset = 1)
-    sc <- score(fq)
+    FU <- c("model","forecast_date","target_date","horizon","age_group")
+
+    # NEGATIVE PREDICTED QUANTILES. `two_stage_forecast` adds a GAUSSIAN observation fan, so a
+    # sufficiently overdispersed cell puts its lower quantiles below zero. WIS on the NATURAL scale
+    # handles that correctly and should see the raw fan — being wrong about impossible values is
+    # exactly what it must penalise. `log_shift` cannot: log(x+1) is undefined below 0, and
+    # scoringutils v2 ERRORS rather than warning (it did not always), which is what broke the
+    # 2026-08-07 run. So the two scales are now scored from two objects: natural from the raw
+    # quantiles, log from a copy truncated at 0. Truncation is COUNTED and returned, never silent —
+    # the same rule `to_sample_long` follows for its own sanitisations. On data with no negatives
+    # this reproduces `transform_forecasts(fun = log_shift, offset = 1)` to 1e-12, verified.
+    n_neg    <- sum(dt$predicted < 0)
+    neg_rows <- if (n_neg > 0) as.data.frame(dt[predicted < 0,
+                    .(n = .N, worst = min(predicted)), by = .(model)]) else
+                    data.frame(model = character(0), n = integer(0), worst = numeric(0))
+    dt_pos <- data.table::copy(dt); dt_pos[predicted < 0, predicted := 0]
+
+    mkfq <- function(d) as_forecast_quantile(d, forecast_unit = FU, observed = "observed",
+                            predicted = "predicted", quantile_level = "quantile_level")
+    sc_nat <- score(mkfq(dt))
+    sc_log <- score(transform_forecasts(mkfq(dt_pos), fun = log_shift, offset = 1, append = FALSE))
+    sc_nat[, scale := "natural"]; sc_log[, scale := "log"]
+    sc <- rbind(sc_nat, sc_log, fill = TRUE)
+    # `rbind` on a `scores` object drops the `metrics` attribute that summarise_scores() requires.
+    attr(sc, "metrics") <- attr(sc_nat, "metrics"); class(sc) <- class(sc_nat)
     by_model    <- as.data.frame(summarise_scores(sc, by = c("model","scale")))
     by_model_h  <- as.data.frame(summarise_scores(sc, by = c("model","horizon","scale")))
     by_model_dt <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","scale")))
@@ -75,6 +100,18 @@ function score_wis(df_quant::DataFrame)
     by_model_dt    = rcopy(R"by_model_dt")
     by_model_dt_h  = rcopy(R"by_model_dt_h")
     by_model_h_age = rcopy(R"by_model_h_age")
+    n_neg          = Int(rcopy(R"n_neg"))
+    neg_by_model   = rcopy(R"neg_rows")
+
+    # Report the truncation loudly. 159 of 9576 rows on the 2026-08-07 three-origin smoke, ALL of
+    # them `weighted-hweibull|neighbourhood` at quantile levels 0.05-0.30, worst -2.03e6 against a
+    # typical positive forecast of 2.7e4 — that is not rounding noise, it is one model's predictive
+    # fan being far too wide, and the log-scale WIS for it is a truncated quantity.
+    if n_neg > 0
+        @warn "score_wis: $(n_neg) of $(nrow(df_quant)) predicted quantiles were < 0 and were " *
+              "TRUNCATED AT 0 for the log scale only (the natural scale scores the raw fan). " *
+              "Concentrated in:" neg_by_model
+    end
 
     # scoringutils DROPS a metric's column when its computation fails, and reports the failure as an
     # R *warning* — so this function would otherwise return a perfectly well-formed frame with the
@@ -97,7 +134,8 @@ function score_wis(df_quant::DataFrame)
               0.75:$(0.75 in qs) 0.95:$(0.95 in qs)
               Fix: round the levels (`to_quantile_long` does this via `round(q; digits=2)`).""")
     end
-    return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)
+    return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age,
+              n_negative = n_neg, negative_by_model = neg_by_model)
 end
 
 # ======================================================================================
