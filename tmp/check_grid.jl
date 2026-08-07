@@ -49,13 +49,20 @@ s1_paths = [stage1_path(dm, o, h; contacts = tag, save_dir = SAVE_DIR)
 s2_paths = [stage2_path(dm, nb, o, h; contacts = tag, save_dir = SAVE_DIR)
             for o in origins, (dm, nb) in combos, h in cfg.horizons]
 
+# ⚠ `ok` is mutated from inside top-level `for` bodies, which are SOFT SCOPE: a bare `ok = false`
+# there silently creates a new local and leaves the global `true`, so the script would print
+# "GRID COMPLETE AND UNIFORM" over a broken grid and exit 0. That false pass has bitten this project
+# repeatedly (see tasks/lessons.md). Every write goes through `fail!`, which is a function and
+# therefore has no soft-scope ambiguity at all.
 ok = true
+fail!() = (global ok = false)
+
 for (lbl, paths) in (("Stage 1", s1_paths), ("Stage 2", s2_paths))
     miss = filter(!isfile, vec(paths))
     @printf("%s: %d / %d present%s\n", lbl, length(paths) - length(miss), length(paths),
             isempty(miss) ? "" : "   ** $(length(miss)) MISSING **")
     if !isempty(miss)
-        ok = false
+        fail!()
         for p in first(miss, MAXLIST); println("    missing  ", basename(p)); end
         length(miss) > MAXLIST && println("    … and $(length(miss) - MAXLIST) more")
     end
@@ -83,7 +90,7 @@ else
     for k in keys_of_interest
         vals = sort(collect(tally[k]), by = x -> -x[2])
         uniform = length(vals) == 1
-        uniform || (ok = false)
+        uniform || fail!()
         @printf("  %-14s %s%s\n", k, join(["$(v) × $(n)" for (v, n) in vals], ",  "),
                 uniform ? "" : "   ** MIXED PROVENANCE **")
     end
@@ -98,7 +105,7 @@ else
             t2[v] = get(t2, v, 0) + 1
         end
         vals = sort(collect(t2), by = x -> -x[2])
-        length(vals) == 1 || (ok = false)
+        length(vals) == 1 || fail!()
         @printf("  %-14s %s%s\n", "s2 ad_backend",
                 join(["$(v) × $(n)" for (v, n) in vals], ",  "),
                 length(vals) == 1 ? "" : "   ** MIXED PROVENANCE **")
@@ -111,7 +118,7 @@ else
         n = size(load(p, "result"), 1)
         @printf("  chain rows     %-58s %d\n", basename(p), n)
         if STAGE1_USE_NUTS && n != cfg.stage1_nuts_draws
-            println("    ** expected $(cfg.stage1_nuts_draws) kept draws **"); ok = false
+            println("    ** expected $(cfg.stage1_nuts_draws) kept draws **"); fail!()
         end
     end
 end
