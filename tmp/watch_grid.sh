@@ -25,6 +25,15 @@ LOG="/workdir/tmp/grid_progress_${TOKEN}.log"
 
 count() { ls -1 "$DIR" 2>/dev/null | grep -c -- "^8j_${1}_.*_${TOKEN}_[0-9-]*_h[0-9]*\.jld2$"; }
 
+# LIVENESS. A counter is not a health check: on 2026-08-07 the fit process was OOM-killed and this
+# watcher logged a flat "s1 151/504" every ten minutes for six hours, reading exactly like normal
+# progress. A SIGKILL leaves nothing in the victim's log either, so there is no error text to grep
+# for — the only reliable signal is whether the process still exists.
+# ⚠ Token-AGNOSTIC: it asks "is a fit running", not "is MY fit running", so a concurrent run for a
+# different token would mask this one's death. Acceptable only because launch_8j.sh refuses to start
+# a second run; if that ever changes, key this on the PID instead.
+alive() { pgrep -f "[r]un_nb_headless.jl" > /dev/null || pgrep -f "[r]un_grid_batched.sh" > /dev/null; }
+
 t_start=$(date +%s)
 c1_start=$(count s1); c2_start=$(count s2)
 based=0     # has the rate baseline been re-anchored to the first observed progress?
@@ -62,13 +71,23 @@ while true; do
     jrss=$(ps -o rss= -C julia 2>/dev/null | awk '{s+=$1} END{printf "%.1f", s/1048576}')
     load=$(awk '{print $1}' /proc/loadavg)
 
-    printf '[%s] s1 %d/%d (%s%%) | s2 %d/%d (%s%%) | %s %s/h ETA %sh | mem %s/%sG julia %sG | load %s\n' \
+    # Report DEAD loudly, and distinguish it from DONE: a stalled counter means one or the other,
+    # and they call for opposite responses.
+    if alive; then health=""; else
+        if [ "$c1" -ge "$N1" ] && [ "$c2" -ge "$N2" ]; then health=" | done"
+        else health=" | *** NO FIT PROCESS RUNNING — grid incomplete, the run has DIED ***"; fi
+    fi
+
+    printf '[%s] s1 %d/%d (%s%%) | s2 %d/%d (%s%%) | %s %s/h ETA %sh | mem %s/%sG julia %sG | load %s%s\n' \
         "$(date '+%Y-%m-%d %H:%M:%S')" \
         "$c1" "$N1" "$(awk -v a=$c1 -v b=$N1 'BEGIN{printf "%.1f", 100*a/b}')" \
         "$c2" "$N2" "$(awk -v a=$c2 -v b=$N2 'BEGIN{printf "%.1f", 100*a/b}')" \
-        "$stage" "$rate" "$eta" "$used" "$tot" "${jrss:-0.0}" "$load" | tee -a "$LOG"
+        "$stage" "$rate" "$eta" "$used" "$tot" "${jrss:-0.0}" "$load" "$health" | tee -a "$LOG"
 
     # Stop once BOTH stages are complete — otherwise this would log forever after the run ends.
     [ "$c1" -ge "$N1" ] && [ "$c2" -ge "$N2" ] && { echo "GRID COMPLETE" | tee -a "$LOG"; break; }
+    # Exit on death too, rather than logging the same dead line forever — an exiting watcher is
+    # itself a signal, and a monitor tailing this file gets one clear event instead of silence.
+    alive || { echo "WATCHER EXIT — fit process gone with the grid incomplete" | tee -a "$LOG"; exit 1; }
     sleep "$IVL"
 done
