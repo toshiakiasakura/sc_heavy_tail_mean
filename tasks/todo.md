@@ -1,27 +1,42 @@
-# TODO — AR(1) temporal correlation (`-ar1`) — 2026-08-06 — DONE, refitted
+# TODO — full-grid run of the `-ar1` generation (2026-08-07)
 
-Committed `079e3b4`. `Kt[s,t] = φ^|s−t|` (AR(1) ≡ exponential ≡ Matérn 1/2) replaces the Matérn 3/2 in
-the time direction only; spatial kernel untouched; `phi_time ~ Uniform(0,1)`; 389/977 unchanged.
-Full rationale, conditioning table and refit outcome are in `src/framework.jl`'s token block and
-`tasks/lessons.md`.
+Plan: `.claude/plans/prancy-sprouting-liskov.md`. Two generations, both from an empty
+`dt_intermediate/`:
 
-**Refit vs the `-t0` @ 0.95 generation it replaced:** better in 3 of 4 cells (min ESS 61.0→126.2,
-47.6→78.4, 30.7→56.4, 59.7→48.5), sub-100 coords 38→29, zero divergences everywhere, depth 7.00.
-NegBin gained most — NOT the prediction. `Lc` spread flat at 1.8 as predicted; `Lt` spread 147 at
-hurdle-Weibull's φ = 0.9998, because that is past the φ ≤ 0.999 grid I swept.
+1. **Rehearsal** — Pathfinder for *both* stages (`STAGE1_USE_NUTS=false`), token
+   `temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1`, then 8j → 9j → 10j → 11j.
+2. **Formal** — Stage 1 NUTS **1000 warmup + 2000 kept draws** (user request; was 500), Stage 2
+   Pathfinder, token `…-ar1-nuts`, monitored; then the same notebooks + 12j.
 
-## THE NEXT ACTION, and it is not another temporal prior
+The two tokens differ, so both live in `dt_intermediate/` without collision.
 
-**Run hurdle-Weibull with `constant_contacts = true`.** Its temporal process has now collapsed to
-exactly constant under a prior that does not fight it (effrank 1.00, lag-8 corr 0.999,
-P(φ>0.99)=1.000) — the third independent measurement of the same preference across three kernels and
-three priors. NegBin is unaffected (φ = 0.891, effrank 2.07) and should stay per-week. That asymmetry
-— the two degree families genuinely disagreeing about temporal structure — is the finding to act on.
+## Phase 0 — done
 
-Secondary: the `phi_time` prior is deliberately Uniform and is the first knob to revisit IF a reason
-appears that is not "the posterior is high" — a high φ is the measurement.
+- [x] `scoringutils` 2.2.0 installed (was absent; 9j's `score_wis`/`score_logs` would have hard-failed)
+- [x] `STAGE1_USE_NUTS` read from ENV in 8j/9j/10j/11j — **the landmine**: all four build their own
+      `cfg`, and a token mismatch does not error, it silently refits (see the new CLAUDE.md gotcha)
+- [x] `FIT_END`/`ORIGIN_MIN` from ENV in 8j and 9j, defaults reproducing the 63-origin set
+- [x] 8j calls `prefit_stage1!` and `prefit_stage2!` separately, with per-stage concurrency —
+      `fit_concurrency()` assumes 1 GiB/fit but Stage-1 NUTS peaks at 3.4–4.0 GiB, so its 9 would
+      have over-subscribed 27 GiB of RAM by ~4×
+- [x] `stage1_nuts_draws` 500 → 2000; `nuts_adapts`/`nuts_draws` now recorded in every artefact
+- [x] per-origin `@info` heartbeat in `prefit_stage1!` (it printed nothing for the whole grid before)
+- [x] `tmp/check_grid.jl` (completeness + provenance gate), `tmp/watch_grid.sh` (progress logger)
 
----
+## Budget
+
+| leg | fits | wall |
+|---|---|---|
+| smoke, 3 origins, Pathfinder, 8j→11j | 24 s1 + 72 s2 | ~1.2 h |
+| rehearsal 8j (63 origins) | 504 + 1512 | ~10 h |
+| rehearsal 9j/10j/11j | — | ~2–3 h |
+| **formal Stage 1 (NUTS 1000+2000)** | 504 | **~88 h at 4-way** |
+| formal Stage 2 | 1512 | ~8–14 h |
+| formal 9j/10j/11j/12j | — | ~2–3 h |
+
+Per-fit NUTS cost is the pilot's Pathfinder + warmup unchanged, sampling ×4: 1692/2509/2806/3027 s
+(mean ×1.60 on 500 draws) ⇒ 351 CPU-hours. Everything is resumable — both prefit drivers skip
+existing artefacts — so raising `S1_CONCURRENCY` mid-run costs nothing but a restart.
 
 ## Still open (not in this change)
 
@@ -30,6 +45,20 @@ appears that is not "the posterior is high" — a high φ is the measurement.
    once the η↔ρ ridge is addressed, at which point 0.95 would be cheap.
 2. **The η↔ρ_diag ridge** (corr +0.40…+0.45 in all four chains) — still the binding constraint.
 3. **split-R̂ failures sit at HIGH ESS** (max R̂ 1.085 at ESS 1023), so they are first-half/second-half
-   drift, not autocorrelation. More kept draws is the cheap discriminating experiment.
-4. **13j/Stage-2/10j run** — `src/13j_model_diagnostics_h1.ipynb` and `tmp/install_s1_stage2_h1.jl`
-   are built and verified but were interrupted; re-run after this refit lands.
+   drift, not autocorrelation. ⇒ **The 2000-draw formal run answers this as a by-product**: if the
+   R̂>1.01 count falls roughly in proportion to the extra draws it was autocorrelation, if it holds it
+   is drift.
+4. **Run hurdle-Weibull with `constant_contacts = true`.** Its temporal process collapsed to exactly
+   constant under a prior that does not fight it (φ = 0.9985–0.9998, effrank 1.00, lag-8 corr 0.999)
+   — the third independent measurement of the same preference across three kernels and three priors.
+   NegBin is unaffected (φ = 0.891, effrank 2.07) and should stay per-week. Deferred until the two
+   generations above are on disk, since it is a third token (`pooled-…`).
+5. The `phi_time` prior is deliberately Uniform and is the first knob to revisit IF a reason appears
+   that is not "the posterior is high" — a high φ is the measurement.
+
+## Correction to the record
+
+`tasks/lessons.md` / earlier notes described the interrupted Stage-2 attempts as ending in a
+Pathfinder stack trace. They did not: both `tmp/stage2_h1.log` and `tmp/stage2_ig.log` end in
+`signal 15: Terminated` at `install_s1_stage2_h1.jl:90`, i.e. they were killed by hand. There is no
+known Stage-2 bug, and `prefit_stage2!` has never been observed to fail.

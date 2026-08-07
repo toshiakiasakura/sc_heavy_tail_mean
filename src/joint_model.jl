@@ -1008,11 +1008,12 @@ end
     fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
-(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept)`). Idempotent skip ⇒ resumable
-prefit.
+(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts, nuts_draws)`).
+Idempotent skip ⇒ resumable prefit.
 
-`sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`), `ad_backend` (`cfg.ad_backend`) and
-`target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06) are written
+`sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`), `ad_backend` (`cfg.ad_backend`),
+`target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06) and the NUTS
+iteration counts `nuts_adapts`/`nuts_draws` (`500→2000` on 2026-08-07) are written
 alongside `result` so an artefact is self-describing. The cache filename encodes the SAMPLER via
 `contacts_label`, but deliberately NOT the AD backend or the NUTS tuning, so for those the file's own
 contents are the *only* record — which is what makes a mixed-provenance grid auditable:
@@ -1030,13 +1031,19 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
                             cfg::FrameworkConfig; adtype = ad_type(cfg), rng = nothing)
     isfile(path) && return (; chn = load(path, "result"))
     res = fit_stage1(dm, ds, pop, cfg; use_nuts = cfg.stage1_use_nuts, adtype = adtype, rng = rng)
-    # `target_accept` is recorded for the same reason as `ad_backend`: `contacts_label` encodes only
-    # the SAMPLER (`-nuts`), not its tuning, so a grid refitted in part after a target_accept change
-    # is silently mixed-provenance. The file's own contents are the only record. Audit exactly as
-    # for the backend, swapping the key.
+    # `target_accept`, `nuts_adapts` and `nuts_draws` are recorded for the same reason as
+    # `ad_backend`: `contacts_label` encodes only the SAMPLER (`-nuts`), not its tuning, so a grid
+    # refitted in part after a tuning change is silently mixed-provenance. The file's own contents
+    # are the only record. Audit exactly as for the backend, swapping the key.
+    #   `nuts_draws` was added 2026-08-07 with the 500→2000 raise: the draw count is otherwise
+    # recoverable only as `size(chn, 1)`, which means loading the whole (now ~28/72 MB) chain just to
+    # ask how it was fitted. Under the Pathfinder path these three describe settings that were not
+    # consulted — kept anyway so every artefact has the same key set and the audit needs no branch.
     jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
                   ad_backend = res.ad_backend,
-                  target_accept = cfg.stage1_nuts_target_accept)
+                  target_accept = cfg.stage1_nuts_target_accept,
+                  nuts_adapts = cfg.stage1_nuts_adapts,
+                  nuts_draws  = cfg.stage1_nuts_draws)
     return (; chn = res.chn)
 end
 
@@ -1323,12 +1330,18 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
             end
             rest = @view specs[setdiff(1:length(specs), warm_idx)]
             sem = Base.Semaphore(K)
+            t_origin = time()
             @sync for s in rest
                 Threads.@spawn begin
                     Base.acquire(sem)
                     try do_fit(s) finally Base.release(sem) end
                 end
             end
+            # Heartbeat, mirroring `prefit_stage2!`'s per-origin line. Without it this function
+            # prints NOTHING between the two warm-fit lines (first origin only) and the final
+            # summary — over a 63-origin Stage-1 NUTS grid that is days of silence, and the artefact
+            # count on disk becomes the only way to tell a running fit from a hung one.
+            @info "prefit_stage1!: origin $(win_o.origin) done ($(oi)/$(length(wins)), $(length(specs)) fits, $(round(time() - t_origin; digits = 1)) s, $(fitted[]) fitted / $(failed[]) failed so far)"
         end
     finally
         LinearAlgebra.BLAS.set_num_threads(old_blas)
