@@ -1777,3 +1777,65 @@ cleanest of the three. Three kernels and three priors have now been asked the sa
 the same answer. The indicated action is not a fourth temporal prior: it is to run hurdle-Weibull with
 `constant_contacts = true`. Chasing this through the temporal specification has cost several refits;
 the model has been saying the same thing throughout.
+
+---
+
+## 2026-08-07 — A gradient benchmark is not a fit benchmark: Stage 2 needed its own AD backend
+
+**Symptom.** The first full-pipeline smoke (3 origins, Pathfinder both stages) sailed through Stage 1
+— 24 chains in 12.2 min, 8-way fan-out working — and then Stage 2 wrote **one** pooled cell in 19
+minutes, with the kernel at 17.4 GiB RSS and **167 % CPU on a 10-core box** despite
+`max_concurrent = 9`. Low CPU behind a wide semaphore means the workers are blocked, not computing.
+Extrapolated, the 1512-cell grid was **17 days**, against the 4.9 h the pre-Mooncake `-hd`
+generation actually took.
+
+**The wrong first hypothesis, and why it was wrong.** `framework.jl` records Mooncake's `build_rrule`
+as "a one-off per model TYPE per process". Stage 2 constructs a fresh `model_transmission` per
+Stage-1 draw, so the obvious guess was that the rule is re-derived per construction — 100 × 15 s ≈
+25 min, which is the right order for what was seen. **It is not what happens.** Three identical
+constructions cost 47.21 s, 0.105 s, 0.000 s: the rule is cached exactly as documented.
+
+**What is actually true** (`tmp/probe_stage2.jl`, `tmp/probe_stage2b.jl`, `model_transmission`,
+18 dims, origin 2021-04-25):
+
+| | mooncake | reversediff |
+|---|---|---|
+| prepared gradients/s | **30 551** | 1 712 |
+| `LogDensityFunction` construction, rule cached | 0.105 s | 0.000 s |
+| **one `pathfinder()` fit** | **10.64 s** | **0.30 s** |
+| `fit_stage2_pooled`, 8 draws, `K=1` → `K=9` | 86.1 s → 79.3 s (**1.09×**) | 2.4 s → 1.1 s (2.31×) |
+| ⇒ per 100-draw cell / per 1512-cell grid | 16.5 min / **17 days** | 0.2 min / **5.0 h** |
+
+So the documented 17.9× Mooncake gradient advantage **reproduces exactly** (30 685/1 711 originally)
+and the preparation is cached and cheap — and neither matters. An 18-dimension Pathfinder fit is a
+few hundred gradients; it is dominated by per-fit setup, Mooncake's is ~35× more expensive, and it
+serialises (1.09× at K=9), so the fan-out cannot hide it.
+
+**The lesson.** *A gradient-rate benchmark measures the wrong thing when the fit is small and there
+are many of them.* `tmp/verify_adtype.jl` timed `logdensity_and_gradient` in a tight loop on one
+prepared function — a perfectly good measurement of the quantity it names, and a misleading proxy for
+the cost that Stage 2 actually pays. The two regimes in this codebase are opposite:
+
+- **Stage 1** — ONE fit, 389/977 dims, ~1e5 gradients. Gradient throughput dominates; a one-off
+  66 s/14 s rule build is noise. Mooncake wins ~9–11×. (This is why `prefit_stage1!` warms the rule
+  per model *type* before its fan-out.)
+- **Stage 2** — 100 INDEPENDENT fits, 18 dims, a few hundred gradients each. Per-fit setup dominates
+  entirely. ReverseDiff wins 35×.
+
+**Fix.** `cfg.stage2_ad_backend = :reversediff`, resolved by `stage2_ad_type(cfg)`; `ad_type(cfg)`
+now means Stage 1 only. `fit_stage2_pooled`'s `adtype` defaults to the Stage-2 type, and
+`prefit_stage2!`/`fit_or_load_stage2` take BOTH — `adtype` for the Stage-1 leg inside
+`stage2_inputs` (which fits a missing chain on demand and must match the rest of the Stage-1 grid)
+and `s2_adtype` for the transmission fits. Conflating those two is precisely what cost 16.5 min a
+cell. `ad_type`'s docstring had said "add a per-stage split only if a future measurement actually
+disagrees across stages" — this is that measurement.
+
+**Provenance.** Every `8j_s2_*` now records `ad_backend` alongside `pooled`, and `tmp/check_grid.jl`
+audits it. Pathfinder's LBFGS path is chaotic, so a grid half-fitted under each backend is not
+bit-comparable even though the gradients agree to 4e-14. The single Mooncake-fitted cell from the
+smoke was deleted rather than kept.
+
+**Method note worth keeping.** The smoke existed only to shake the pipeline out on 3 origins before
+committing 10 h and then ~4 days. It cost ~1 h and caught a 17-day regression that no amount of
+reading would have found — the failure is invisible in the code and contradicts the repository's own
+documented benchmark. Run the cheap end-to-end pass first.

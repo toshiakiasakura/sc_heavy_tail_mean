@@ -218,6 +218,7 @@ Base.@kwdef struct FrameworkConfig
     n_stage2_draws::Int   = 100       # Stage-2 samples kept per Stage-1 draw (the "100 samples each")
     stage1_use_nuts::Bool = true      # Stage-1 sampler: true = NUTS (THE DEFAULT since 2026-08-05, user request — "use only NUTS in stage 1"), false = Pathfinder (the preliminary generation that produced the 504-file `-gi` grid). UNLIKE every other field in this block, this one IS encoded in the cache token (`contacts_label` appends `-nuts`), so flipping it does NOT silently reuse the Pathfinder chains — see the `-nuts` note in `contacts_label`. NUTS is initialised from the Pathfinder mean (`_pf_mean_init`), so Pathfinder still runs first and the cost is ADDITIVE. **STAGE 2 IS UNAFFECTED AND HAS NO NUTS PATH AT ALL** — `fit_stage2_pooled` only ever calls `pathfinder` (100 cheap fits per Stage-1 draw); that is by design (inst/4_cut_Bayes.md), not an oversight.
     ad_backend::Symbol    = :mooncake # AD backend for BOTH stages' gradients: :mooncake (default) | :reversediff | :forwarddiff. Resolved once by `_resolve_adtype`; see `ad_type`. DEFAULTED TO MOONCAKE 2026-08-05 on measurement, not preference — at origin 2021-05-09, gradients/s Mooncake vs ReverseDiff: Stage-1 negbin (402 dims) 482 vs 44 (10.9×), Stage-1 hurdle-Weibull (990 dims) 241 vs 27 (9.0×), Stage-2 transmission (18 dims) 30 685 vs 1 711 (17.9×). Gradients agree with ReverseDiff to ≤4e-14 relative on all three. Mooncake pays a one-off `build_rrule` cost per model TYPE per process (66 s negbin / 14 s hurdle-Weibull / 15 s Stage 2), which is nothing against the ~1e5 gradient evaluations a single Stage-1 NUTS fit needs — but it is why `prefit_stage1!` warms one fit per degree-model type BEFORE its thread fan-out. NOT encoded in the cache token (AD is a numerical means, not a model change); the backend is recorded inside each artefact instead — see `contacts_label`.
+    stage2_ad_backend::Symbol = :reversediff # AD backend for STAGE 2 ONLY, split off from `ad_backend` on 2026-08-07 BECAUSE MEASUREMENT DEMANDED IT (`tmp/probe_stage2.jl`/`_stage2b.jl`; the note on `ad_type` had said to add this only if a measurement ever disagreed across stages). Stage 2 is 100 INDEPENDENT Pathfinder fits of an 18-dimension model per cell, and per-fit setup — not gradient throughput — is what dominates there. Measured on `model_transmission` at 2021-04-25: prepared gradients/s Mooncake 30 551 vs ReverseDiff 1 712 (the documented 17.9× advantage reproduces exactly), `LogDensityFunction` construction 0.105 s vs 0.000 s once the rule is cached (and it IS cached — 47.2 s / 0.105 s / 0.000 s over three identical constructions) — yet ONE `pathfinder()` fit costs 10.64 s vs 0.30 s, a 35× loss, and the 100-fit fan-out recovers none of it (speed-up 1.09× at `max_concurrent = 9` vs ReverseDiff's 2.31×, i.e. Mooncake's per-fit setup serialises). End to end that is 16.5 min vs 0.2 min per pooled cell ⇒ **17 days vs 5.0 h** over the 1512-cell grid; the 5.0 h reproduces the 4.9 h the pre-Mooncake `-hd` generation actually took. ⚠ THE STAGE-1 ARGUMENT DOES NOT TRANSFER, and vice versa: Stage 1 is ONE fit of a 389/977-dimension model per (degree × origin × horizon) needing ~1e5 gradients, so the same 9–11× gradient advantage dominates a one-off 66 s/14 s rule build — which is exactly why `prefit_stage1!` warms it. Keep both. NOT in the cache token (AD is a numerical means, not a model change; gradients agree to ≤4e-14 relative) — the backend is recorded inside each `8j_s2_*` artefact under `ad_backend` instead, so a mixed-provenance grid stays auditable by `tmp/check_grid.jl`.
     # --- Stage-1 NUTS settings (2026-08-05; consulted only when `stage1_use_nuts`) ---
     # These exist because a bare `NUTS()` derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the
     # former `n_sample = 250` gave 125 warmup iterations to adapt a step size and diagonal metric in
@@ -267,14 +268,17 @@ function _resolve_adtype(sym::Symbol)
     error("_resolve_adtype: unknown ad_backend $(sym) — expected :mooncake, :reversediff or :forwarddiff")
 end
 
-"""`ad_type(cfg)` — the AD backend object for `cfg`, used by BOTH stages.
+"""`ad_type(cfg)` — the AD backend object for **STAGE 1** (`cfg.ad_backend`, default `:mooncake`).
 
-One backend covers everything because Stage-1 Pathfinder, Stage-1 NUTS and Stage-2 Pathfinder all
-build the *same* `DynamicPPL.LogDensityFunction(model, getlogjoint_internal, linked_vi; adtype)`,
-and because Mooncake measured faster than ReverseDiff on all three targets (see `ad_backend`) —
-there was no case for a per-stage split, so there is no `ad_backend_stage2`. Add one only if a
-future measurement actually disagrees across stages."""
+Both stages built the *same* `DynamicPPL.LogDensityFunction(model, getlogjoint_internal,
+linked_vi; adtype)`, so one backend covered everything until 2026-08-07 — the note here used to read
+"Add one only if a future measurement actually disagrees across stages". It does. Stage 2 now goes
+through `stage2_ad_type`; see `stage2_ad_backend` for the measurement."""
 ad_type(cfg::FrameworkConfig) = _resolve_adtype(cfg.ad_backend)
+
+"""`stage2_ad_type(cfg)` — the AD backend object for **STAGE 2** (`cfg.stage2_ad_backend`,
+default `:reversediff`). See the `stage2_ad_backend` field for why it differs from Stage 1."""
+stage2_ad_type(cfg::FrameworkConfig) = _resolve_adtype(cfg.stage2_ad_backend)
 
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains. The suffix is a running version

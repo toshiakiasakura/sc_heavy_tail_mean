@@ -1100,7 +1100,14 @@ end
 
 Cut-inference Stage 2: for EACH of the `M = length(moment_draws)` imputed Stage-1 draws, form
 the fixed per-week `C*` (via `contact_star(nb, …)`), Pathfinder-fit `model_transmission`, and keep
-`n_draw` infection draws. Pool the `M × n_draw` (= 100×100 = 10_000) draws. Returns a NamedTuple
+`n_draw` infection draws. Pool the `M × n_draw` (= 100×100 = 10_000) draws.
+
+⚠ `adtype` defaults to `stage2_ad_type(cfg)` (`:reversediff`), NOT `ad_type(cfg)` (`:mooncake`).
+Stage 2 is 100 independent fits of an 18-dimension model, where per-fit setup dominates and
+Mooncake costs 10.64 s vs ReverseDiff's 0.30 s per fit while parallelising 1.09× against 2.31× —
+16.5 min vs 0.2 min per pooled cell. See `stage2_ad_backend`.
+
+Returns a NamedTuple
 `(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post, n_draw)` where the first
 five are the pooled per-draw infection parameters (`susc`/`inf` are `N×A`), `post_index[d]` is the
 Stage-1 draw `d` came from, and `Cstar_end[m]` is Stage-1 draw `m`'s origin-week (`[end]`) `C*` — the
@@ -1108,7 +1115,7 @@ matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphor
 (each with its own deterministic RNG `base_seed + m`), writing disjoint preallocated slots.
 """
 function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::FrameworkConfig;
-                           n_draw::Int = cfg.n_stage2_draws, adtype = ad_type(cfg),
+                           n_draw::Int = cfg.n_stage2_draws, adtype = stage2_ad_type(cfg),
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
     A = wd.A; Tn = length(wd.weeks)
     M = length(moment_draws)
@@ -1355,14 +1362,20 @@ end
 
 Fit every MISSING Stage-2 pooled result (`8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`) for
 combos × origins × horizons. Requires the matching Stage-1 chain (run `prefit_stage1!` first; a
-missing one is fit on demand) — except for the NULL model, which has no Stage 1 and gets its
+missing one is fit on demand, under `adtype` — the STAGE-1 backend, distinct from the `s2_adtype`
+the transmission fits use) — except for the NULL model, which has no Stage 1 and gets its
 constant C* from `stage2_inputs`. Origins are processed sequentially; within an origin the (combo ×
 horizon) cells run sequentially, each `fit_stage2_pooled` fanning out its `n_stage1_post` per-draw
 fits under `Semaphore(max_concurrent)`. Cached pooled files are skipped ⇒ resumable.
 """
 function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg))
+                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg),
+                        s2_adtype = stage2_ad_type(cfg))
+    # `adtype` is the STAGE-1 backend: `stage2_inputs` may have to fit a missing Stage-1 chain, and
+    # that leg must match how the rest of the Stage-1 grid was fitted. `s2_adtype` is the one the
+    # 100 per-draw transmission fits actually use, and it is a DIFFERENT backend by default — see
+    # `stage2_ad_backend`. Conflating them is what made one pooled cell take 16.5 minutes.
     mkpath(save_dir)
     K   = clamp(max_concurrent, 1, Threads.nthreads())
     tag = contacts_label(cfg)
@@ -1381,9 +1394,13 @@ function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                 inp = stage2_inputs(s.dm, apd_by_h[s.hi], win_o, wd0, cfg, s1p;
                                     adtype = adtype, rng = Random.Xoshiro(cfg.seed))
                 pooled = fit_stage2_pooled(s.nb, inp.md, wd0, cfg; n_draw = inp.n_draw,
-                                           adtype = adtype,
+                                           adtype = s2_adtype,
                                            base_seed = cfg.seed + 1000 * s.h, max_concurrent = K)
-                jldsave(s.path; pooled)
+                # Record the Stage-2 backend for the same reason Stage 1 records its own: it is
+                # deliberately NOT in the filename, so the file is the only evidence of how the
+                # draws were produced. Pathfinder's LBFGS path is chaotic, so a grid half-fitted
+                # under each backend is not bit-comparable even though the gradients agree.
+                jldsave(s.path; pooled, ad_backend = cfg.stage2_ad_backend)
                 fitted += 1
             catch err
                 failed += 1
@@ -1425,7 +1442,7 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
                             h::Integer; apd_h = nothing, grid = cis_age_grid(),
                             setting::Symbol = :all,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                            adtype = ad_type(cfg))
+                            adtype = ad_type(cfg), s2_adtype = stage2_ad_type(cfg))
     tag = contacts_label(cfg)
     s2p = stage2_path(dm, nb, win0.origin, h; contacts = tag, save_dir = save_dir)
     isfile(s2p) && return load(s2p, "pooled")
@@ -1436,9 +1453,9 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
     end
     s1p = stage1_path(dm, win0.origin, h; contacts = tag, save_dir = save_dir)
     inp = stage2_inputs(dm, apd_h, win0, wd0, cfg, s1p; adtype = adtype, rng = Random.Xoshiro(cfg.seed))
-    pooled = fit_stage2_pooled(nb, inp.md, wd0, cfg; n_draw = inp.n_draw, adtype = adtype,
+    pooled = fit_stage2_pooled(nb, inp.md, wd0, cfg; n_draw = inp.n_draw, adtype = s2_adtype,
                                base_seed = cfg.seed + 1000 * h)
-    jldsave(s2p; pooled)
+    jldsave(s2p; pooled, ad_backend = cfg.stage2_ad_backend)
     return pooled
 end
 

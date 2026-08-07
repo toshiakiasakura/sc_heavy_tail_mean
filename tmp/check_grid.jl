@@ -87,6 +87,23 @@ else
         @printf("  %-14s %s%s\n", k, join(["$(v) × $(n)" for (v, n) in vals], ",  "),
                 uniform ? "" : "   ** MIXED PROVENANCE **")
     end
+    # Stage 2 records only its own backend (there is no chain, sampler or tuning to describe — it is
+    # always Pathfinder). It is a DIFFERENT backend from Stage 1 by default, so a `:mooncake` here
+    # means the cell predates the 2026-08-07 split and cost ~16.5 min instead of ~12 s.
+    s2_present = filter(isfile, vec(s2_paths))
+    if !isempty(s2_present)
+        t2 = Dict{Any,Int}()
+        for p in s2_present
+            v = jldopen(p) do f; haskey(f, "ad_backend") ? f["ad_backend"] : :ABSENT; end
+            t2[v] = get(t2, v, 0) + 1
+        end
+        vals = sort(collect(t2), by = x -> -x[2])
+        length(vals) == 1 || (ok = false)
+        @printf("  %-14s %s%s\n", "s2 ad_backend",
+                join(["$(v) × $(n)" for (v, n) in vals], ",  "),
+                length(vals) == 1 ? "" : "   ** MIXED PROVENANCE **")
+    end
+
     # The draw count is the one setting that is neither in the filename nor (for pre-2026-08-07
     # artefacts) in the file, so cross-check it against the chain itself on a small sample.
     sample = present[round.(Int, range(1, length(present); length = min(4, length(present))))]

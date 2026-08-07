@@ -23,6 +23,18 @@ The two tokens differ, so both live in `dt_intermediate/` without collision.
 - [x] per-origin `@info` heartbeat in `prefit_stage1!` (it printed nothing for the whole grid before)
 - [x] `tmp/check_grid.jl` (completeness + provenance gate), `tmp/watch_grid.sh` (progress logger)
 
+## Phase 1 smoke — found a 17-day regression, fixed
+
+The 3-origin Pathfinder smoke got through Stage 1 fine (24 chains, 12.2 min, 8-way fan-out) and then
+wrote **one** Stage-2 cell in 19 min at 167 % CPU. Measured cause: **Mooncake is the wrong backend
+for Stage 2** — 17.9× faster per gradient (the documented number reproduces) but 35× slower per
+`pathfinder()` fit, and it does not parallelise (1.09× at K=9). Stage 2 is 100 fits of an 18-dim
+model per cell, so per-fit setup is everything. 16.5 min/cell ⇒ **17 days** for the grid.
+
+Fixed by splitting the backend per stage: `cfg.stage2_ad_backend = :reversediff` (0.2 min/cell ⇒
+**5.0 h**, matching the 4.9 h the `-hd` generation took). Stage 1 keeps Mooncake. Full write-up in
+`tasks/lessons.md`.
+
 ## Budget
 
 | leg | fits | wall |

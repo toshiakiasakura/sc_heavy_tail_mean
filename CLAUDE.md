@@ -16,7 +16,9 @@ The canonical environment is the devcontainer (`.devcontainer/Dockerfile`, based
 
 `Project.toml` gained a `[compat]` section on 2026-08-05 (there was none before), pinning `julia = "1.12"` plus the packages that define the fit's numerics — so a Manifest/Julia mismatch is now a resolve error rather than the silent drift that let `Manifest.toml` keep claiming `julia_version = "1.11.1"` while the container ran 1.12.4.
 
-**AD backend**: gradients for *both* stages go through `cfg.ad_backend` — `:mooncake` (default), `:reversediff` or `:forwarddiff` — resolved in one place by `_resolve_adtype`/`ad_type` (`src/framework.jl`). `main_utils.jl` loads Mooncake and ReverseDiff unconditionally so either is selectable at runtime. Mooncake pays a one-off rule build per model *type* per process (~66 s NegBin / 14 s hurdle-Weibull / 15 s Stage 2), which `prefit_stage1!` warms serially before its thread fan-out; a sysimage does **not** remove that (see Gotchas).
+**AD backend**: **the two stages use DIFFERENT backends since 2026-08-07** — Stage 1 `cfg.ad_backend` (default `:mooncake`), Stage 2 `cfg.stage2_ad_backend` (default `:reversediff`), each mapped to its `ADTypes` object by `_resolve_adtype` via `ad_type`/`stage2_ad_type` (`src/framework.jl`). Both accept `:mooncake` | `:reversediff` | `:forwarddiff`, and `main_utils.jl` loads Mooncake and ReverseDiff unconditionally so either is selectable at runtime.
+
+Why they differ, measured on `model_transmission` (18 dims) at origin 2021-04-25: Mooncake is 17.9× faster **per gradient** (30 551 vs 1 712/s — the original benchmark reproduces exactly) and its rule *is* cached (47.2 s, then 0.105 s, then 0.000 s over three identical constructions), yet **one `pathfinder()` fit costs 10.64 s against ReverseDiff's 0.30 s**, and the 100-fit fan-out recovers none of it (1.09× at `max_concurrent=9` vs 2.31×). Stage 2 is 100 independent fits of that tiny model per cell, so per-fit setup dominates and gradient throughput is irrelevant: **16.5 min vs 0.2 min per pooled cell ⇒ 17 days vs 5.0 h over the 1512-cell grid** — and the 5.0 h reproduces the 4.9 h the pre-Mooncake `-hd` generation actually took. Stage 1 is the opposite regime: one fit of a 389/977-dimension model per (degree × origin × horizon) needing ~1e5 gradients, so the 9–11× gradient advantage dominates a one-off `build_rrule` (66 s NegBin / 14 s hurdle-Weibull) — which `prefit_stage1!` warms once per model *type* before its thread fan-out, and which a sysimage does **not** remove (see Gotchas). Gradients agree to ≤4e-14 across backends, so this is a numerical means and not in the cache token; each `8j_s1_*`/`8j_s2_*` records its own backend under `ad_backend`.
 
 ```bash
 # Install Julia deps (run once, from /workdir)
@@ -30,10 +32,12 @@ julia --project=/workdir /workdir/build_sysimage.jl
 julia --project=/workdir --sysimage=/workdir/sysimage.so
 
 # Execute a notebook headless
-jupyter nbconvert --to notebook --execute src/<name>.ipynb --inplace
+# NEVER --inplace: notebooks are stored plain. Timeout -1 or the 30 s default kills the preamble.
+jupyter nbconvert --to notebook --execute src/<name>.ipynb \
+  --ExecutePreprocessor.timeout=-1 --output-dir <scratch>
 
 # One-time R dep for forecast scoring (src/scoring.jl)
-Rscript -e 'install.packages("scoringutils")'
+Rscript -e 'install.packages("scoringutils")'   # v2 required; 2.2.0 installed 2026-08-07
 ```
 
 `JULIA_NUM_THREADS=12` and `JULIA_DEPOT_PATH=/home/jovyan/.julia:/opt/julia` are set by the devcontainer.
