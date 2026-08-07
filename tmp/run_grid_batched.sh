@@ -62,4 +62,28 @@ for ((b = 0; b < n_batches; b++)); do
         echo "*** batch $((b+1)) exited rc=$rc — stopping. Tail of $log:"; tail -25 "$log"; exit "$rc"
     fi
 done
+# FINAL SWEEP over ALL origins, unrestricted. Batches partition the origin list, so anything a
+# batch missed — an early exit, a per-fit failure, a boundary arithmetic slip — would otherwise never
+# be revisited and would surface only as a gap in check_grid.jl after the whole run. Both prefit
+# drivers skip existing artefacts, so when the grid is already complete this costs one package load
+# and nothing else. It is the difference between "the batches finished" and "the grid is complete".
+unset ORIGIN_MIN FIT_END
+log="/workdir/tmp/run_8j_${MODE}_sweep.log"
+echo "--- final sweep : all $N_ORIGINS origins  $(date '+%T')  -> $(basename "$log")"
+t0=$(date +%s)
+( cd /workdir/src && julia --project=/workdir /workdir/tmp/run_nb_headless.jl \
+    8j_preliminary_forecast.ipynb ) > "$log" 2>&1
+rc=$?
+el=$(( $(date +%s) - t0 ))
+s1=$(ls -1 /workdir/dt_intermediate/ | grep -c '^8j_s1_')
+s2=$(ls -1 /workdir/dt_intermediate/ | grep -c '^8j_s2_')
+printf '    sweep rc=%d in %dh%02dm | grid now s1=%d/504 s2=%d/1512\n' \
+       "$rc" $(( el / 3600 )) $(( (el % 3600) / 60 )) "$s1" "$s2"
+[ "$rc" -ne 0 ] && { echo "*** sweep exited rc=$rc — tail of $log:"; tail -25 "$log"; exit "$rc"; }
+
 echo "=== ALL BATCHES COMPLETE [$MODE] $(date '+%F %T') ==="
+if [ "$s1" -ge 504 ] && [ "$s2" -ge 1512 ]; then
+    echo "=== GRID COMPLETE: s1=$s1/504 s2=$s2/1512 ==="
+else
+    echo "*** GRID INCOMPLETE after sweep: s1=$s1/504 s2=$s2/1512 — run tmp/check_grid.jl ***"; exit 1
+fi
