@@ -2076,3 +2076,46 @@ complained, because the μ reader's contract is to return `nothing` on a missing
    entirely NaN; the rest silently kept a **three-day-old file from a different model generation**.
    When checking a diagnostics re-run, compare figure mtimes and sizes against the archive, not just
    the exit code.
+
+## 2026-08-08 — A weak prior on a boundary parameter is not "weakly informative" if the boundary is degenerate
+
+`-ar1` replaced `log_rho_time ~ N(log 2, 0.35²)` (plus the `RHO_TIME_BOUNDS` clamp) with
+`phi_time ~ Beta(1,1)` = Uniform(0,1). The reasoning was measured and sound as far as it went: AR(1)
+is Markov, so `Kt` stays well conditioned even at φ = 0.995, where Matérn 3/2's spectrum has
+collapsed — therefore the tight temporal prior was no longer needed *for conditioning*.
+
+**58 % of the hurdle-Weibull Stage-1 fits in the resulting grid are diverged optimiser paths**
+(147/252 across all four horizons; NegBin 0/252). A representative broken chain has `log_eta` at
+−238.5 under a N(0, 0.5²) prior — **478 prior SD** — with a 90 % within-chain spread of 0.09, i.e.
+Pathfinder confidently fitted a Gaussian around a runaway LBFGS iterate. Read out through the
+soft-clamps: η = σ_c = e⁻³ (floor), ρ_diag = 500 (ceiling), every μ at the exponent-clamp ceiling 403.
+
+**What was missed.** Conditioning of `Kt` was never the binding constraint. The `-t0` level is built
+on the **projected** kernel `Qtᵀ·Kt·Qt`, and `Qtᵀ·J·Qt = 0` **exactly** — so as φ→1 the level
+deviation collapses to the 1e-4 jitter no matter how well conditioned `Kt` itself is. Measured
+marginal SD of the level deviation per unit σ_c: 0.958 (φ=0) → 0.260 (0.99) → 0.028 (0.9999).
+Simultaneously `Lt`'s first column grows to 3.46 and its last falls to 0.019, so 297 of 324 `z`
+latents stop reaching the likelihood. That is a ~300-dimensional flat subspace, and LBFGS walks into it.
+
+Three transferable lessons:
+
+1. **Check the projected kernel, not just the kernel.** Every conditioning measurement behind `-ar1`
+   was made on `Kt`. The model does not use `Kt` for the level; it uses `Qtᵀ·Kt·Qt`, whose behaviour
+   at the pooled limit is the exact opposite (`Kt` → well-conditioned rank-1, projection → zero).
+   When a reparameterisation (`-s0`, `-t0`) sits between a kernel and the likelihood, the diagnostic
+   has to sit there too.
+2. **Removing a clamp and loosening a prior in the same change removes both guards.** `-ar1` dropped
+   `RHO_TIME_BOUNDS` *and* went to Uniform. Either alone would have kept φ off the boundary. The
+   commit message for `gp_len_prior` in `framework.jl` already warns not to separate paired changes;
+   the same rule applies to un-pairing a guard from what it guarded.
+3. **A likelihood that cannot identify a parameter will send it to a boundary, and the boundary may
+   be where the model degenerates.** With p⁰ ≈ 0.95 the hurdle-Weibull likelihood is nearly flat in
+   the temporal direction — so φ → 1 is what an uninformative likelihood *does* under a flat prior.
+   The NegBin likelihood identifies weekly variation and holds φ ≤ 0.84 across all 252 fits. "A high
+   φ is the measurement, not a failure" (CLAUDE.md) is true only where the likelihood has something
+   to say; it must not be used to wave through a boundary pile-up.
+
+**Process failure worth fixing separately:** nothing reported any of this. Pathfinder returned
+normally, the artefact cached, `tmp/check_grid.jl` counted it as present, and 9j/10j/11j scored it.
+A cheap gate in `fit_stage1` — reject when a raw latent leaves prior support by >10 SD — would have
+caught all 147. Prefer a loud gate over a silent cache for anything that fits by optimisation.
