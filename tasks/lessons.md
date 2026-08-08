@@ -1996,3 +1996,83 @@ it, because it enumerated the metrics someone thought of rather than the metrics
 actually read, and checked one frame of five. When a library reports failure by *omission*, the
 assertion has to be exhaustive on both axes — every metric, every frame — or it merely moves the
 crash somewhere less legible.
+
+## 2026-08-08 — A fitting notebook and a read-only notebook want OPPOSITE defaults for the same flag
+
+`STAGE1_USE_NUTS` was added to 8j/9j/10j/11j on 2026-08-07 with one default, `"true"`, so that a
+headless run could produce either generation without editing a tracked notebook. Uniformity looked
+like the safe choice. It is not: **the same flag means two different things depending on whether the
+notebook writes artefacts or reads them.**
+
+8j *produces* the generation, so defaulting to the one it is about to fit is right. 9j/10j/11j only
+*read*, so their default has to be the generation that **exists** — and after the formal NUTS run was
+killed at 1 of 504 fits, the only complete grid was the Pathfinder `…-t0-ar1`. A VSCode Julia kernel
+inherits no environment variable, so opening any of the three and running cell 2 built
+`FrameworkConfig(stage1_use_nuts = true)` and pointed every lookup at `…-t0-ar1-nuts`.
+
+The three then failed in three different ways, none of them useful:
+
+| notebook | on a missing artefact | consequence |
+|---|---|---|
+| 9j | `two_stage_forecast` → `fit_or_load_stage2` → `fit_or_load_stage1`, which fits on miss | 503 serial NUTS Stage-1 fits + 1511 Stage-2, inside a `try/catch` that only logs — weeks of grinding, no error |
+| 10j | every reader in `10j_viz_utils.jl` is `isfile(path) \|\| return nothing` | no refit, but every panel blank with a warning — a *report* that is silently empty |
+| 11j | up-front `@assert isfile(...)` in cell 2 | fails loudly, immediately, with the path |
+
+Fixed by flipping only the three read-only notebooks to `"false"` (2026-08-08, user request); 8j and
+`tmp/check_grid.jl`/`tmp/chain_health.jl` keep `"true"`. A run spanning both roles must now set the
+variable explicitly — `tmp/run_grid_batched.sh` and `tmp/run_diagnostics.sh` already do.
+
+**Transferable lessons.**
+
+1. When one switch is shared by producers and consumers of the same cache, a single "consistent"
+   default is the bug, not the fix. Default each side to what makes *its* failure mode loudest.
+2. 11j's four-line `@assert isfile(...)` is the whole difference between a notebook that stops in a
+   second and one that blanks or fits for a fortnight. It is the cheapest guard in the strand and the
+   only one of the three that has it — worth copying if the silent modes bite again.
+3. An env-var default is invisible in a VSCode kernel. Anything whose default matters interactively
+   must print what it resolved to; all four already print the token in cell 2, which is what made
+   this diagnosable at all.
+
+## 2026-08-08 — `CONTACTS_TOKEN` as a default kwarg silently overrides `cfg`
+
+Flipping 9j/10j/11j to the Pathfinder default (above) exposed a second, older bug in the same area,
+and it had been live for the whole `-ar1` Pathfinder generation.
+
+`framework.jl:505` defines
+
+```julia
+const CONTACTS_TOKEN = contacts_label(FrameworkConfig(constant_contacts = false))
+```
+
+and `FrameworkConfig`'s `stage1_use_nuts::Bool = true` is a **plain literal** — it reads no
+environment variable. So `CONTACTS_TOKEN` always ends `-nuts`, regardless of the notebook's `cfg` or
+of `ENV["STAGE1_USE_NUTS"]`. It is also the **default** `contacts` kwarg on `stage1_chain_path`,
+`stage2_pooled_path`, `reconstruct_mu_draws`, `reconstruct_p0_draws` and `reconstruct_tau_draws`.
+
+Five `reconstruct_mu_draws` call sites in `10j_viz_utils.jl` (`make_agepair_fig`,
+`make_mu_horizon_fig`, `make_mu_weeks_fig`, `make_contactmatrix_fig`, `make_agepair_ccdf_fig`) omitted
+`contacts`, so they read the `-nuts` grid — which had **1** file of 504 — while every neighbouring
+`cfg`-taking helper read the Pathfinder grid correctly. Measured on 10j at origin 2021-05-09:
+
+| | before | after |
+|---|---|---|
+| `no chain for …` warnings | 48 | 0 |
+| figures rendered | 18 | 22 |
+| μ-derived figures in `res/` | stale (dated Aug 5, a pre-`-ar1` generation) or all-NaN | all 16 regenerated, populated |
+
+`make_agepair_ccdf_fig` is the clearest tell: its **κ** call already passed `cfg = oc.cfg`, and the
+**μ** call one line above did not. The two disagreed inside a single function body and nothing
+complained, because the μ reader's contract is to return `nothing` on a missing file.
+
+**Transferable lessons.**
+
+1. A constant derived from a *default-constructed* config is not a default — it is a second,
+   invisible configuration that silently wins over the caller's. If callers have a `cfg` (here `oc`
+   carries one), the kwarg should have no default at all.
+2. `nothing`-on-missing is the right contract for a plotting helper and the wrong one for detecting a
+   wrong-generation lookup. It converts "you are reading the wrong grid" into "this panel is empty",
+   which reads as a data property.
+3. Figures written to `res/` do not prove a notebook worked. Four of these rendered fine and were
+   entirely NaN; the rest silently kept a **three-day-old file from a different model generation**.
+   When checking a diagnostics re-run, compare figure mtimes and sizes against the archive, not just
+   the exit code.

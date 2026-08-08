@@ -730,7 +730,12 @@ function make_agepair_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
                           res_dir::AbstractString = "../res")
     grid = oc.grid
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    # `contacts` MUST come from the notebook's cfg. Omitting it falls through to the module-level
+    # `CONTACTS_TOKEN`, which `framework.jl` builds from `FrameworkConfig()`'s LITERAL
+    # `stage1_use_nuts = true` — i.e. always the `-nuts` generation, whatever cfg or ENV say. That
+    # is how every μ figure below went silently blank against the Pathfinder grid (2026-08-08).
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid,
+                                  contacts = contacts_label(oc.cfg))
     μdraws === nothing && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
     weighted = is_weighted(dm)
     panels = [agepair_panel(part_rows[r], row_titles[r], μdraws, weighted, oc)
@@ -773,7 +778,9 @@ function make_mu_horizon_fig(dm::ContactDegreeModel, cells, tag::AbstractString,
         lbl = string(degree_label(dm), "|", ngm_label(nb))
         med = fill(NaN, length(hz), ncell); lo = copy(med); hi = copy(med)
         for (k, h) in enumerate(hz)
-            μd = reconstruct_mu_draws(lbl, origin, h; grid = grid)   # default week = forecast week t₀+h
+            # `contacts` from cfg, never the `CONTACTS_TOKEN` default — see make_agepair_fig.
+            μd = reconstruct_mu_draws(lbl, origin, h; grid = grid,   # default week = forecast week t₀+h
+                                      contacts = contacts_label(cfg))
             μd === nothing && (@warn "no chain for $lbl @ $origin h$h"; continue)
             for (p, (ci_, cj_, _)) in enumerate(cells)
                 col = @view μd[:, ci_, cj_]
@@ -856,7 +863,9 @@ function make_mu_timeline_fig(dm::ContactDegreeModel, cells, tag::AbstractString
         lbl = string(degree_label(dm), "|", ngm_label(nb))
         med = fill(NaN, Tn, ncell); lo = copy(med); hi = copy(med)
         for t in 1:Tn
-            μd = reconstruct_mu_draws(lbl, origin, h_chain; week_index = t, grid = grid)  # h4 chain, week t
+            # `contacts` from cfg, never the `CONTACTS_TOKEN` default — see make_agepair_fig.
+            μd = reconstruct_mu_draws(lbl, origin, h_chain; week_index = t, grid = grid,  # h4 chain, week t
+                                      contacts = contacts_label(cfg))
             μd === nothing && (@warn "no chain for $lbl @ $origin h$h_chain"; break)
             for (p, (ci_, cj_, _)) in enumerate(cells)
                 col = @view μd[:, ci_, cj_]
@@ -912,7 +921,9 @@ function make_contactmatrix_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
                                 res_dir::AbstractString = "../res")
     grid = oc.grid; A = grid.N
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    # `contacts` from cfg, never the `CONTACTS_TOKEN` default — see make_agepair_fig.
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid,
+                                  contacts = contacts_label(oc.cfg))
     μdraws === nothing && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
     weighted = is_weighted(dm)
     obs = [_observed_cell_mean(oc.apd, oc.t_o, i, j, weighted) for i in 1:A, j in 1:A]
@@ -1045,7 +1056,10 @@ function make_agepair_ccdf_fig(dm::ContactDegreeModel, nb::NGMBuilder, oc;
                                res_dir::AbstractString = "../res")
     grid = oc.grid; A = grid.N
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid)
+    # `contacts` from cfg, never the `CONTACTS_TOKEN` default — see make_agepair_fig. (The κ call
+    # below already threaded cfg through; this one did not, which is how the mismatch hid.)
+    μdraws = reconstruct_mu_draws(lbl, oc.origin, 1; week_index = oc.t_o_est, grid = grid,
+                                  contacts = contacts_label(oc.cfg))
     κdraws = reconstruct_dispersion_draws(lbl, oc.origin, 1; weighted = is_weighted(dm),
                                           cfg = oc.cfg, grid = grid, week_index = oc.t_o_est)
     (μdraws === nothing || κdraws === nothing) && (@warn "no chain for $lbl @ $(oc.origin)"; return nothing)
