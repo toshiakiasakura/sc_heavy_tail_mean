@@ -121,7 +121,10 @@ function load_window_data(win::WeeklyWindow, df::DataFrame, tmap::Dict{Int,Date}
     return WindowData(weeks, grid.N, I_mean, I_sd, AB, AB_fc, grid.POP, grid.PROP, grid.LAB)
 end
 
-"""Assemble `WindowData` for the full 12-week (lags + fit) span of `win`, reading the
+"""Assemble `WindowData` for the full 12-week (lags + fit) span of `win` — `win.all_weeks`, and
+UNCHANGED by `-w8h` (2026-08-09), which reshaped only the CONTACT window (`prepare_degree_data`,
+now `win.fit_weeks ++ win.forecast_weeks` = `[t₀−n_fit+1 … t₀+h]`). The renewal needs `smax` weeks of infection history that carry no `C*`, so the
+two windows differ in length and are paired with a `smax` offset; see `model_transmission`. Reads the
 estimates CSV from `path`. Backward-compatible wrapper around the pre-loaded-frame method."""
 function load_window_data(win::WeeklyWindow; path::AbstractString = _EST_PATH, grid = cis_age_grid())
     df, tmap = _load_estimates(path)

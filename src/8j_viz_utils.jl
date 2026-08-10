@@ -73,6 +73,9 @@ must not share an axis with the two spatial ρ; see `plot_lengthscales`)
 `phi_time` is `NaN` for pooled chains). Note susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ
 (Stage-1, ~200 draws) have different draw counts — they are consumed by separate figures.
 
+Also returns the per-draw **observation SD** `sigma_inf` (the infection-likelihood noise scale,
+`N⁺(0.05, 0.025²)` in `model_transmission`) — Stage-2, so present for the NULL model too.
+
 Also returns the per-draw **generation-interval** log-parameters `w_mu`/`w_sigma` from the pooled
 file (estimated since 2026-07-30, §3.1; stored POST-clamp, so
 `gen_interval_pmf_log(w_mu[d], w_sigma[d])` reproduces that draw's `w` exactly). Convert to natural
@@ -95,14 +98,20 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
         return nothing
     end
     susc = pooled.susc; inf = pooled.inf; gamma_sar = pooled.gamma_sar   # Stage-2 pooled draws (N×A / N)
+    # `sigma_inf` is the infection-likelihood observation SD (`sigma_inf ~ N⁺(0.05, 0.025²)` in
+    # `model_transmission`). It has been written into every `8j_s2_*` since the cut landed
+    # (`fit_stage2_pooled` stores `q.sigma_inf`) but was dropped here, so no 9j figure could ever
+    # show it — the one fitted Stage-2 scalar with no visualisation. Surfaced 2026-08-09.
+    sigma_inf = pooled.sigma_inf
     chn = isfile(s1p) ? (try load(s1p, "result") catch err
                              @warn "could not load the Stage-1 chain; ρ set to NaN" s1p err
                              nothing
                          end) : nothing
     if chn === nothing                                                   # NULL model: no contact fit
         nan1 = fill(NaN, 1)
-        return (; susc, inf, gamma_sar, F = pooled.F, rho_diag = nan1, rho_gap = nan1, phi_time = nan1,
-                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F are Stage-2, always there
+        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+                  phi_time = nan1,
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F/σ_inf are Stage-2, always there
     end
     s1names = string.(names(chn, :parameters))
     # `-diag` chains (2026-08-05, short-lived) LACK `log_rho_gap`: their spatial kernel smoothed the
@@ -116,11 +125,17 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     # `-ar1` (2026-08-06): the temporal parameter must be `phi_time`; a chain carrying
     # `log_rho_time` is pre-`-ar1` and its weeks-valued length-scale must not be read as a
     # correlation. Spatial guard (`log_rho_gap` + `-m32`) is unchanged.
-    if !("log_rho_gap" in s1names) || !("phi_time" in s1names) || !occursin("-m32", contacts)
+    # Token half of the guard: current-style tokens are `-m32` by construction, only a RETAINED
+    # legacy one must carry the marker (`is_legacy_token`, framework.jl). A bare
+    # `occursin("-m32", contacts)` here would reject every chain fitted after the accumulated token
+    # prefix was dropped on 2026-08-09.
+    if !("log_rho_gap" in s1names) || !("phi_time" in s1names) ||
+       (is_legacy_token(contacts) && !occursin("-m32", contacts))
         @warn "Stage-1 chain is not the `-m32` generation (no `log_rho_gap`, or pre-`-m32` token); \
                ρ set to NaN" s1p contacts
         nan1 = fill(NaN, 1)
-        return (; susc, inf, gamma_sar, F = pooled.F, rho_diag = nan1, rho_gap = nan1, phi_time = nan1,
+        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+                  phi_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)
     end
     # `RHO_BOUNDS`/`RHO_TIME_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree`
@@ -133,7 +148,8 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     # (dimensionless correlation vs age-years), so it must NOT share their axis in 9j.
     phi_time = ("phi_time" in s1names) ? vec(Array(chn[:phi_time])) : fill(NaN, length(rho_diag))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
-    return (; susc, inf, gamma_sar, F = pooled.F, rho_diag, rho_gap, phi_time, w_mu, w_sigma)
+    return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag, rho_gap, phi_time,
+              w_mu, w_sigma)
 end
 
 """

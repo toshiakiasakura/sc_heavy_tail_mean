@@ -182,11 +182,9 @@ function assemble_or_load_forecasts(wins, combos, cfg;
         truth_o = load_forecast_truth(win_o; grid = grid)
         truth_store[win_o.origin] = Float64.(truth_o)
         # this origin's 4 contact/degree windows (reuse the single raw read); discarded after.
-        apd_o = [prepare_degree_data(
-                     WeeklyWindow(win_o.origin + Day(7 * h);
-                                  n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons),
-                     cfg; grid = grid, setting = :all,
-                     df_part_raw = raw.df_part, craw_raw = raw.craw)
+        apd_o = [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
+                                     grid = grid, setting = :all,
+                                     df_part_raw = raw.df_part, craw_raw = raw.craw)
                  for h in cfg.horizons]
         for (dm, nb) in combos
             lbl = string(degree_label(dm), "|", ngm_label(nb))
@@ -715,10 +713,9 @@ function observed_contact_reproduction_over_time(wins, cfg;
     ρ  = fill(NaN, nO)
     t0 = time()
     for (oi, win_o) in enumerate(wins)
-        win_h = WeeklyWindow(win_o.origin + Day(7 * h); n_fit = cfg.n_fit,
-                             smax = cfg.smax, horizons = cfg.horizons)
-        apd = prepare_degree_data(win_h, cfg; grid = grid, setting = setting,
-                                  df_part_raw = raw.df_part, craw_raw = raw.craw)
+        apd = prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
+                                   grid = grid, setting = setting,
+                                   df_part_raw = raw.df_part, craw_raw = raw.craw)
         E = apd.emp_mean[end, :, :]              # observed mean-contact matrix at week origin+h
         ρ[oi] = maximum(real(eigvals(E)))        # Perron root of the raw observed contact matrix
         verbose && (oi % 5 == 0 || oi == nO) &&
@@ -1162,7 +1159,8 @@ end
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
     collect_transmission_structure(labels4, origins, cfg; grid, h)
-        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F, sg_names, ref_lab)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F, sigma_inf,
+              inf_pinned, F_pinned, sg_names, ref_lab)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 two-stage artefacts. `susc`/`inf` are pop-weighted age super-group values, `susc_bin`/`inf_bin` the
@@ -1182,8 +1180,19 @@ grid.LAB[cfg.ref_bin]` the reference label, both threaded into the plot function
 re-derived there.
 
 `rho` holds the three GP length-scales (col 1 ρ_diag total-age and col 2 ρ_gap age-gap, both
-age-yrs; col 3 ρ_time weeks — `NaN` for pooled chains); `gamma` holds the per-contact secondary
-attack rate γ_SAR. Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
+age-yrs; col 3 the AR(1) φ, dimensionless — `NaN` for pooled chains); `gamma` holds the per-contact
+secondary attack rate γ_SAR and `sigma_inf` the infection-likelihood observation SD (added
+2026-08-09 — it was stored in every `8j_s2_*` but never surfaced).
+
+`inf_pinned` / `F_pinned` are `Dict(label => Bool)` flags saying whether that model's `inf` / `F` is
+a **pin rather than an estimate** — `model_transmission` sets `inf = ones(A)` under
+`fix_infectivity(nb)` (the diagonal-NGM baseline identifies only `susc_a·inf_a`) and `F = 1.0`
+always. Detected from the draws (`all(== 1.0)`), so a label rename cannot silently un-mark it. Pass
+them to `plot_ratio`/`plot_F` so a pinned flat line is annotated as such instead of reading as a
+fitted result that happens to equal 1. ⚠ A pinned `inf` also means that model's `susc` absorbs the
+whole `susc·inf` product and is NOT on the same footing as the other models' `susc`.
+
+Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
 `susc`/`inf`, `nO × grid.N` for the `*_bin` pair, `nO × 3` for `rho`, `nO × 1` for `gamma`; missing
 artefacts leave `NaN` gaps. Reuses `load_transmission_draws` + `supergroup_split` +
 `aggregate_supergroups`.
@@ -1199,10 +1208,36 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
     susc_store, inf_store, rho_store, gamma_store = mkstore(nG), mkstore(nG), mkstore(3), mkstore(1)
     gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
     F_store  = mkstore(1)                               # leaky antibody-protection factor F (scalar per draw)
+    sinf_store = mkstore(1)                             # observation SD σ_inf (scalar per draw)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
+    # PINNED vs FITTED. `model_transmission` pins `inf = ones(A)` whenever `fix_infectivity(nb)`
+    # (the no-interaction / DiagonalMeanNGM baseline: a diagonal NGM identifies only the product
+    # susc_a·inf_a, so infectivity is not separately estimable) and pins `F = 1.0` for every model
+    # (the antibody term is off since 2026-08-04). A pin renders as a flat 1.0 line that is
+    # indistinguishable from a fitted parameter that happens to sit at 1 — so detect it and let the
+    # figures SAY so. Detected from the DRAWS (`all(== 1.0)`, exact because the pin is a literal
+    # `one`/`1.0`, not an estimate) rather than by parsing `lbl` for "mean-diagonal": the label is a
+    # display string and a rename would silently un-mark the pin.
+    inf_pinned = Dict(l => true for l in labels4)
+    F_pinned   = Dict(l => true for l in labels4)
+    seen       = Dict(l => false for l in labels4)
     for lbl in labels4, (oi, origin) in enumerate(origins)
-        d = load_transmission_draws(lbl, origin, h)     # nothing if chain missing → leaves NaN gap
-        d === nothing && continue
+        # ⚠ `contacts` MUST be passed explicitly. `load_transmission_draws` defaults it to
+        # `CONTACTS_TOKEN`, which `framework.jl` builds from a LITERAL `stage1_use_nuts = true` and
+        # so ALWAYS ends `-nuts`, no matter what this `cfg` says. Omitting it here (the state until
+        # 2026-08-09) silently pointed every lookup at the NUTS generation — which does not exist on
+        # disk — so `load_transmission_draws` returned `nothing` for all 63 origins × 6 models and
+        # EVERY figure fed by this function (susc, inf, susc_bin, inf_bin, rho, gamma, gi, F) came
+        # out blank: all-NaN stores, panels containing nothing but their reference line. There is no
+        # warning, because a missing Stage-2 artefact is a legitimate "skipped origin×combo".
+        # This is the same bug class fixed across `10j_viz_utils.jl` on 2026-08-08 (see the
+        # `CONTACTS_TOKEN` entry in CLAUDE.md's Gotchas); 9j was missed in that sweep.
+        # Symptom to watch for if it ever regresses: this function returning in well under a second.
+        d = load_transmission_draws(lbl, origin, h; contacts = contacts_label(cfg))
+        d === nothing && continue                       # genuinely missing → leaves a NaN gap
+        seen[lbl] = true
+        inf_pinned[lbl] &= all(==(1.0), d.inf)          # exact: the pin is a literal `one`, not a fit
+        F_pinned[lbl]   &= all(==(1.0), d.F)
         for (V, dst, dstb) in ((d.susc, susc_store, susc_bin_store),
                                (d.inf,  inf_store,  inf_bin_store))
             den = view(V, :, ref)                        # the model's gauge — identically 1 per draw
@@ -1234,6 +1269,10 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
         F_store[lbl].med[oi, 1] = median(Fd)
         F_store[lbl].lo[oi, 1]  = quantile(Fd, 0.05)
         F_store[lbl].hi[oi, 1]  = quantile(Fd, 0.95)
+        si = d.sigma_inf                                  # infection-likelihood observation SD
+        sinf_store[lbl].med[oi, 1] = median(si)
+        sinf_store[lbl].lo[oi, 1]  = quantile(si, 0.05)
+        sinf_store[lbl].hi[oi, 1]  = quantile(si, 0.95)
         # generation interval (estimated since 2026-07-30) → natural scale, DAYS. Col 1 = mean, 2 = SD.
         gm = gi_moments_days(d.w_mu, d.w_sigma)
         for (g, v) in enumerate((gm.mean_days, gm.sd_days))
@@ -1242,9 +1281,16 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
             gi_store[lbl].hi[oi, g]  = quantile(v, 0.95)
         end
     end
+    # A label with no artefact at all must not be reported as "pinned" — `inf_pinned` starts `true`
+    # and an all-missing model would never have it cleared, turning a MISSING model into a
+    # confident claim about its parameterisation. `seen` is what distinguishes the two.
+    for l in labels4
+        seen[l] || (inf_pinned[l] = false; F_pinned[l] = false)
+    end
     return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
               inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store,
-              F = F_store, sg_names, ref_lab = grid.LAB[ref])
+              F = F_store, sigma_inf = sinf_store, inf_pinned, F_pinned,
+              sg_names, ref_lab = grid.LAB[ref])
 end
 
 """
@@ -1325,7 +1371,50 @@ function _median_ylims(vals; ref::Real = 1.0, pad::Real = 0.05, log::Bool = fals
 end
 
 """
-    plot_ratio(store, labels4, origins, ttl; gnames, ref_lab) -> Plot
+    _prior_ratio_band(cfg; n, q) -> (lo, med, hi)
+
+Prior quantiles of a **single non-reference** susc/inf ratio, by simulation from the exact
+generative form in `model_transmission`: `sig ~ N⁺(cfg.susc_inf_sd_prior...)`,
+`z ~ N(0,1)`, ratio `= exp(_softclamp(sig·z, log 0.05, log 20))`.
+
+Simulated rather than derived because `sig·z` is a half-normal × normal product (no closed form)
+and because the soft-clamp is part of the construction — a band computed from the unclamped
+log-normal would not be the prior the model actually uses. Seeded from `cfg.seed`, so the band is
+reproducible and does not move between renders.
+
+This is the identifiability read for the age profile, and the reason it matters here specifically:
+`susc_inf_sd_prior` was set to N⁺(0, 0.25²) on 2026-07-31 *so that the profile can shrink to
+no-variation when the data are silent*. Without a prior reference on the panel there is no way to
+tell a fitted flat profile from a prior-driven one — exactly the read `plot_gen_interval` already
+provides for the generation interval.
+
+⚠ It is a **per-bin** band. The super-group series in `plot_ratio` are population-weighted means of
+several bins, whose prior is tighter (averaging), so the band is a conservative reference there —
+labelled as per-bin on the plot rather than silently reused.
+"""
+function _prior_ratio_band(cfg; n::Integer = 200_000, q = (0.05, 0.5, 0.95))
+    rng = Random.Xoshiro(cfg.seed)
+    sig = rand(rng, truncated(Normal(cfg.susc_inf_sd_prior...); lower = 0), n)
+    z   = randn(rng, n)
+    off = exp.(_softclamp.(sig .* z, log(0.05), log(20.0)))
+    return Tuple(quantile(off, collect(q)))
+end
+
+"""
+    _prior_gamma_band(cfg; q) -> (lo, med, hi)
+
+Prior quantiles of γ_SAR: `exp(_softclamp(Normal(cfg.gamma_sar_prior...), log 0.001, log 10))`.
+Analytic (a normal quantile pushed through the same clamp the model applies), so no simulation.
+"""
+function _prior_gamma_band(cfg; q = (0.05, 0.5, 0.95))
+    μ, σ = cfg.gamma_sar_prior
+    zq = 1.6448536269514722                        # 90% two-sided normal quantile
+    lq = (μ - zq * σ, μ, μ + zq * σ)
+    return Tuple(exp(_softclamp(x, log(0.001), log(10.0))) for x in lq)
+end
+
+"""
+    plot_ratio(store, labels4, origins, ttl; gnames, ref_lab, cfg, pinned) -> Plot
 
 One panel per config of a super-group ratio store from `collect_transmission_structure`
 (susceptibility or infectivity): each super-group with a 90% ribbon, referenced to 1.0 — the
@@ -1336,19 +1425,46 @@ model's own reference bin `ref_lab` (= `grid.LAB[cfg.ref_bin]`, default "25-34")
 it is identically 1.0 with a zero-width ribbon, so the dashed grey reference line carries its label
 instead. The shared y-limits are set from the **medians** only (`_median_ylims`) so a wide 90% band
 on one series runs off-panel instead of flattening every median line.
+
+⚠ **The y-axis is `:log10` (fixed 2026-08-09).** These are RATIOS, constructed in
+`model_transmission` as `exp(_softclamp(sig·z, …))` — multiplicatively symmetric about 1, so a
+halving and a doubling are the same distance from the reference and must plot that way. On the
+linear axis this used to use, the measured median range over the completed grid (**0.12 – 18.1**)
+put the entire sub-1 half — *reduced* susceptibility, half the parameter's range by construction —
+into a sliver at the bottom, and squashed `mean-diagonal` (0.19–1.9) to a flat line beside
+`negbin|neighbourhood` (→18.1). Both per-bin companions (`plot_ratio_bins`,
+`plot_susc_inf_bins_ci`) were already `:log10`; this figure was the odd one out.
+
+`cfg` (optional) adds the grey **prior 90% band** from `_prior_ratio_band` — posterior inside it
+⇒ the age profile is prior-driven, not estimated. `pinned` (optional, `tr.inf_pinned`) marks the
+models whose parameter is a PIN rather than a fit; their panel title is flagged and the prior band
+is suppressed, because a pinned value has no prior to be read against.
 """
 function plot_ratio(store, labels4, origins, ttl::AbstractString;
-                    gnames, ref_lab::AbstractString)
-    yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]))
+                    gnames, ref_lab::AbstractString, cfg = nothing, pinned = nothing)
+    yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]); log = true)
+    pri = cfg === nothing ? nothing : _prior_ratio_band(cfg)
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
-        p = plot(; title = lbl, titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "ratio to $(ref_lab)", legend = (k == 1 ? :topright : false),
-                 legendfontsize = 6, xrotation = 45, ylims = yl)
+        is_pin = pinned !== nothing && get(pinned, lbl, false)
+        p = plot(; title = is_pin ? "$lbl  [PINNED ≡ 1, not fitted]" : lbl, titlefontsize = 8,
+                 titlefontcolor = is_pin ? :firebrick : :black,
+                 xlabel = "forecast origin",
+                 ylabel = "ratio to $(ref_lab) (log)", legend = (k == 1 ? :topright : false),
+                 legendfontsize = 6, xrotation = 45, yscale = :log10, ylims = yl)
         # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis.
         # (A leading `hline!` here initialises a numeric axis and collapses the Dates.)
         plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash,
               label = "$(ref_lab) (ref)")
+        # Prior band UNDER the posterior series, and only where a prior exists. Drawn as a ribbon on
+        # a two-point date series so it cannot disturb the date axis (same trap as the ref line).
+        if pri !== nothing && !is_pin
+            xs = [first(origins), last(origins)]
+            plot!(p, xs, fill(pri[2], 2); color = :grey40, ls = :dot, lw = 1.0,
+                  label = (k == 1 ? "prior 90% (per bin)" : ""),
+                  ribbon = (fill(pri[2] - pri[1], 2), fill(pri[3] - pri[2], 2)),
+                  fillalpha = 0.10, fillcolor = :grey60)
+        end
         for g in eachindex(gnames)
             gnames[g] == ref_lab && continue     # ≡ 1 by construction — the dashed line above IS it
             m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
@@ -1514,20 +1630,85 @@ so unlike `plot_ratio` there are no per-age super-groups to facet. `store` is th
 Under the two-stage cut, C* is NOT normalised, so γ_SAR is the per-contact secondary attack rate
 (it reproduces the reference cell N_{ref,ref} = susc_r·inf_r directly) and IS comparable across
 origins. γ_SAR has no natural reference level (unlike the ratio=1 / R=1 lines), so none is drawn.
-The y-axis is **capped at (0, 2.0)** so the neighbourhood-NGM blow-ups don't stretch the panel;
-medians/bands running past 2.0 are clipped.
+
+⚠ **The y-axis is `:log10` and no longer capped (fixed 2026-08-09).** γ_SAR is constructed as
+`exp(_softclamp(log_gamma_sar, log 0.001, log 10))` — a multiplicative scale spanning four orders of
+magnitude — and the old linear `ylims = (0, 2.0)` destroyed both ends of it. Measured on the
+completed grid: `negbin|neighbourhood` sits ON the lower clamp (median 0.001 at some origins, 1.9%
+of its draws at the bound), which on a linear 0–2 axis is visually indistinguishable from zero and
+from any other small value; meanwhile medians and bands past 2.0 were silently clipped away. The
+`_softclamp` bounds are now drawn as dashed red lines, so clamp compression — the failure mode this
+parameter has hit twice (the log 0.02 bound in 2026-07-13, and now log 0.001) — is visible on the
+figure instead of having to be inferred from the draws.
+
+`cfg` (optional) adds the grey prior 90% band from `_prior_gamma_band`: a posterior sitting inside
+it means γ_SAR is carrying prior, which given the documented γ_SAR ↔ generation-interval
+confounding (§3.1) is the thing worth knowing.
 """
-function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1)
+function plot_gamma(store, labels4, model_cols, origins; h::Integer = 1, cfg = nothing)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
-    fig = plot(; xlabel = "forecast origin", ylabel = "γ_SAR (per-contact secondary attack rate)",
+    # ⚠ A log axis cannot show ≤ 0, and `lo` can legitimately reach the 0.001 clamp — so limits come
+    # from the finite POSITIVE values only, via the same `_median_ylims(...; log = true)` the ratio
+    # figures use, widened to include the clamp bounds so they are always on-panel.
+    vals = reduce(vcat, [vec(store[l].med) for l in labels4])
+    cl   = (0.001, 10.0)                                   # `model_transmission` soft-clamp bounds
+    yl   = _median_ylims(vcat(vals, collect(cl)); ref = 1.0, log = true)
+    fig = plot(; xlabel = "forecast origin", ylabel = "γ_SAR (per-contact SAR, log)",
                title = "8j — secondary attack rate γ_SAR over time by model (h=$h; 90% CI)",
-               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0.0, 2.0))
+               size = (950, 520), legend = :topright, xrotation = 45,
+               yscale = :log10, ylims = yl)
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
+        all(isnan, m) && continue
         plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
               ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
     end
+    if cfg !== nothing
+        pri = _prior_gamma_band(cfg)
+        xs  = [first(origins), last(origins)]
+        plot!(fig, xs, fill(pri[2], 2); color = :grey40, ls = :dot, lw = 1.0,
+              label = "prior 90%", ribbon = (fill(pri[2] - pri[1], 2), fill(pri[3] - pri[2], 2)),
+              fillalpha = 0.10, fillcolor = :grey60)
+    end
+    # Soft-clamp bounds LAST (after the date-valued series, so the x-axis is already a date axis).
+    hline!(fig, collect(cl); ls = :dash, color = :red, lw = 1,
+           label = "softclamp [0.001, 10]")
+    return fig
+end
+
+"""
+    plot_sigma_inf(store, labels4, model_cols, origins; h=1) -> Plot
+
+Infection-likelihood **observation SD σ_inf** over the rolling forecast origins, one line per model
+(median + 90% band). `store` is the `sigma_inf` field of `collect_transmission_structure`.
+
+`sigma_inf ~ N⁺(0.05, 0.025²)` in `model_transmission` is the noise scale of the weekly infection
+likelihood — the only fitted Stage-2 scalar that had **no figure at all**: it has been written into
+every `8j_s2_*` since the cut landed, but `load_transmission_draws` dropped it before 2026-08-09, so
+nothing downstream could see it. It is worth a panel because it is the model's own estimate of how
+well it fits the infection series: σ_inf far above its prior centre means the renewal step is not
+tracking the data and the residual is being absorbed as noise, which is exactly the situation in
+which good WIS would be coming from a wide predictive rather than an accurate one.
+"""
+function plot_sigma_inf(store, labels4, model_cols, origins; h::Integer = 1)
+    fig = plot(; xlabel = "forecast origin", ylabel = "σ_inf (infection observation SD)",
+               title = "9j — infection-likelihood observation SD σ_inf (h=$h; 90% CI)",
+               size = (950, 520), legend = :topright, xrotation = 45)
+    for (ci, lbl) in enumerate(labels4)
+        m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
+        all(isnan, m) && continue
+        plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
+              ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
+    end
+    # Prior centre + 90%, so "has it moved off the prior?" is readable straight off the panel —
+    # the same identifiability idiom as `plot_gen_interval`. Truncated at 0, hence `max(·, 0)`.
+    pm, ps = 0.05, 0.025
+    zq = 1.6448536269514722
+    xs = [first(origins), last(origins)]
+    plot!(fig, xs, fill(pm, 2); color = :grey40, ls = :dot, lw = 1.0, label = "prior 90%",
+          ribbon = (fill(pm - max(pm - zq * ps, 0.0), 2), fill(zq * ps, 2)),
+          fillalpha = 0.10, fillcolor = :grey60)
     return fig
 end
 
@@ -1548,11 +1729,18 @@ that the term is off. `ylims` is `(0, 1.05)` rather than `(0, 1)` precisely so t
 not sit on the top border and vanish (it also fixes the pre-existing silent-clipping hazard: an F
 outside (0,1) used to be clipped away without warning).
 """
-function plot_F(store, labels4, model_cols, origins; h::Integer = 1)
+function plot_F(store, labels4, model_cols, origins; h::Integer = 1, pinned = nothing)
     # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
     # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
+    # The "PINNED" title used to be a hard-coded string, which would have quietly LIED the moment
+    # F was restored to `~ Beta(5,1)`. It is now driven by `pinned` (`tr.F_pinned`), detected from
+    # the draws, so the panel can only claim a pin that is actually in the artefacts.
+    all_pinned = pinned !== nothing && !isempty(labels4) && all(get(pinned, l, false) for l in labels4)
+    ttl = all_pinned ? "9j — antibody-protection factor F (h=$h) — PINNED at 1.0 (term off)" :
+          pinned === nothing ? "9j — antibody-protection factor F (h=$h)" :
+                               "9j — antibody-protection factor F (h=$h) — FITTED"
     fig = plot(; xlabel = "forecast origin", ylabel = "F (leaky antibody-protection factor)",
-               title = "9j — antibody-protection factor F (h=$h) — PINNED at 1.0 (term off)",
+               title = ttl,
                size = (950, 520), legend = :topright, xrotation = 45, ylims = (0, 1.05))
     for (ci, lbl) in enumerate(labels4)
         m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]

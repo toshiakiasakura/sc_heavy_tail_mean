@@ -35,7 +35,9 @@ using Statistics, Dates, Random
 
 Per-week, per age-pair-cell posterior summary of the two NGM contact functionals, reconstructed
 read-only from a cached Stage-1 chain `s1chn`. `apd_h` is the degree window this chain was fit on
-(`prepare_degree_data(WeeklyWindow(origin + Day(7h)), …)`); `pop` is the CIS population vector.
+(`prepare_degree_data(degree_window(origin, h, cfg), …)`, i.e. `[t₀−n_fit+1 … t₀+h]`, length
+`n_fit + h` — NOT the shifted `WeeklyWindow(origin + Day(7h))` this used to say); `pop` is the CIS
+population vector.
 
 Returns `weeks::Vector{Date}` (length `Tn`) and two `(med, lo, hi)` triples, each a `Tn×A×A` array:
 `mean` = ⟨k⟩ = K1 (MeanNGM C0); `neigh` = ⟨k²⟩/⟨k⟩·g (NeighbourhoodDegreeNGM C0). `med` is the
@@ -103,8 +105,7 @@ function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, 
                     title = "no chain: $(degree_label(dm)), contactee $(grid.LAB[j]) @ $(origin)")
     end
     s1chn = load(s1p, "result")
-    apd_h = prepare_degree_data(WeeklyWindow(origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
-                                             horizons = cfg.horizons), cfg;
+    apd_h = prepare_degree_data(degree_window(origin, h, cfg), cfg;
                                 grid = grid, setting = :all,
                                 df_part_raw = raw.df_part, craw_raw = raw.craw)
     st     = moment_timeline_stats(dm, apd_h, wd.pop, cfg, s1chn, grid)
@@ -205,7 +206,14 @@ function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::Framewo
                                            joinpath(@__DIR__, "..", "dt_intermediate")),
                               res_dir::AbstractString = "../res")
     lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
-    A   = grid.N; Tn = cfg.smax + cfg.n_fit
+    A = grid.N
+    # X-axis extent = the LONGEST window in play, 12 weeks. That is `smax + n_fit` for the legacy
+    # `-hd` generation and `n_fit + max(horizons)` for the current one (`-w8h`, 2026-08-09) — equal
+    # by coincidence, since smax == max(horizons) == 4. A chain fitted at h < 4 is SHORTER (n_fit+h),
+    # so its line simply stops early: the per-token loop below breaks when
+    # `reconstruct_dispersion_draws` returns `nothing`, which `_read_disp_chain`'s bounds guard now
+    # does for `week_index` past the chain's own Tn (it used to return uninitialised garbage).
+    Tn = cfg.smax + cfg.n_fit
     cols = (:grey40, :steelblue)
     nice = ("-hd (flat τ_t·z RE)", "current (block only)")
     blab = ["child→child", "child→adult", "adult→child", "adult→adult"]

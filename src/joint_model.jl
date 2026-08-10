@@ -184,20 +184,27 @@ keeping `γ_SAR` on the same per-contact scale as the mean-NGM models.
 
     c̄ = Σ_{t∈fit, i} n[t,i] · Σ_j emp_mean[t,i,j] / Σ_{t∈fit, i} n[t,i] / A .
 
-`apd` may be ANY of the window's horizon-shifted degree windows: they all contain `win0.fit_weeks`
-(for `n_fit=8, smax=4, h≤4`), and the row-sum over `j` is invariant to the seeded contactee-bin
-draw, so `c̄` is the same whichever is passed — that is what makes the null constant **fixed while
-forecasting** (spec: "the used average number should be fixed while forecasting").
+`apd` may be ANY of the window's horizon-`h` degree windows: since `-w8h` (2026-08-09) each is
+`[t₀−n_fit+1 … t₀+h]` and so contains ALL of `win0.fit_weeks` as its first `n_fit` entries
+(`stage2_inputs` asserts exactly that), and the row-sum over `j` is invariant to the seeded
+contactee-bin draw — so `c̄` is the same whichever is passed. That is what makes the null constant
+**fixed while forecasting** (spec: "the used average number should be fixed while forecasting").
+⚠ The intermediate `-w8` window (sliding, `[t₀−n_fit+1+h … t₀+h]`) broke this: it held only
+`n_fit − h` of the focal weeks, so `c̄` drifted with the horizon. Anchoring the window restored it.
 
-NOTE the model's *forecasts* are invariant to the `/A` convention: `N_ab = γ_SAR·fs_a·c̄·inf_b`, so
-`γ_SAR` and `c̄` enter only as a product and `γ_SAR` is freely estimated. The convention only fixes
-what `γ_SAR` **means** (and where it sits under its prior).
+NOTE the model's *forecasts* are invariant to the `/A` convention AND to `c̄` itself:
+`N_ab = γ_SAR·fs_a·c̄·inf_b`, so `γ_SAR` and `c̄` enter only as a product and `γ_SAR` is freely
+estimated (verified: `c̄`×10 ⇒ `γ_SAR`×0.105, R unchanged to 0.3%). The convention only fixes what
+`γ_SAR` **means** (and where it sits under its prior).
 """
 function null_contact_level(apd::AgePairData, win0::WeeklyWindow)
     A  = apd.A
     ts = findall(w -> w in win0.fit_weeks, apd.weeks)
     isempty(ts) && error("null_contact_level: none of win0.fit_weeks are in the degree window " *
                          "($(first(apd.weeks))–$(last(apd.weeks)))")
+    # A partial overlap is an ANOMALY again under `-w8h` (the window is anchored at the origin, so
+    # all `n_fit` focal weeks are present by construction) — restored after the sliding `-w8` window
+    # made it the normal case for a few hours. If this fires, the caller built the wrong window.
     length(ts) == length(win0.fit_weeks) ||
         @warn "null_contact_level: only $(length(ts))/$(length(win0.fit_weeks)) focal weeks present"
     num = 0.0; den = 0.0
@@ -280,7 +287,7 @@ end
     # `ρ_diag`, `ρ_gap`, `η` and the 27×27 Cholesky `La` are SHARED
     # across weeks. In the per-week regime the weekly fields are no longer iid: they are
     # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Q·La·z·Ltᵀ) with a
-    # shared temporal Cholesky Lt(ρ_time) and a decoupled temporal level cₜ = c + σ_c·(Lt·z_c).
+    # shared temporal Cholesky Lt(φ) and a decoupled, UNSMOOTHED level cₜ = c + σ_c·(Qt·z_c).
     # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
     # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
     # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
@@ -318,7 +325,7 @@ end
     # per-week mean zero to ≤7.4e-16.
     #
     # WHY: nothing previously constrained the field's per-week mean over the pairs, and that mean is
-    # exactly what `c_t = c + σ_c·(Lt·z_c)_t` already parameterises — so η and σ_c were confounded,
+    # exactly what `c_t = c + σ_c·(Qt·z_c)_t` already parameterises — so η and σ_c were confounded,
     # increasingly so as ρ grows (`Kp → J` in that limit). The comment below
     # has claimed since the temporal GP landed that σ_c exists "so η governs age-structure only";
     # this is what makes that true. `z` drops from P×Tn to (P−1)×Tn ⇒ Stage 1 goes 402→390 (NegBin)
@@ -475,12 +482,13 @@ end
         #     each age-pair its OWN AR(1) path in time, each week the spatial kernel conditioned to
         #     sum to zero over the P pairs (see the `Ap`/`La` block above). "Independently per age
         #     pair" is the temporal factor; the pairs remain CORRELATED across age through `La`.
-        #   • decoupled level  cₜ = c + σ_c·(Qt·Lc·z_c)  — scalar intercept c + a 1-D temporal
-        #     process on the SAME Kt, CONDITIONED TO SUM TO ZERO over the Tn weeks (`-t0`, below).
+        #   • decoupled level  cₜ = c + σ_c·(Qt·z_c)  — scalar intercept c + an UNSMOOTHED (iid)
+        #     weekly deviation, CONDITIONED TO SUM TO ZERO over the Tn weeks (`-t0`/`-lc0`, below).
         #     The spatial sum-to-zero constraint is what makes "η governs age-structure only" true
         #     rather than aspirational: without it the field's per-week mean is a second copy of cₜ
         #     and the two amplitudes are confounded.
-        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; φ→0 ⇒ iid weeks, φ→1 ⇒ pooled.
+        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; φ→0 ⇒ iid weeks, φ→1 ⇒ pooled. Since `-lc0`
+        # the φ limits describe the AGE-PAIR FIELD ONLY — the level is iid at every φ.
         # ---- TEMPORAL CORRELATION IS AR(1) (`-ar1`, 2026-08-06, user request) ----
         # An AR(1) correlation matrix IS the exponential (Matérn 1/2) kernel, `Kt[s,t] = φ^|s−t|`,
         # so "AR(1) per age pair, sharing the variance" needs no structural change: the separable
@@ -534,18 +542,37 @@ end
         # ---- SUM-TO-ZERO over the Tn weeks, for the LEVEL (`-t0`, 2026-08-06) ----
         # `tz_Q = _sum_zero_basis(Tn)` is the constant Tn×(Tn−1) Helmert basis of 1^⊥, so Qt·Qtᵀ =
         # Mt = I − 11ᵀ/Tn. Whitening the temporal deviation in that subspace gives
-        #     Cov(σ_c·dev) = σ_c²·(Qt·Lc·Lcᵀ·Qtᵀ) = σ_c²·(Mt·Kt·Mt),
-        # i.e. the SAME temporal GP conditioned on Σ_t dev_t = 0 — exact, not an approximation, and
+        #     Cov(σ_c·dev) = σ_c²·(Qt·Qtᵀ) = σ_c²·Mt,
+        # i.e. IID weekly deviations conditioned on Σ_t dev_t = 0 — exact, not an approximation, and
         # not a soft penalty. Identical construction to the spatial `-s0` above, one axis over.
+        # Per-week marginal SD is σ_c·√(1 − 1/Tn) = 0.935·σ_c at Tn = 8, so `gp_level_scale_prior`
+        # needs no rescaling.
         #
-        # WHY: `c` and the time-MEAN of σ_c·(Lt·z_c) were two parameterisations of the same quantity,
-        # and the flat direction that creates was measured on all four `-m32` chains at
+        # ---- THE LEVEL'S AR(1) IS GONE (`-lc0`, 2026-08-09, user request) ----
+        # This block used to whiten through `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)`, i.e. the level was a
+        # 1-D AR(1) process on the SAME `Kt` as the field, giving Cov = σ_c²·(Mt·Kt·Mt). It now
+        # whitens through the identity. **`phi_time` therefore reaches the likelihood ONLY through
+        # `Lt`, i.e. only through the per-age-pair temporal correlation** — which is the whole point
+        # of the change: "AR(1) per age pair" and nothing else.
+        #
+        # A second, structural benefit falls out. The φ→1 degeneracy documented on `ar1_phi_prior`
+        # (framework.jl) was a property of THIS projection and not of `Kt`: `Qtᵀ·J·Qt = 0` EXACTLY,
+        # so as φ→1 the projected kernel went to zero however well conditioned `Kt` was, `Lc`
+        # collapsed to `chol(1e-4·I)`, and the weekly level died into the jitter (marginal SD per
+        # unit σ_c: 0.958 at φ=0 → 0.260 at 0.99 → 0.028 at 0.9999). With `Lc` removed the level's
+        # amplitude is φ-independent by construction and that failure mode cannot occur. It does NOT
+        # remove the field-side consequence — `Lt`'s first column still absorbs the field as φ→1 —
+        # so the `ar1_phi_prior` tightening stands on its own merits; the two are complementary.
+        #
+        # WHY (unchanged by `-lc0` — the confound is with the deviation's MEAN, not its correlation):
+        # `c` and the time-MEAN of the weekly deviation are two parameterisations of the same
+        # quantity, and the flat direction that creates was measured on all four `-m32` chains at
         # corr(c, time-mean deviation) = −1.000 EXACTLY, with SD(c) ≈ SD(deviation) ≈ 0.38–0.73 but
         # SD(their sum) = 0.007 — the components cancel to 1–2% of their own spread while the mean
-        # level itself is pinned by the data. `z_c` drops Tn → Tn−1 ⇒ Stage 1 goes 390→389 (NegBin)
-        # and 978→977 (hurdle-Weibull). The dimension saving is incidental; identifiability is the
-        # point. ⚠ Those counts coincide with the short-lived `-diag` generation's; the models are
-        # unrelated — tell them apart by `log_rho_gap` (present here) and by the token.
+        # level itself is pinned by the data. `z_c` is Tn−1, not Tn. Stage-1 latent count under
+        # `-w8` (Tn = n_fit = 8): 5 + 32·Tn = **261** (NegBin), 5 + 81·Tn = **653** (hurdle-Weibull).
+        # ⚠ Do NOT date a chain by its dimension — 389/977 (Tn = 12) coincided with the short-lived
+        # `-diag` generation's; identify the model by the token and by which names are present.
         #
         # LEVEL ONLY — do NOT also project the structure field's time axis. `R`'s per-pair mean over
         # weeks duplicates nothing (no other parameter carries persistent age-pair structure), so
@@ -556,11 +583,10 @@ end
         σ_c = exp(_softclamp(log_sigma_c, -3.0, 2.0))     # temporal-level amplitude, soft-bounded (mirrors η)
         tz_Q = _sum_zero_basis(Tn)                        # Tn×(Tn−1), constant — same helper as the spatial basis
         # NB `tz_Q` is the TEMPORAL basis; `ds.sz_Q`/`ds.sz_Qt` are the SPATIAL one and its transpose.
-        # Jitter 1e-4 matches `Lt`'s, not the spatial 1e-6: `Qtᵀ·Kt·Qt` inherits Kt's non-constant
-        # eigenvalues, which are the small ones, and the Pathfinder call is not try/caught.
-        Lc = Matrix(cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L)
-        z_c ~ filldist(Normal(0, 1), Tn - 1)              # temporal-level raw (non-centred, sum-to-zero)
-        c_vec = c .+ σ_c .* (tz_Q * (Lc * z_c))            # per-week level cₜ, deviation sums to 0 over t
+        # No Cholesky and no jitter here any more (`-lc0`): the whitening matrix IS the identity, so
+        # there is no near-singular factor left to regularise on this axis. `Lt`'s 1e-4 stays.
+        z_c ~ filldist(Normal(0, 1), Tn - 1)              # temporal-level raw (non-centred, sum-to-zero, IID)
+        c_vec = c .+ σ_c .* (tz_Q * z_c)                   # per-week level cₜ, deviation sums to 0 over t
 
         # (P−1)×Tn, NOT P×Tn: the field lives in the sum-to-zero subspace. Keep the name `z` —
         # `_stage1_init` selects the non-centred blocks by the PREFIX `startswith(string(k), "z")`
@@ -609,8 +635,15 @@ end
 
 # ======================================================================================
 # Stage 2 — infection / renewal block, conditioning on a FIXED per-week C* trajectory.
-# `Cstar_weeks` is one Stage-1 draw's moments run through `contact_star(nb, …)` (length Tn,
-# positionally aligned to `wd`). Samples the transmission latents and the renewal likelihood;
+# `Cstar_weeks` is one Stage-1 draw's moments run through `contact_star(nb, …)`. Since `-w8`
+# (2026-08-09) it has length `Tn − smax` = `cfg.n_fit`, NOT `Tn`: the contact window spans only the
+# renewal's FITTING weeks (`prepare_degree_data` → `win.fit_weeks`), while `wd` still carries the
+# `smax` lag weeks of infection history. Since `-w8h` the contact window is `[t₀−n_fit+1 … t₀+h]`,
+# so its LAST `n_fit` columns are the ones the renewal reads: `Cstar_weeks[k + h]` pairs with `wd`
+# week `k + smax`, and the likelihood indexes it as `Cstar_weeks[t - cfg.smax + off]` with
+# `off = length(Cstar_weeks) - cfg.n_fit` == h. The length relation is ASSERTED below — a silent
+# off-by-`smax`/`h` here would score a forecast built on the wrong weeks' contacts.
+# Samples the transmission latents and the renewal likelihood;
 # C* is NOT re-scaled (the -gnorm S̄ decoupling was reverted), so `gamma_sar` is the per-contact
 # secondary attack rate and reproduces the reference cell N_{ref,ref} = susc_ref·inf_ref = γ_SAR
 # directly (ref = cfg.ref_bin, default 4 = "25-34"; formerly bin 1 = "2-10").
@@ -623,6 +656,18 @@ end
                                    nb::NGMBuilder = MeanNGM())
     A = wd.A
     Tn = length(wd.weeks)
+    # `-w8h`: the contact window is `[t₀−n_fit+1 … t₀+h]`, length `n_fit + h`, while `wd` spans the
+    # 12 `all_weeks`. The likelihood needs the LAST `n_fit` contact columns (contacts h weeks ahead
+    # of their fit week), so the index offset IS h — and h is recoverable from the length rather
+    # than passed in, which keeps this model's signature free of the horizon:
+    off = length(Cstar_weeks) - cfg.n_fit
+    # Checked, not assumed: the two week vectors are aligned POSITIONALLY and nothing downstream
+    # would notice a wrong-length `Cstar_weeks` except by producing subtly wrong forecasts. (A
+    # length check cannot catch a wrong-DATED window of the right length — `stage2_inputs` asserts
+    # `apd_h.weeks[1:n_fit] == win0.fit_weeks` for that.)
+    @assert 0 <= off <= maximum(cfg.horizons) "model_transmission: Cstar_weeks has \
+$(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(cfg.horizons) \
+(see the `-w8h` note above)"
 
     # ---- transmission latents: per-contact SAR γ_SAR + relative susc/inf (analysis-plan form) ----
     # γ_SAR (per-contact secondary attack rate) carries the NGM level; inherent susceptibility &
@@ -730,10 +775,12 @@ end
     w = gen_interval_pmf_log(w_mu_e, w_sigma_e; smax = cfg.smax)
 
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
-    # (contacts vary by week; C*_t is the fixed Cstar_weeks[t]. `wd.antibody[:, t]` is still passed
-    # but has NO effect while F ≡ 1 — see the TEMPORARY block above.)
+    # (contacts vary by week; C*_t is the fixed `Cstar_weeks[t - smax + off]` — the contact window
+    # starts at `wd`'s first FITTING week and runs `h` weeks past the origin, `-w8h`, so the renewal
+    # reads its last `n_fit` columns. `wd.antibody[:, t]` is still passed but has NO effect
+    # while F ≡ 1 — see the TEMPORARY block above.)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar_weeks[t], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
+        N = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -763,7 +810,7 @@ Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vect
 
 Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
 variable whose name starts with `z` (`z`, `z_c`) — which are drawn from `N(0, z_scale²)` instead of
-`N(0,1)`. These dominate the parameter space (335 of 389/977 unconstrained coordinates) and are only
+`N(0,1)`. These dominate the parameter space (223 of 261/653 unconstrained coordinates at Tn = 8) and are only
 weakly identified, so where the path starts largely decides where it ends.
 
 The name filter is a **prefix**, not a fixed list, so it automatically covers any future `z*` block;
@@ -958,7 +1005,7 @@ Set `z_init_scale = 0` to restore Pathfinder's diffuse `UniformSampler(2)` defau
 the NUTS cost is ADDITIVE on top of the Pathfinder cost, not a replacement for it. The sampler is
 built from explicit `cfg.stage1_nuts_*` settings rather than a bare `NUTS()`: the convenience
 constructor derives `n_adapts = min(1000, n_sample ÷ 2)`, which at the old `n_sample = 250` gave
-**125** warmup iterations to adapt a step size and metric in 389/977 dimensions (Stan's default is
+**125** warmup iterations to adapt a step size and metric in 261/653 dimensions (Stan's default is
 1000). ONE chain per fit — see `_nuts_diagnostics` for why, and for what that costs in diagnostics.
 
 A NUTS failure **propagates**. It used to be caught and replaced by `pf.draws_transformed`, which
@@ -1083,10 +1130,24 @@ path forks from the fitted path.
 function stage2_inputs(dm::ContactDegreeModel, apd_h::AgePairData, win0::WeeklyWindow,
                        wd0::WindowData, cfg::FrameworkConfig, s1_path::AbstractString;
                        adtype = ad_type(cfg), rng = nothing)
-    Tn = length(wd0.weeks)
+    # ---- THE ONE PLACE THE WINDOW'S DATES ARE CHECKED (`-w8h`, 2026-08-09) ----
+    # The degree window must be `degree_window(win0.origin, h, cfg)` = `[t₀−n_fit+1 … t₀+h]`, so its
+    # first `n_fit` weeks ARE the origin's fit weeks. The predecessor convention
+    # (`WeeklyWindow(origin + Day(7h))`, sliding) starts at `t₀−n_fit+1+h` instead, and at h=4 it
+    # even has the right LENGTH — so a call site missed in the migration would produce a complete,
+    # plausible, wrongly-dated forecast that no length check downstream could catch. Dates are only
+    # in scope here, where both `apd_h` and `win0` are available; assert rather than trust.
+    @assert length(apd_h.weeks) >= cfg.n_fit &&
+            apd_h.weeks[1:cfg.n_fit] == win0.fit_weeks "stage2_inputs: degree window \
+$(first(apd_h.weeks))…$(last(apd_h.weeks)) does not start at win0.fit_weeks \
+$(first(win0.fit_weeks))…$(last(win0.fit_weeks)) — build it with `degree_window(origin, h, cfg)`"
+    # `n_fit + h` CONTACT weeks, taken from the window itself: since `-w8h` the count varies with the
+    # horizon, and the null path must hand Stage 2 the same number of C* matrices the fitted path
+    # does or `model_transmission`'s length assertion fires.
+    Tc = length(apd_h.weeks)
     if !needs_stage1(dm)
         c0 = null_contact_level(apd_h, win0)
-        return (; md = null_moment_draws(c0, wd0.A, Tn),
+        return (; md = null_moment_draws(c0, wd0.A, Tc),
                   n_draw = cfg.n_stage1_post * cfg.n_stage2_draws, c0 = c0)
     end
     ds = build_degree_stats(dm, apd_h, cfg)
@@ -1117,14 +1178,18 @@ matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphor
 function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::FrameworkConfig;
                            n_draw::Int = cfg.n_stage2_draws, adtype = stage2_ad_type(cfg),
                            base_seed::Int = cfg.seed, max_concurrent::Int = 1)
-    A = wd.A; Tn = length(wd.weeks)
+    A = wd.A
     M = length(moment_draws)
     Cstar_end = Vector{Matrix{Float64}}(undef, M)
     per_m = Vector{Any}(undef, M)
     fit_m(m) = begin
         md = moment_draws[m]
-        Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tn]
-        Cstar_end[m] = Cstar_m[end]
+        # Length comes from the STAGE-1 draw (`cfg.n_fit` contact weeks since `-w8`), NOT from
+        # `length(wd.weeks)` (= n_fit + smax, the infection window). `model_transmission` asserts
+        # the relation between the two.
+        Tc = length(md.K1)
+        Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tc]
+        Cstar_end[m] = Cstar_m[end]                    # last contact week = origin + h
         # GI is sampled INSIDE the model (no `w` arg); `nb` only selects `fix_infectivity`
         model = model_transmission(Cstar_m, wd, cfg, nb)
         rng = Random.Xoshiro(base_seed + m)
@@ -1457,9 +1522,8 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
     s2p = stage2_path(dm, nb, win0.origin, h; contacts = tag, save_dir = save_dir)
     isfile(s2p) && return load(s2p, "pooled")
     if apd_h === nothing
-        win_h = WeeklyWindow(win0.origin + Day(7 * h); n_fit = cfg.n_fit, smax = cfg.smax,
-                             horizons = cfg.horizons)
-        apd_h = prepare_degree_data(win_h, cfg; grid = grid, setting = setting)
+        apd_h = prepare_degree_data(degree_window(win0.origin, h, cfg), cfg;
+                                    grid = grid, setting = setting)
     end
     s1p = stage1_path(dm, win0.origin, h; contacts = tag, save_dir = save_dir)
     inp = stage2_inputs(dm, apd_h, win0, wd0, cfg, s1p; adtype = adtype, rng = Random.Xoshiro(cfg.seed))

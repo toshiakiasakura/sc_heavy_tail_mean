@@ -58,10 +58,14 @@ end
                                origin_max=nothing)
 
 Rolling Sunday-start forecast origins the current data support. Lower bound: the
-12-week fit/lag window (`origin−11wk … origin`) must lie within the infection series
-(`infection_start` = first full inc2prev week). Upper bound: the contact-updated
-iterate needs contact data out to `origin + max horizon` weeks, so the last
-origin is `last_contact_week − max(horizons)`. `craw` is the raw contact table
+12-week fit/lag window (`origin−11wk … origin`) must lie within the INFECTION series
+(`infection_start` = first full inc2prev week) — the infection window is still
+`n_fit + smax` weeks even though the CONTACT window is only `n_fit` (`-w8`,
+2026-08-09: `prepare_degree_data` spans `win.fit_weeks`, so contacts are needed
+only back to `origin − n_fit + 1 + min(horizons)`, a weaker bound that never binds).
+Upper bound: the contact-updated iterate needs contact data out to
+`origin + max horizon` weeks, so the last origin is
+`last_contact_week − max(horizons)`. `craw` is the raw contact table
 (from `load_raw_contact_inputs`); if `nothing` it is read.
 
 `origin_max` caps the last origin at `week_start(origin_max)` (`nothing` = data-derived
@@ -90,11 +94,50 @@ function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
 end
 
 """
+    degree_window(origin, h, cfg) -> WeeklyWindow
+
+The `WeeklyWindow` to hand `prepare_degree_data` for horizon `h`: the ORIGIN's window with its
+horizons truncated to `1:h`, so that `fit_weeks ++ forecast_weeks` = `[t₀−n_fit+1 … t₀+h]`.
+`h = 0` (`horizons = 1:0`, an empty range) gives the bare `n_fit` fit weeks — what a diagnostic
+wants when it needs observed contacts at the origin itself with no horizon tail.
+
+⚠ **USE THIS RATHER THAN `WeeklyWindow(origin + Day(7h))`.** The shifted-origin form was the
+convention until `-w8h` (2026-08-09) and it is now WRONG in a way nothing detects: it would span
+`[t₀+h−n_fit+1 … t₀+h+4]`, which has the right *length* at `h = 4` and the wrong *dates* at every
+horizon. `stage2_inputs` asserts `apd.weeks[1:n_fit] == win0.fit_weeks` for exactly this reason.
+"""
+degree_window(origin::Date, h::Integer, cfg::FrameworkConfig) =
+    WeeklyWindow(origin; n_fit = cfg.n_fit, smax = cfg.smax, horizons = 1:h)
+
+"""
     prepare_degree_data(win, cfg; grid, setting=:all, arrow_path=_ARROW_PATH)
 
-Build `AgePairData` for the 12-week span `win.all_weeks`. `setting ∈ (:all,:home,
-:nonhome)`. Ambiguous/missing ages are assigned by a single seeded
+Build `AgePairData` for the span **`win.fit_weeks ++ win.forecast_weeks`** — i.e.
+`[origin−n_fit+1 … origin+h]`, length `n_fit + h`, where `h` is however many horizons `win` was
+built with (`degree_window(origin, h, cfg)` above is how to build it).
+`setting ∈ (:all,:home,:nonhome)`. Ambiguous/missing ages are assigned by a single seeded
 population-weighted draw (`MersenneTwister(cfg.seed)`), exactly as in 7j.
+
+⚠ **NOT `all_weeks` (`-w8h`, 2026-08-09, user request).** This used to span all 12 weeks of
+`win.all_weeks` — the `smax` renewal-lag weeks as well as the `n_fit` fitting weeks — and the first
+`smax` of them were fitted and then **discarded**: `model_transmission`'s likelihood runs
+`for t in (smax+1):Tn`, so only the fitting weeks' `C*` ever reaches the renewal. The lag weeks
+exist to supply `I(t−s)` history, which is an INFECTION-side need; the contact block has no use for
+them. Stage-1 latents go from a flat 389/977 to `5 + 32(n_fit+h)` = 293/325/357/389 (NegBin) and
+`5 + 81(n_fit+h)` = 734/815/896/977 (hurdle-Weibull).
+
+The window is **anchored at the origin and extended to the horizon**, not slid forward with it: a
+brief intermediate version (`-w8`, same day) used the sliding `[t₀−n_fit+1+h … t₀+h]`, which is
+exactly the `n_fit` weeks the renewal consumes but leaves the earliest fit weeks in no chain at all
+— visible as 10j §2c losing the first half of its μ timeline. The last `h` columns beyond what the
+renewal reads are fitted-but-unused; that cost is accepted deliberately.
+
+⚠ Consequence for callers: **the contact window and the infection window have DIFFERENT LENGTHS**
+(`n_fit + h` vs `n_fit + smax`) and cannot be indexed by a shared `t`. Everything pairing a per-week
+`C*` with a per-week infection quantity must offset — `Cstar_weeks[t − smax + h]` — and both sites
+derive `h` as `length(Cstar_weeks) − n_fit` rather than being passed it: see `model_transmission`
+and `fit_window_infection_draws` (`10j_viz_utils.jl`). `load_window_data` is unchanged and still
+spans `win.all_weeks`.
 
 Pass `df_part_raw`/`craw_raw` (from `load_raw_contact_inputs()`) to reuse a single
 read of the CoMix participant roster and contact table across many windows — this
@@ -106,7 +149,7 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
                              grid = cis_age_grid(), setting::Symbol = :all,
                              arrow_path::AbstractString = _ARROW_PATH,
                              df_part_raw = nothing, craw_raw = nothing)
-    weeks = win.all_weeks
+    weeks = vcat(win.fit_weeks, win.forecast_weeks)   # `-w8h`: [t₀−n_fit+1 … t₀+h] (see docstring)
     wkset = Dict(w => k for (k, w) in enumerate(weeks))
     A = grid.N; T = length(weeks)
     dmin = minimum(weeks); dmax = maximum(weeks) + Day(6)

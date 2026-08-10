@@ -2119,3 +2119,137 @@ Three transferable lessons:
 normally, the artefact cached, `tmp/check_grid.jl` counted it as present, and 9j/10j/11j scored it.
 A cheap gate in `fit_stage1` — reject when a raw latent leaves prior support by >10 SD — would have
 caught all 147. Prefer a loud gate over a silent cache for anything that fits by optimisation.
+
+## 2026-08-09 — Every 9j transmission figure was blank, and nothing said so
+
+**Symptom.** "9j's susceptibility, infectivity and other transmission-related parameters are not
+properly visualised." They were not mis-scaled — they were **empty**. Eight figures (susc, inf,
+susc_bin, inf_bin, rho, gamma, gi, F) had been rendering as bare reference lines.
+
+**Cause.** `collect_transmission_structure` called `load_transmission_draws(lbl, origin, h)` with no
+`contacts` argument. That kwarg defaults to `CONTACTS_TOKEN`, which `framework.jl` builds from a
+LITERAL `stage1_use_nuts = true` and so always ends `-nuts` — a generation that does not exist on
+disk. All 63 origins × 6 models returned `nothing`; every store stayed NaN.
+
+**This is the SAME bug fixed across `10j_viz_utils.jl` on 2026-08-08. 9j was missed in that sweep.**
+One file was audited, the sibling with the identical idiom was not. When a gotcha is found in one
+`*_viz_utils.jl`, grep the others the same day — the entry in CLAUDE.md's Gotchas listed only 10j
+and so read as "handled".
+
+**Why it stayed invisible for so long.** `load_transmission_draws` returns `nothing` for a missing
+Stage-2 artefact *by design* — a skipped origin×combo is legitimate — so there is no warning to
+notice. 10j's version of this bug at least emitted 48 `no chain for …` warnings; 9j's emitted
+none. An all-NaN store then plots as a panel containing its reference line and nothing else, which
+looks like a rendering choice rather than a failure.
+
+**What actually caught it.** Not reading the code — an *assertion on a domain fact* in a throwaway
+verification script: `@assert tr.inf_pinned["unweighted-negbin|mean-diagonal"]`, i.e. "the
+no-interaction model's infectivity must be pinned". That is only knowable from real draws, so it
+fails when the loader silently returns nothing. The corroborating signal was **wall-clock**:
+`collect_transmission_structure` returned in **0.4 s** reading nothing vs **11.4 s** reading the
+grid. A 30× speed-up in a function that only reads files is a bug, not a win.
+
+**Transferable.**
+- **A "no data" path that is legitimate somewhere is a silent-failure path everywhere else.**
+  `isfile(p) || return nothing` is right for a skipped cell and catastrophic for a mis-typed token.
+- **Assert on something only real data can satisfy.** A `nrow > 0` or `isfinite` check would have
+  passed here (the stores existed, full of NaN). `inf_pinned == true` could not.
+- **Time is a correctness signal for I/O-bound code.** Suspiciously fast = suspiciously empty.
+- Two real but *secondary* findings sat underneath and were unreadable until the panels had data:
+  susc/inf plotted on a LINEAR axis (they are `exp(_softclamp(sig·z))`, measured range 0.12–18.1)
+  and γ_SAR on a linear axis hard-capped at 2.0 (measured 0.001–1.8, i.e. negbin|neighbourhood
+  sits two orders below every other model and was indistinguishable from zero). Both now `:log10`,
+  with prior bands and the soft-clamp bounds drawn.
+
+---
+
+## 2026-08-09 — Fitting 12 weeks of contacts to use 8, and a token that outgrew its job
+
+Three user-requested Stage-1 changes (`-w8h`, `-lc0`, `ar1_phi_prior` → Beta(3,3)) plus one
+consequence nobody asked for. The changes were straightforward; the traps around them were not.
+
+**0. The window shape took two attempts, and the first one shipped.** The request read "T should be
+shortened to T=8 … in total T+h". I read that as the 8 weeks the renewal actually consumes — a
+window SLIDING with the horizon, `[t₀−7+h … t₀+h]` — asked about it, got the recommended option
+confirmed, built it, and verified it end to end. It was wrong: the intent was 8 weeks back from the
+ORIGIN plus the horizon weeks, `[t₀−7 … t₀+h]`, anchored. What surfaced the error was not review but
+**a figure**: 10j §2c came back with 8 points instead of 12, because under a sliding window week
+t₀−7 is in no chain at all. *Transferable:* when a clarifying question has two readings and I pick
+one, the answer confirms my SUMMARY, not the underlying intent — a preview of the resulting artefact
+(here: "§2c will show 8 points, t₀ mid-panel") would have caught it before the fit, not after.
+
+**1. The model had been estimating parameters it never used, invisibly.**
+`prepare_degree_data` spanned `win.all_weeks` (`n_fit + smax` = 12), but `model_transmission`'s
+likelihood runs `for t in (smax+1):Tn` — so `Cstar_weeks[1:4]` was fitted, cached, and never read.
+The lag weeks are an *infection*-side requirement (they supply `I(t−s)`), and the contact block had
+simply inherited the same window. Cost: a flat 389/977 latents where `5+32(n_fit+h)` = 293–389 and
+`5+81(n_fit+h)` = 734–977 suffice, on every one of 504 fits.
+
+*Transferable:* when two blocks of a model share a window object, check that they share the
+*requirement*. `all_weeks` was the obvious thing to reach for and it was wrong for one of the two
+consumers. The tell was available the whole time — a loop that starts at `smax+1` over data that
+starts at 1.
+
+**2. Reshaping one window turned a shared index into a silent off-by-`smax`.** Contacts and
+infections had been the same length, so `Cstar_weeks[t]` and `wd.I_mean[:, t]` were the same week by
+accident of construction rather than by design. Once the lengths diverged, the correct pairing is
+`Cstar_weeks[t − smax + h]`, and getting it wrong produces **a complete, plausible, wrongly-dated
+forecast** — no error, no NaN, no shape mismatch, because the stale indexing just reads a different
+week. Fixed by deriving `h = length(Cstar_weeks) − n_fit` inside `model_transmission` (so the model
+needs no horizon argument), asserting its range, and mirroring it in `fit_window_infection_draws`
+(10j), which reimplements the same algebra for the in-sample panel.
+
+*Transferable:* **when two parallel arrays stop having the same length, assert the relation at the
+boundary rather than fixing the call sites.** The call sites are findable today; the assertion is
+what catches the third one added next month. **And a length check is not enough** — the sliding and
+anchored windows have the SAME length at h=4 and different dates, so `stage2_inputs` also asserts
+`apd_h.weeks[1:n_fit] == win0.fit_weeks`, at the one point where both windows are in scope. Assert
+on the semantic invariant, not the shape.
+
+**3. A bounds guard that returned uninitialised memory.** `_read_disp_chain` (10j) allocated
+`β = Matrix{Float64}(undef, D, 4)` and filled it from the chain entries whose week index matched
+`week_index`. With `week_index` past the chain's own `Tn` — which is exactly what happens when
+`plot_within_block_sd` walks `t = 1:12` across a generation that now has 8 — **no entry matches, no
+branch is taken, and the caller gets whatever was in that memory**, as plausible-looking Float64
+dispersion values. Not a crash, not a NaN. Added an explicit bounds check returning `nothing`.
+
+*Transferable:* `Array{T}(undef, …)` + conditional fill is a silent-garbage pattern whenever the
+condition can match nothing. Either `fill(NaN, …)` or check the condition is satisfiable.
+
+**4. Shortening the cache token broke two guards that parsed it.** The token had accumulated nine
+suffixes (`temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1`); the user asked for it to be cut back, and it
+is now `temporal-w8h-lc0`. But `reconstruct_mu_draws` and `load_transmission_draws` each tested
+`occursin("-m32", contacts)` to *reject* pre-`-m32` chains — a positive test for a marker the current
+token no longer carries, which would have rejected **every current chain** and blanked every μ and
+transmission figure. Rewritten against `is_legacy_token(contacts)` (tests for the `-gsar-cut`
+fragment, an exact partition of the tokens that exist): current-style tokens have the property by
+construction; only a retained generation must prove it.
+
+*Transferable:* **a cache token is an identifier, not a data structure. The moment code parses it,
+shortening it becomes a breaking change.** If a generation needs a machine-readable property, the
+robust form is "current unless legacy-and-missing-the-marker", never a bare positive `occursin`.
+These guards exist precisely for changes that leave parameter names and shapes untouched (`-m32`,
+`-lc0`), where the token is the *only* evidence — so they are the last place that can afford to fail
+open.
+
+**5. What `-lc0` closed, and what it did not.** The level's AR(1) went through
+`Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)`, and `Qtᵀ·J·Qt = 0` *exactly*, so at φ→1 the weekly level collapsed
+into the jitter. Removing `Lc` removes that failure mode by construction. It does **not** touch the
+field-side half — `Lt`'s first column still absorbs the field as φ→1 — which is why the φ prior was
+tightened in the same change rather than relaxed. Fixing one arm of a degeneracy is not fixing the
+degeneracy; state which arm.
+
+**6. A notebook index that was correct only because of the bug.** 10j's `t_o_est = t_o - 1` encoded
+"t₀ is the h=1 chain's second-to-last week" — true when the window slid with the horizon, true again
+under the sliding `-w8`, and FALSE under the anchored `-w8h`, where t₀ is at column `n_fit` in every
+chain regardless of `h`. Nothing would have raised: it would have read μ one week early in every
+§2/§4 figure. Now `t_o_est = t_o` with an `@assert t_o_est == cfg.n_fit` beside it.
+
+*Transferable:* an index expressed **relative to the end** of a window (`end - 1`, `Tn - 1`) silently
+re-points whenever the window's length changes; one expressed relative to a **fixed landmark**
+(`n_fit`, a date) does not. Prefer the landmark, and assert it.
+
+*Also:* `tmp/build_13j_nb.py`, which CLAUDE.md says generates 13j from 10j and which 13j's own header
+says never to bypass, **does not exist** — `tmp/` had been cleaned. 13j had to be hand-patched. A
+generator that lives only in a scratch directory is not a generator; either check it in or stop
+claiming the artefact is generated.

@@ -141,11 +141,9 @@ say("  pending     : ", length(pending), " origin(s); this process takes ", leng
 # as the index into the vector they were given, and nothing here depends on position.
 build_origin_data(oi, win_o) = (
     load_window_data(win_o, inf.df, inf.tmap; grid = grid),                     # reuse the single CSV read
-    [prepare_degree_data(
-         WeeklyWindow(win_o.origin + Day(7 * h);
-                      n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons),
-         cfg; grid = grid, setting = :all,
-         df_part_raw = raw.df_part, craw_raw = raw.craw)                        # reuse the single Arrow read
+    [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
+                         grid = grid, setting = :all,
+                         df_part_raw = raw.df_part, craw_raw = raw.craw)        # reuse the single Arrow read
      for h in cfg.horizons])
 
 # ───────────────────────────────────────────────────────────── run, chunk by chunk

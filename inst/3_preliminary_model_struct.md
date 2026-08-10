@@ -100,8 +100,35 @@ is organised around a **`WeeklyWindow`** with origin $t_0$ (snapped to its Sunda
 
 - `fit_weeks`: the `n_fit = 8` weeks ending at $t_0$,
 - `lag_weeks`: the `smax = 4` weeks immediately preceding the fit weeks (renewal history),
-- `all_weeks = lag_weeks ++ fit_weeks`: the $T = 12$ contiguous weeks over which data are assembled,
+- `all_weeks = lag_weeks ++ fit_weeks`: the $T = 12$ contiguous weeks,
 - `forecast_weeks`: the horizon target weeks $t_0 + h$ for $h \in$ `horizons` $= \{1,2,3,4\}$.
+
+⚠ **The two data series are assembled over DIFFERENT spans** (`-w8h`, 2026-08-09, user request).
+Infections and antibody (`load_window_data`, §2.3) span all $T = 12$ `all_weeks`, because the
+renewal needs $s_{\max}$ weeks of history $I(t-s)$ that are never themselves predicted. The
+**contact-degree data** (`prepare_degree_data`, §2.4) span
+`win.fit_weeks ++ win.forecast_weeks` of a window built by `degree_window(origin, h, cfg)`:
+
+$$[\,t_0 - n_{\text{fit}} + 1,\ \dots,\ t_0 + h\,], \qquad T_n = n_{\text{fit}} + h = 9,10,11,12
+\ \text{at}\ h = 1..4,$$
+
+**anchored at the origin and extended to the horizon.** What is dropped is the $s_{\max}$ renewal
+LAG weeks, which were fitted and then discarded — the likelihood runs
+$t = s_{\max}+1,\dots,T$ (§6), so their $C^*$ never reached an NGM. Latents go from a flat $389/977$
+to $5+32T_n = \mathbf{293/325/357/389}$ and $5+81T_n = \mathbf{734/815/896/977}$.
+
+The renewal consumes only the **last** $n_{\text{fit}}$ columns (contacts $h$ weeks ahead of their
+fit week), so the leading $h$ columns are fitted but unused. That is deliberate: a same-day
+intermediate (`-w8`) used the *sliding* window $[t_0-n_{\text{fit}}+1+h,\dots,t_0+h]$, exactly the
+weeks the likelihood reads and a larger saving, but it left the earliest fit weeks in **no chain at
+all** — visible immediately as 10j §2c losing the first half of its μ timeline.
+
+⚠ Consequently the two per-week indices differ: `Cstar_weeks[t − smax + h]` pairs with infection
+week $t$. Both `model_transmission` and `fit_window_infection_draws` recover $h$ as
+`length(Cstar_weeks) − n_fit` rather than being passed it, and assert its range. A length check
+cannot catch a wrong-*dated* window of the right length, so **`stage2_inputs` asserts
+`apd_h.weeks[1:n_fit] == win0.fit_weeks`** — the one place both windows are in scope. Without it a
+missed call site would produce a complete, plausible, wrongly-dated forecast.
 
 ### 2.3 Infection and antibody series
 
@@ -648,9 +675,11 @@ AR(1) sample paths are non-differentiable, and memory is **longer** at long lag 
 correlation of $0.785$, lag-4 is $0.380$ against Matérn 3/2's $0.140$. **(ii)** `RHO_TIME_BOUNDS` and
 the temporal soft-clamp are **gone** from this path, since $\phi \in (0,1)$ by construction and
 $\phi^k$ cannot overflow; the constant survives in `framework.jl` only for replaying archived
-pre-`-ar1` chains. **(iii)** $\phi$ is given a deliberately weak $\mathrm{Beta}(1,1) = \mathcal U(0,1)$
-prior (§6), so **a high posterior $\phi$ is a measurement, not a failure** — but see §12, where the
-$\phi\to1$ limit interacts badly with the `-t0` level projection on the weighted path.
+pre-`-ar1` chains. **(iii)** $\phi$ is given a weak, symmetric $\mathrm{Beta}(3,3)$ prior (§6; $\mathrm{Beta}(2,2)$
+2026-08-08→09, and $\mathrm{Beta}(1,1)=\mathcal U(0,1)$ from `-ar1` on 2026-08-06 before that), so
+**a high posterior $\phi$ is a measurement, not a failure** — the healthy head-to-head fits of §12.2
+all land at $\phi = 0.90$–$0.98$. The $\phi\to1$ limit no longer annihilates the level (`-lc0`
+removed that projection), but it still collapses the *field*; see §12.
 
 The $P\times T$ structure field is drawn matrix-normal, non-centred, and **constrained to sum to zero
 over the $P$ age pairs within each week** (`-s0`, 2026-08-05). Writing $Q\in\mathbb R^{P\times(P-1)}$
@@ -679,8 +708,11 @@ increasingly so as the length-scales grow. It is what makes the
 **390** (NegBin) / **978** (hurdle-Weibull) unconstrained dimensions rather than 402/990; the
 dimension saving is incidental, identifiability is the point. (`-diag` briefly removed the
 $\log\rho_{\text{gap}}$ scalar as well, giving 389/977, and `-m32` restored it, giving 390/978 again;
-`-t0` then took $z_c$ from $T$ to $T-1$, so the CURRENT count is **389/977** — numerically equal to
-`-diag`'s but a different model. The confounding becomes total as $\rho\to\infty$, since $K^{\text{age}}\to J$,
+`-t0` then took $z_c$ from $T$ to $T-1$, giving 389/977 at the then-current $T=12$ — numerically
+equal to `-diag`'s but a different model — and `-w8h` then took $T$ to $T_n = n_{\text{fit}} + h$,
+so the CURRENT count VARIES WITH THE HORIZON: $5+32T_n = \mathbf{293/325/357/389}$ /
+$5+81T_n = \mathbf{734/815/896/977}$ at $h=1..4$. ⚠ At $h=4$ it coincides with `-t0-ar1`'s exactly;
+only the token distinguishes them. The confounding becomes total as $\rho\to\infty$, since $K^{\text{age}}\to J$,
 rank-1, and the field would collapse to an exact copy of $c_t$; under Matérn 3/2 that limit is far
 outside `RHO_BOUNDS`, but the constraint is still what makes $\eta$ and $\sigma_c$ separately
 meaningful.)
@@ -696,47 +728,79 @@ sits inside a prior spanning $\times0.61$–$\times1.65$ at $\pm1\sigma$, so `gp
 unchanged — but this is now a measured tolerance, not a negligible correction.
 Do **not** renormalise $A$ by $\operatorname{tr}(A)/P$ to restore the unit diagonal: as
 $\rho\to\infty$ that ratio is dominated by the jitter and the field degenerates to *white noise* of
-scale $\eta$. The **overall weekly level** is likewise temporally smoothed, but with its own
-amplitude $\sigma_c$ **decoupled** from $\eta$, and — since `-t0` (2026-08-06) — **conditioned to
-sum to zero over the $T$ window weeks**, by the temporal analogue of the constraint above:
-$c_t = c + \sigma_c\,(Q_t L_c z_c)_t$ with $Q_t = $ `_sum_zero_basis(T)` and
-$L_c = \mathrm{chol}(Q_t^\top K^{\text{time}} Q_t + 10^{-4} I)$, giving
-$\mathrm{Cov}(\sigma_c\,\text{dev}) = \sigma_c^2 (M_t K^{\text{time}} M_t)$. Without it, $c$ and the
-time-mean of $\sigma_c (L_{\text{time}} z_c)$ are two parameterisations of one quantity: measured on
-all four `-m32` chains at correlation $-1.000$ exactly, with $\mathrm{SD}(c)\approx
-\mathrm{SD}(\text{dev})\approx 0.38$–$0.73$ but $\mathrm{SD}$ of their sum $=0.007$. $z_c$ drops
-$T \to T-1$. **The constraint is applied to the LEVEL only** — the structure field's per-pair mean
-over weeks duplicates nothing, so constraining it would be a model restriction rather than a
-reparameterisation. Concretely, a scalar intercept $c$ plus a 1-D temporal process on the **same**
-AR(1) kernel, projected onto $\mathbf 1^{\perp}$,
+scale $\eta$.
+
+**The overall weekly level** carries its own amplitude $\sigma_c$ **decoupled** from $\eta$, is
+**conditioned to sum to zero over the $T_n$ window weeks** (`-t0`, 2026-08-06), and — since `-lc0`
+(2026-08-09, user request) — is **not temporally smoothed at all**:
 
 $$
-c_t = c + \sigma_c\,(Q_t\, L_c\, z_c)_t,
-\qquad L_c = \mathrm{chol}\!\big(Q_t^{\!\top} K^{\text{time}} Q_t + 10^{-4} I\big),
-\qquad z_c \sim \mathcal N(0,1)^{T-1},
+c_t = c + \sigma_c\,(Q_t\, z_c)_t,
+\qquad Q_t = \texttt{\_sum\_zero\_basis}(T_n),
+\qquad z_c \sim \mathcal N(0,1)^{T_n-1},
+$$
+$$
+\operatorname{Cov}(\sigma_c\,\text{dev}) = \sigma_c^2\, Q_t Q_t^{\!\top} = \sigma_c^2 M_t,
+\qquad M_t = I - \tfrac{1}{T_n}\mathbf 1\mathbf 1^{\!\top},
 $$
 
-and the week-$t$ log-rate field is $r_{p,t} = c_t + R_{p,t}$.
+and the week-$t$ log-rate field is $r_{p,t} = c_t + R_{p,t}$. The per-week marginal SD is therefore
+$\sigma_c\sqrt{1-1/T_n} = 0.935\,\sigma_c$ at $T_n=8$, so `gp_level_scale_prior` needed no
+rescaling.
 
-> **⚠ $\phi\to1$ annihilates this level deviation.** $K^{\text{time}}\to J$ (all-ones) as
+*Why sum-to-zero.* Without it, $c$ and the time-mean of the deviation are two parameterisations of
+one quantity: measured on all four `-m32` chains at correlation $-1.000$ exactly, with
+$\mathrm{SD}(c)\approx \mathrm{SD}(\text{dev})\approx 0.38$–$0.73$ but $\mathrm{SD}$ of their sum
+$=0.007$. $z_c$ drops $T_n \to T_n-1$. **The constraint is applied to the LEVEL only** — the
+structure field's per-pair mean over weeks duplicates nothing, so constraining it would be a model
+restriction rather than a reparameterisation.
+
+*Why iid.* Until `-lc0` the deviation was whitened through
+$L_c = \mathrm{chol}(Q_t^{\!\top} K^{\text{time}} Q_t + 10^{-4} I)$, i.e. the level was a second
+process on the **same** AR(1) kernel as the field, giving
+$\mathrm{Cov} = \sigma_c^2 (M_t K^{\text{time}} M_t)$. The request was that the AR(1) describe the
+individual age-pair trajectories and nothing else, so **$\phi$ now reaches the likelihood only
+through $L_{\text{time}}$**. It also removes the $\phi\to1$ interaction below at its source: with
+$L_c$ gone the level's amplitude is $\phi$-independent by construction. That does *not* rescue the
+field side — $L_{\text{time}}$'s first column still absorbs the field as $\phi\to1$ — which is why
+$\phi$'s prior was tightened to $\mathrm{Beta}(3,3)$ in the same change rather than relaxed.
+
+> **⚠ FIXED BY `-lc0` (2026-08-09): $\phi\to1$ used to annihilate this level deviation.** Recorded
+> because it explains the archived `-t0-ar1` chains, and because the *field*-side half of it is
+> still live. While the level was whitened through $L_c$: $K^{\text{time}}\to J$ (all-ones) as
 > $\phi\to1$, and $Q_t^{\!\top} J\, Q_t = 0$ exactly, because $Q_t$'s columns are orthogonal to
 > $\mathbf 1$. So $L_c \to \mathrm{chol}(10^{-4}I) = 10^{-2}I$ and the weekly level deviation
-> collapses to the **jitter**. Measured over $\phi$ at $T=12$, the marginal SD of the deviation in
-> units of $\sigma_c$ runs $0.958\,(\phi=0)\to0.700\,(0.9)\to0.260\,(0.99)\to0.084\,(0.999)
-> \to0.028\,(0.9999)$. At $\phi\gtrsim0.99$ the model has therefore *silently* become the pooled
-> `constant_contacts = true` preliminary — one level for the whole window — and $\sigma_c$ is
-> unidentified, free to drift to a clamp. This is a genuine interaction between `-ar1` and `-t0`
-> that neither change has on its own: it needs both the near-pooled limit to be *reachable* (which
-> the $\mathcal U(0,1)$ prior on $\phi$ makes it) and the level to be sum-to-zero projected. See
-> §12 — it is a contributing factor, though **not** the primary cause of the weighted path's
-> failure. The intercept is anchored at the grand
+> collapsed to the **jitter**. Measured over $\phi$ at $T=12$, the marginal SD of the deviation in
+> units of $\sigma_c$ ran $0.958\,(\phi=0)\to0.700\,(0.9)\to0.260\,(0.99)\to0.084\,(0.999)
+> \to0.028\,(0.9999)$. At $\phi\gtrsim0.99$ the model had therefore *silently* become the pooled
+> `constant_contacts = true` preliminary — one level for the whole window — with $\sigma_c$
+> unidentified and free to drift to a clamp. It was a genuine interaction between `-ar1` and `-t0`
+> that neither change had on its own: it needed both the near-pooled limit to be *reachable* and the
+> level to be sum-to-zero projected. $\mathrm{Beta}(2,2)$ (2026-08-08) discouraged that limit
+> without excluding it — in the `-t0-ar1` grid $11.5\%$ of the weighted Stage-1 chains still had
+> posterior median $\phi>0.99$ (none of them diverged) with $\sigma_c$ inflated exactly as
+> predicted: median $0.48$ among them against $0.27$ over the whole weighted grid, and $3.84$ at
+> 2021-07-18 h4. Replaying that chain confirmed the mechanism end to end — the structure field
+> frozen (across-week SD of the median log-rate $0.002$, lag-11 correlation $0.999$) and the entire
+> residual weekly movement in $\mu$, $1.21\times$ max/min, carried by the level's jitter, whose
+> lag-11 correlation is $-0.387$: the sum-to-zero fingerprint rather than AR(1).
+>
+> **`-lc0` removes $L_c$**, so the level's amplitude no longer depends on $\phi$ and this box's
+> mechanism cannot recur. ⚠ **What remains** is the field-side half, which `-lc0` does *not* touch:
+> as $\phi\to1$, $L_{\text{time}}$'s first column grows and its last shrinks until most of $Z$ stops
+> reaching the likelihood ($3.46$ vs $0.019$ at $\phi=0.9999$; $297$ of $324$ latents at $T=12$).
+> That flat subspace is what an optimiser walks into, and it is why $\phi$'s prior was tightened to
+> $\mathrm{Beta}(3,3)$ in the same change — $P(\phi>0.99)$ falls $2.98\times10^{-4} \to
+> 9.85\times10^{-6}$, with logit-scale tail decay $e^{-2u}\to e^{-3u}$. See §12.
+
+The intercept is anchored at the grand
 mean $c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$ (so $c \sim \mathcal N(c_0,3^2)$).
 $\phi\to 0$ recovers independent weeks; $\phi\to 1$ collapses to one pooled field. Numerically,
 $\rho_{\text{diag}}$ and $\rho_{\text{gap}}$ are clamped to $[0.5,500]$ (widened 2026-08-05 — see
 `RHO_BOUNDS`, the single source of truth), $\eta$ and $\sigma_c$ to $[e^{-3}, e^{2}]$, and the
 per-cell exponent $r_{p,t} + \log N_j$ to $[-8,6]$ (so $\mu \in [3\times10^{-4}, 400]$); the modes
 stay interior so reciprocity is not distorted. **$\phi$ carries no clamp at all** — it is
-$\mathrm{Beta}$-distributed on $(0,1)$ by construction and $\phi^k$ cannot overflow, so
+$\mathrm{Beta}(3,3)$-distributed on $(0,1)$ by construction and $\phi^k$ cannot overflow, so
 `RHO_TIME_BOUNDS` and the old temporal soft-clamp are dead code on this path, retained only for
 replaying archived pre-`-ar1` chains. ⚠ That absence is load-bearing in the wrong direction: §12
 shows the unconstrained logit-$\phi$ diverging towards the $\phi\to1$ boundary in 58 % of
@@ -796,9 +860,12 @@ model's forecasts are invariant to this convention**: $N_{ab}=\gamma_{\mathrm{SA
 product and $\gamma_{\mathrm{SAR}}$ is freely estimated — the choice only fixes what
 $\gamma_{\mathrm{SAR}}$ *means*. (Verified: scaling $\bar c$ by $10$ moves the posterior median
 $\gamma_{\mathrm{SAR}}$ by $\times0.105$ — the residual $5\%$ is the log-normal prior's pull — and
-leaves the implied $R$ unchanged to $0.3\%$.) $\bar c$ is computed **once per origin** from that
-origin's focal weeks and reused for every horizon, which is what "the used average number should be
-fixed while forecasting" requires.
+leaves the implied $R$ unchanged to $0.3\%$.) $\bar c$ is computed from the origin's 8 focal weeks and reused for every horizon, which is what
+"the used average number should be fixed while forecasting" requires. Under `-w8h` every horizon
+window contains all 8 of them as its leading columns (`stage2_inputs` asserts exactly that), so
+$\bar c$ is identical across horizons — verified, spread $0.0$. ⚠ The intermediate sliding `-w8`
+window held only $n_{\text{fit}}-h$ of them and did let $\bar c$ drift; anchoring the window fixed
+it.
 
 ---
 
@@ -821,27 +888,28 @@ so it no longer depends on the NGM builder. The two blocks' sampling statements 
 the joint model and are given below as the two stages.
 
 **The model estimates contacts per week, temporally smoothed.** A single **separable
-spatio-temporal GP** (§5) governs all $T$ window weeks — sharing the spatial kernel $L_{\text{age}}$,
+spatio-temporal GP** (§5) governs all $T_n = n_{\text{fit}} + h$ contact weeks
+($[t_0-n_{\text{fit}}+1 \dots t_0+h]$ since `-w8h`; the infection window is still $T = 12$, §2.2) — sharing the spatial kernel $L_{\text{age}}$,
 the temporal kernel $L_{\text{time}}$, the spatial length-scales
 $\rho_{\text{diag}}, \rho_{\text{gap}}$, the AR(1) coefficient $\phi$ and the scales $\eta, \sigma_c$ — so the
 weekly log-rate fields are **temporally correlated** rather than independent draws. Each week yields
-its own $C^\ast_t$ (through the per-week level $c_t$, structure-field column $R_{\cdot,t}$, and
-per-week hierarchical dispersion $\phi_{ij,t}$/$\kappa_{ij,t}$, §4.3), and the transmission NGM $N(t)$ therefore varies in time through
+its own $C^\ast_t$ (through the per-week level $c_t$, structure-field column $R_{\cdot,t}$, and the
+per-week block-linear dispersion $m_{\ell,t}$, §4.3 — there is no per-cell term), and the transmission NGM $N(t)$ therefore varies in time through
 **both** antibody prevalence and (now temporally-smooth) contacts.
 
 **Sampling statements.**
 
-*Contact block (one separable spatio-temporal GP over all weeks $t = 1,\dots,T$):*
+*Contact block (one separable spatio-temporal GP over the contact weeks $t = 1,\dots,T_n$):*
 
 $$
 \begin{aligned}
 \log\rho_{\text{diag}},\ \log\rho_{\text{gap}} &\sim \mathcal N(\log 20,\ 0.35^2), &
-\phi &\sim \mathrm{Beta}(1,1) = \mathcal U(0,1), &
+\phi &\sim \mathrm{Beta}(3,3), &
 \log\eta &\sim \mathcal N(0,\ 0.5^2), \\
 c &\sim \mathcal N(c_0,\ 3^2), &
 \log\sigma_c &\sim \mathcal N(0,\ 0.5^2), &
-z_c &\sim \mathcal N(0,1)^{T-1}, \\
-z &\sim \mathcal N(0,1)^{(P-1)\times T}, &
+z_c &\sim \mathcal N(0,1)^{T_n-1}, \\
+z &\sim \mathcal N(0,1)^{(P-1)\times T_n}, &
 m_{t} &\sim \mathcal N(0,\sigma_d^2)^{4}, &
 p^{0}_{t} &\sim \mathrm{Beta}(1,1)^{A^2}
 \end{aligned}
@@ -850,7 +918,11 @@ $$
 $$(\sigma_d = 0.5\ \text{Weibull},\ 1.0\ \text{NegBin};\ A^2 = 49\ \text{cells};\ P = 28\ \text{age pairs}).$$
 
 $z$ loses a row to the `-s0` spatial projection and $z_c$ an entry to the `-t0` temporal one, giving
-the **389** (NegBin) / **977** (hurdle-Weibull) unconstrained latents of §4.3. There is **no**
+$5 + 32T_n$ (NegBin) / $5 + 81T_n$ (hurdle-Weibull) unconstrained latents — with
+$T_n = n_{\text{fit}} + h$, that is **293/325/357/389** and **734/815/896/977** at $h=1..4$ (§4.3). ⚠ **$\phi$ enters only through $L_{\text{time}}$ since `-lc0`
+(2026-08-09):** $z_c$ is whitened by $Q_t$ alone, so the weekly level is iid-with-sum-to-zero and
+carries no AR(1) (§5). The parameter names and the dimension are unchanged by that, so only the
+cache token distinguishes a `-lc0` chain from a `-t0-ar1` one. There is **no**
 $\tau_t$ and **no** per-cell $z^{d}$ — the dispersion random effect was removed on 2026-08-02 (§4.3);
 the temporal parameter is the AR(1) coefficient $\phi$ (`phi_time`), not a length-scale
 $\rho_{\text{time}}$ (§5, `-ar1`).
@@ -858,13 +930,30 @@ $\rho_{\text{time}}$ (§5, `-ar1`).
 $p^{0}_{t}$ is declared on the **weighted/Weibull path only** (§4.2); the NegBin path's parameter
 space does not contain it, so the two degree models' Stage-1 chains now differ in shape.
 
-with the derived level $c_t = c + \sigma_c (Q_t L_c z_c)_t$ and structure field
-$R = \eta\,(Q\, L_A\, z\, L_{\text{time}}^{\!\top})$ — both sum-to-zero projected, and both built on
-the **AR(1)** temporal kernel $K^{\text{time}}_{st} = \phi^{|s-t|}$ — giving the week-$t$ log-rate
+**$\phi$'s prior (`ar1_phi_prior`) is $\mathrm{Beta}(3,3)$ as of 2026-08-09** (user request),
+$\mathrm{Beta}(2,2)$ from 2026-08-08 to then, and $\mathrm{Beta}(1,1)=\mathcal U(0,1)$ from `-ar1`
+(2026-08-06) before that — so **every chain in the archived `dt_intermediate_ar1_uniformphi/`
+generation was fitted under Uniform**. Each step keeps the mode at $0.5$ and the symmetry, asserting
+no temporal pooling, while making the boundary progressively more expensive: the density vanishes at
+both ends where Uniform's does not, $P(\phi>0.99)$ falls $0.0100 \to 2.98\times10^{-4} \to
+9.85\times10^{-6}$, and the unconstrained logit tail decays $e^{-u} \to e^{-2u} \to e^{-3u}$.
+Measured over the 2026-08-08 refit at $\mathrm{Beta}(2,2)$ (this prior *and* `stage1_z_init_scale`
+back at $0.1$, §12.3): **0/252 weighted and 0/252 NegBin Stage-1 fits diverged**, against 147/252
+($58.3\%$) weighted under Uniform — the census §12.3 asked for. Posterior $\phi$ (median of
+per-chain medians) was $0.568$ for NegBin, never above $0.673$, and $0.692$ for hurdle-Weibull with
+$11.5\%$ of chains above $0.99$ (healthy, but effectively pooled). Those $11.5\%$ are what
+$\mathrm{Beta}(3,3)$ targets, alongside `-lc0`, which removes the consequence they had (§5).
+⚠ **The prior is not in the cache token** (`contacts_label` encodes no prior), so changing it does
+not fork the grid; stale artefacts must be moved aside by hand or they are silently reused.
+
+with the derived level $c_t = c + \sigma_c (Q_t z_c)_t$ — sum-to-zero projected but **iid in time**
+since `-lc0` — and structure field
+$R = \eta\,(Q\, L_A\, z\, L_{\text{time}}^{\!\top})$, whose temporal factor is the **AR(1)** kernel
+$K^{\text{time}}_{st} = \phi^{|s-t|}$ — giving the week-$t$ log-rate
 $r_{p,t} = c_t + R_{p,t}$ (§5), the contact-degree log-likelihood of §4 injected via
 `Turing.@addlogprob!`, and
 $C^\ast_t = $ `contact_star`$(nb, \langle k\rangle_t, \langle k^2\rangle_t, g_t)$. The dispersion is
-**block-linear × week** (§4.3): the block mean $m_{\ell,t}$ (a $4\times T$ array) *is* the whole
+**block-linear × week** (§4.3): the block mean $m_{\ell,t}$ (a $4\times T_n$ array) *is* the whole
 term, $\log d_{ij,t} = m_{\ell,t}$ with $\ell = 2(\beta(i)-1)+\beta(j)$ — re-drawn each week with
 **no** temporal smoothing (unlike the mean field), and with **no per-cell term**: every ordered cell
 in a block shares that week's value. The block priors are $\mathcal N(0,\sigma_d^2)$ with
@@ -1204,30 +1293,42 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
   GP prior $\log\rho_{\text{diag}},\log\rho_{\text{gap}}\sim\mathcal N(\log20,0.35^2)$ (both spatial
   length-scales share `gp_len_prior`; **set 2026-08-05** with the `-m32` kernel swap, see §5),
   $\log\eta\sim\mathcal N(0,0.5^2)$,
-  $\phi\sim\text{Beta}(1,1)=\mathcal U(0,1)$ (`ar1_phi_prior`, dimensionless; **`-ar1`, 2026-08-06**:
+  $\phi\sim\text{Beta}(3,3)$ (`ar1_phi_prior`, dimensionless; **set 2026-08-09**, tightening the
+  $\text{Beta}(2,2)$ of 2026-08-08, which had itself replaced the $\text{Beta}(1,1)=\mathcal U(0,1)$
+  that `-ar1` shipped with — §6, §12.3; **`-ar1`, 2026-08-06**:
   the temporal correlation is AR(1), $K_t[s,t]=\phi^{|s-t|}$ — which IS the exponential/Matérn 1/2
   kernel — replacing the Matérn 3/2 length-scale in weeks. TIME DIRECTION ONLY; the spatial kernel
   is untouched, and the separable field already gave each age pair its own temporal path under one
   shared $\eta$. Measured at matched effective rank: $K_t$ min eigenvalue $2.7\!\times\!10^{-5}\to5.1\!\times\!10^{-3}$,
   $L_t$ column spread $94.2\to23.1$, and the level's $L_c$ spread flat at 1.6–1.8 across all $\phi$
-  (vs 13.5). The prior is deliberately weak — see `framework.jl`. HISTORY: previously
+  (vs 13.5 — moot since `-lc0` removed $L_c$). The prior stays weak, symmetric and mode-at-$0.5$
+  but, unlike Uniform, vanishes at both boundaries — see `framework.jl` and §12.3. HISTORY: previously
   $\log\rho_{\text{time}}\sim\mathcal N(\log2,0.35^2)$ (`gp_time_len_prior`), recentred and
   tightened 2026-08-05 — at $\mathcal N(\log4,0.5^2)$ the posterior drifted to 24–63 weeks over a
   12-week window and every cell failed to converge),
-  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`),
+  $\log\sigma_c\sim\mathcal N(0,0.5^2)$ (`gp_level_scale_prior`; the weekly level is
+  sum-to-zero **and iid** since `-lc0`, 2026-08-09 — $\phi$ acts on the age-pair field only, §5),
   $\log\gamma_{\mathrm{SAR}}\sim\mathcal N(\log0.1,1.8^2)$ (`gamma_sar_prior`; loosened 2026-07-13 to span $\gamma_{\mathrm{SAR}}\!\in\![0.001,10]$, 90% $\in[0.0052,1.93]$, softclamp $[\log0.001,\log10]$),
   **block-linear per-week dispersion** (a $4\times T_n$ array of block means, no per-cell random
   term, §4.3),
   **fitted hurdle zero probability** $p^0 \sim \mathrm{Beta}(1,1)$ per cell × week on the weighted
   path (§4.2),
   and **per-week temporally-smoothed contact estimation** (one separable spatio-temporal age-pair GP
-  across the window weeks). The chain-cache `contacts_label` is now
-  `"temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1"`, plus `-nuts` when `stage1_use_nuts` is set: `-s0` the
-  sum-to-zero structure field, `-m32` the Matérn 3/2 spatial kernel, `-t0` the sum-to-zero weekly
-  level and `-ar1` the AR(1) temporal correlation (all §5). The bare
-  `"temporal-gsar-cut-sc-p0-gi"` below is the **retired** literal, preserved in `framework.jl` as
-  `CONTACTS_TOKEN_PF`; it names a different model, not merely a different sampler, so no `cfg`
-  reproduces it. Reading the older tag component by component: the
+  across `[t₀−n_fit+1 … t₀+h]`).
+
+  The chain-cache `contacts_label` is now the short **`"temporal-w8h-lc0"`**, plus `-nuts` when
+  `stage1_use_nuts` is set: `-w8h` the origin-anchored `n_fit + h` contact window and `-lc0` the iid
+  weekly level (both 2026-08-09, §2.2 and §5). The nine accumulated historical suffixes were dropped at the same
+  time (user request) — a token only has to separate the current generation from the retained ones,
+  and every retained generation is named by a **literal** in `framework.jl`:
+  `CONTACTS_TOKEN_AR1 = "temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1"` (the complete Pathfinder grid on
+  disk), `CONTACTS_TOKEN_PF = "temporal-gsar-cut-sc-p0-gi"`, `CONTACTS_TOKEN_HD`. Each names a
+  different *model*, not merely a different sampler, so no `cfg` reproduces any of them.
+
+  ⚠ A consequence worth knowing before writing any new read-only helper: guards that used to sniff a
+  suffix out of the token (`occursin("-m32", contacts)`) now go through `is_legacy_token(contacts)`,
+  because current-style tokens carry no historical markers and a bare positive test would reject
+  every current chain. Reading the older tag component by component: the
   `-gsar-cut` tag marks the **two-stage cut** split with per-contact $\gamma_{\mathrm{SAR}}$ and
   **un-normalised** $C^\ast$ (the S̄-normalising `-gnorm` chains, differently-scaled `log_gamma`, are
   disjoint and left on disk); `-sc` the Stage-2 susc/inf soft-clamp; and, added 2026-07-30, `-hd` the
@@ -1299,13 +1400,20 @@ The notebook (`8j_preliminary_forecast.ipynb`) runs the full grid:
 The preliminary model is intentionally lean; the following are the documented simplifications and
 the seams at which they would be relaxed:
 
-- **Contact temporal structure.** *Implemented* — contacts are smoothed across weeks by a separable
-  spatio-temporal GP (§5), both the structure field and the overall level, sharing one temporal
-  **AR(1) coefficient $\phi$** (Matérn 1/2 in time; the spatial kernel is Matérn 3/2). *Remaining
-  seams*: a non-separable space–time kernel; and — the live problem — **$\phi$'s
-  $\mathcal U(0,1)$ prior places no barrier at the degenerate $\phi\to1$ limit**, which §12 shows is
-  where the weighted path fails. Tightening it (the tail-matched $\mathrm{Beta}(10.22, 3.395)$ is
-  already derived in `framework.jl`) is the first seam to close.
+- **Contact temporal structure.** *Implemented* — the age-pair structure field is smoothed across
+  weeks by the temporal factor of a separable spatio-temporal GP (§5), with one shared **AR(1)
+  coefficient $\phi$** (Matérn 1/2 in time; the spatial kernel is Matérn 3/2). *Narrowed 2026-08-09*
+  — the **weekly level no longer shares it** (`-lc0`, user request): $c_t$ is iid across weeks,
+  sum-to-zero, so $\phi$ describes the individual age-pair trajectories and nothing else. That also
+  closes the $\phi\to1\times$ `-t0` degeneracy, which was a property of the level's
+  $Q_t^{\!\top}K^{\text{time}}Q_t$ projection rather than of the kernel. *Remaining seams*: a
+  non-separable space–time kernel; and the FIELD-side half of the $\phi\to1$ limit, where
+  $L_{\text{time}}$'s first column absorbs the field and most of $Z$ stops reaching the likelihood.
+  $\phi$'s prior has been tightened twice against that — $\mathcal U(0,1)\to\mathrm{Beta}(2,2)$
+  (2026-08-08; the weighted path's Stage-1 divergences went $58.3\%\to0\%$, though the *cause* of
+  those was `stage1_z_init_scale`, not the prior, §12.2) and $\to\mathrm{Beta}(3,3)$ (2026-08-09).
+  $(2,2)$ still left $11.5\%$ of weighted chains above $\phi=0.99$ — healthy, but effectively
+  pooled; whether $(3,3)$ moves that is the measurement the next refit owes.
 - **Contact-degree dispersion.** *Withdrawn 2026-08-02* — the dispersion is a **block mean per week
   and nothing more** (§4.3). The per-cell random effect described in the rest of this bullet was
   implemented on 2026-07-30 as a flat hierarchy $\tau_t z_{ij,t}$, replaced on 2026-08-02 by a
@@ -1500,6 +1608,12 @@ forecast draws non-finite). The affected artefacts are in `dt_intermediate_ar1_u
    unconstrained tail decay doubled from $e^{-u}$ to $e^{-2u}$ — and it still admits the
    $\phi \approx 0.90$–$0.98$ the data want. But it is **not** load-bearing for this bug, and
    reverting to Uniform(0,1) is a supported option.
+   **Census re-run 2026-08-09 over the refitted grid** (`dt_intermediate/`, both fixes together, same
+   criterion as §12.1): **0/252 weighted and 0/252 NegBin chains diverged**, against 147/252 under
+   Uniform. Posterior $\phi$ medians: NegBin $0.568$ (max $0.673$), hurdle-Weibull $0.692$ with
+   $11.5\%$ above $0.99$ — those are healthy fits (max $|z| \le 10$, $|\log\eta| \le 5$) sitting in
+   the near-pooled regime, not diverged ones, so the §5 ⚠ box's degeneracy is still reachable even
+   though the failure mode of §12.1 is gone.
 3. **Gate the fit.** `fit_stage1` should reject a chain whose raw latents leave prior support by a
    large margin (`maximum(abs, z) > 10` catches every case here) instead of caching it silently. The
    absence of such a gate is why a 58 %-broken grid scored without complaint, and it is the only one
@@ -1507,3 +1621,41 @@ forecast draws non-finite). The affected artefacts are in `dt_intermediate_ar1_u
 4. ⚠ **Neither `stage1_z_init_scale` nor `ar1_phi_prior` nor `stage1_pathfinder_runs` is in the cache
    token** — `contacts_label` is a literal. Changing any of them silently reuses existing artefacts.
    Move the affected `8j_s1_*`/`8j_s2_*` **and the derived `9j_*` caches** aside by hand.
+
+### 12.4 Follow-up: `-w8h`, `-lc0` and $\mathrm{Beta}(3,3)$ (2026-08-09)
+
+Three changes landed together, all Stage-1, all at the user's request. Two of them bear directly on
+the failure recorded above.
+
+1. **`-w8h` — the contact window is $[t_0-n_{\text{fit}}+1 \dots t_0+h]$** ($T_n = n_{\text{fit}}+h
+   = 9..12$, was a flat $n_{\text{fit}}+s_{\max} = 12$; §2.2). The $s_{\max}$ renewal-lag weeks were
+   being *fitted and then discarded* — `model_transmission` only ever indexes $C^\ast$ over
+   $t = s_{\max}+1,\dots,T$. Stage-1 latents go from a flat $389/977$ to
+   $\mathbf{293/325/357/389}$ and $\mathbf{734/815/896/977}$. Relevant here because §12.2's diagnosis
+   is a *starting-point* pathology over a large weakly-identified `z` block: at $h=1$ that block goes
+   from 335 to **251** coordinates, so the composed initial field amplitude has fewer directions in
+   which to overshoot the $[-8,6]$ exponent clamp — but at $h=4$ it is unchanged. This neither
+   replaces the `stage1_z_init_scale` fix nor should be credited with one.
+2. **`-lc0` — the weekly level loses its AR(1)** (§5). This retires the "what is still true from the
+   first draft" paragraph above *by half*: $Q_t^{\!\top} K^{\text{time}} Q_t$ no longer exists, so the
+   level cannot collapse to the jitter at any $\phi$, and $\sigma_c$ cannot be driven to a clamp by
+   that route. What survives untouched is the field side — $L_{\text{time}}$'s first column growing
+   to $3.46$ while its last falls to $0.019$, leaving most of `z` barely coupled to the likelihood.
+   That remains a real hazard for NUTS, which must traverse it.
+3. **$\phi \sim \mathrm{Beta}(3,3)$**, tightening $(2,2)$ (§6). $P(\phi>0.99)$ falls
+   $2.98\times10^{-4} \to 9.85\times10^{-6}$; logit-scale tail decay $e^{-2u} \to e^{-3u}$. Aimed at
+   the $11.5\%$ of weighted chains that sat above $\phi = 0.99$ under $(2,2)$ — healthy fits, but
+   effectively pooled.
+
+⚠ **The divergence census of §12.3 must be re-run against the new grid before the weighted path is
+trusted again.** The $(2,2)$ result (0/252 both families) was measured under $T_n = 12$ with an
+AR(1) level; every one of those three things has now changed. The criterion is unchanged: raw
+$\max|z| > 10$ or $|\log\eta| > 5$. A 3-origin Pathfinder smoke under the superseded sliding `-w8`
+window gave **0/24 diverged** with hurdle-Weibull $\phi$ never above $0.529$ (against $0.9985$–
+$0.9998$ and $11.5\%$ over $0.99$ under `-t0-ar1`) — encouraging, but 12 chains at 3 adjacent
+origins and confounded with the shorter window; see `tasks/todo.md`.
+
+⚠ **`-w8h` and `-lc0` ARE in the cache token** (it is now `temporal-w8h-lc0`), so they fork the grid
+cleanly and nothing stale is reused. The $\mathrm{Beta}(3,3)$ prior, as item 4 above says of every
+prior, is **not** — but it landed in the same commit as a token bump, so no artefact exists that
+mixes the two.

@@ -33,9 +33,15 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
   full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
   `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
 
-      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=m32(|s-t|/ρ_time);  Lt=chol(Kt+1e-4 I).L
-      Qt = _sum_zero_basis(Tn);  Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L            # `-t0`, level only
-      rvec = ( c + σ_c·(Qt·Lc·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )
+      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=phi_time^|s-t|;  Lt=chol(Kt+1e-4 I).L
+      Qt = _sum_zero_basis(Tn)                                              # `-t0`, level only
+      rvec = ( c + σ_c·(Qt·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )        # `-lc0`: level is iid
+
+  ⚠ The LEVEL's whitening depends on the generation and is selected by the `-lc0` marker in
+  `contacts`: from `-lc0` (2026-08-09) the level is iid-with-sum-to-zero as written above, so
+  `phi_time` enters ONLY through `Lt`; under `-t0-ar1` and earlier it was whitened through
+  `Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L` and `phi_time` acted on the level too. Replaying an archived
+  chain with the wrong branch silently returns a different μ.
 
 - **Legacy per-week iid** (`c[t]`, `z[p,t]`): `rvec = c[wk] .+ η .* (Lp * z[:,wk])`.
 - **Pooled** (scalar `c`, `z[p]`): `rvec = c .+ η .* (Lp * z)`.
@@ -101,7 +107,11 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
                rather than replay it through the wrong temporal kernel." path
         return nothing
     end
-    if !occursin("-m32", contacts)
+    # Current-generation tokens have the Matérn 3/2 kernel by construction; only a RETAINED legacy
+    # token has to prove it by carrying `-m32` (see `is_legacy_token`). This was a bare
+    # `occursin("-m32", contacts)` until the accumulated token prefix was dropped on 2026-08-09 —
+    # which would have rejected every current chain.
+    if is_legacy_token(contacts) && !occursin("-m32", contacts)
         @warn "contacts token `$contacts` predates `-m32`, so this chain's kernel was the squared \
                exponential, not Matérn 3/2. The chain columns are indistinguishable from a current \
                one, so this cannot be detected from the chain — refusing on the token." path
@@ -157,6 +167,17 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         Tn = maximum(parse(Int, match(r"^z\[\d+\s*,\s*(\d+)\]$", n).captures[1])
                      for n in pnames if occursin(r"^z\[\d+\s*,\s*\d+\]$", n))
         wk = week_index === nothing ? Tn : week_index
+        # BOUNDS GUARD — `Tn` is GENERATION- AND HORIZON-DEPENDENT since `-w8h` (n_fit+h = 9..12 now,
+        # a flat 12 under `-t0-ar1`), so a
+        # caller iterating weeks across generations will overshoot. Without this the overshoot dies
+        # deep inside the draw loop on `Lt[wk, :]` (`BoundsError` on an 8×8 LowerTriangular) — loud,
+        # but from a stack frame that says nothing about which chain or which week. Refusing here
+        # matches every other generation check in this function, and matches
+        # `_read_disp_chain`'s guard so the two mirrors behave the same way.
+        if !(1 <= wk <= Tn)
+            @warn "week_index $wk outside the chain's $Tn weeks — refusing to reconstruct" path
+            return nothing
+        end
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
         # `-ar1`: the chain stores the CONSTRAINED φ ∈ (0,1) directly — no exp, no softclamp
@@ -186,13 +207,26 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
             Zc[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
         end
         tz_Q = _sum_zero_basis(Tn)                           # SAME helper the model uses — never re-derive
+        # ---- `-lc0` (2026-08-09): the LEVEL lost its AR(1) whitening ----
+        # From `-lc0` the level is `c + σ_c·(Qt·z_c)` — iid deviations conditioned to sum to zero, so
+        # `phi_time` reaches μ ONLY through `Lt`. Before it, the deviation was whitened through
+        # `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` and φ acted on the level as well. Both generations are on
+        # disk (`CONTACTS_TOKEN_AR1`), the parameter NAMES are identical in both, and replaying one
+        # with the other's algebra returns a plausible-but-wrong μ with no error — so the branch is
+        # taken on the TOKEN, which is the only thing that distinguishes them.
+        level_is_iid = !is_legacy_token(contacts) || occursin("-lc0", contacts)
         for d in 1:D
             Kt = [φ_time[d]^abs(s - t) for s in 1:Tn, t in 1:Tn]           # AR(1), mirrors model
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
-            # level: cₜ = c + σ_c·(tz_Q·Lc·z_c)_wk, with Lc = chol(Qᵀ·Kt·Q + 1e-4·I) (mirrors model)
-            Lc = cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L
-            c_wk = cc[d] + σ_c[d] * dot(view(tz_Q, wk, :), Lc * (@view Zc[d, :]))
+            # level: cₜ = c + σ_c·(tz_Q·z_c)_wk  (`-lc0`), or ·(tz_Q·Lc·z_c)_wk before it
+            dev = if level_is_iid
+                dot(view(tz_Q, wk, :), @view Zc[d, :])
+            else
+                Lc = cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L
+                dot(view(tz_Q, wk, :), Lc * (@view Zc[d, :]))
+            end
+            c_wk = cc[d] + σ_c[d] * dev
             rvec = c_wk .+ η[d] .* (_Lp(d) * (@view(Z[d, :, :]) * ltrow))    # cₜ + η·(Lp·(z·Lt[wk,:]))
             for i in 1:A, j in 1:A
                 μ[d, i, j] = exp(_softclamp(rvec[pair_index[i, j]] + logpop[j], -8.0, 6.0))
@@ -288,7 +322,18 @@ function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
                 for n in pnames for m in (match(bw, n),) if m !== nothing]
     isempty(bentries) && (@warn "no $bbase parameters in chain" path; return nothing)
     if maximum(e[1] for e in bentries) == 4                # per-week: [bl, t]
-        wk = week_index === nothing ? maximum(e[2] for e in bentries) : week_index
+        Tn_chn = maximum(e[2] for e in bentries)
+        wk = week_index === nothing ? Tn_chn : week_index
+        # BOUNDS GUARD, and it is load-bearing since `-w8h` (2026-08-09) made Tn vary with both the
+        # generation and the horizon (n_fit+h = 9..12 now, a flat 12 under `-t0-ar1`): with
+        # `wk > Tn_chn` NO entry matches below, `β` is left as the
+        # UNINITIALISED `Matrix{Float64}(undef, …)` it was allocated as, and the caller gets garbage
+        # dispersion values with no error and no warning. `plot_within_block_sd` walks t = 1:12 across
+        # both generations and relies on this returning `nothing` to stop at the shorter one.
+        if !(1 <= wk <= Tn_chn)
+            @warn "week_index $wk outside the chain's $Tn_chn weeks" path
+            return nothing
+        end
         for (bl, t, name) in bentries
             t == wk && (β[:, bl] = vec(Array(chn[Symbol(name)])))
         end
@@ -642,9 +687,11 @@ end
 In-sample expected (fitted) infections over the fit window, from the two-stage artefacts of the
 horizon-`h` fit: the MEAN of Stage 2's Normal infection likelihood (`model_transmission`). Per
 pooled draw `d` (from Stage-1 draw `m = post_index[d]`),
-`pred_t = build_ngm(Cstar_m[t], susc[d], inf[d], F[d], wd.antibody[:,t]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
+`pred_t = build_ngm(Cstar_m[t−smax+h], susc[d], inf[d], F[d], wd.antibody[:,t]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
 using OBSERVED lags ⇒ one-step-ahead fitted mean (NOT the self-iterated forecast). Columns
-`(smax+1):Tn` == the window's fit weeks. The per-week `Cstar_m` is rebuilt from the Stage-1 chain
+`(smax+1):Tn` == the window's fit weeks; the `−smax+h` on `Cstar_m` is the `-w8h` window offset (the
+contact window spans `n_fit + h` weeks ending at t₀+h, the infection window `n_fit + smax` ending at
+t₀, and the renewal reads the contact window's last `n_fit` columns). The per-week `Cstar_m` is rebuilt from the Stage-1 chain
 (`stage1_moment_draws` → `contact_star(nb, …)`), in the SAME draw order the pooling used, so
 `post_index` aligns. `apd_o[h]` is the h-window degree data (matches the cached Stage-1 chain).
 Read-only (NO re-fit). Returns `nothing` when either artefact is missing/unloadable.
@@ -669,7 +716,15 @@ function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
     end
     A = wd.A; Tn = length(wd.weeks); fitcols = (cfg.smax + 1):Tn
     # per-Stage-1-draw per-week C* (nb applied) — reused across that draw's pooled infection draws.
-    Cstar_by_m = [[contact_star(nb, md[m].K1[t], md[m].K2[t], md[m].G[t]) for t in 1:Tn]
+    # `-w8h` (2026-08-09): the CONTACT window is `n_fit + h` weeks `[t₀−n_fit+1 … t₀+h]`, the
+    # INFECTION window `Tn` = n_fit + smax, so the renewal reads `Cstar`'s LAST `n_fit` columns:
+    # index `t − smax + off` against `wd`'s week `t`, with `off = Tc − n_fit` == h. This MUST match
+    # `model_transmission` exactly or the panel plots a model that was never fitted.
+    Tc  = length(md[1].K1)
+    off = Tc - cfg.n_fit
+    (0 <= off <= maximum(cfg.horizons)) ||
+        (@warn "fit-window fit: Stage-1 chain has $Tc contact weeks, expected n_fit + h = $(cfg.n_fit) + h"; return nothing)
+    Cstar_by_m = [[contact_star(nb, md[m].K1[t], md[m].K2[t], md[m].G[t]) for t in 1:Tc]
                   for m in eachindex(md)]
     Np = length(pooled.gamma_sar)
     out = Array{Float64}(undef, A, length(fitcols), Np)
@@ -681,7 +736,7 @@ function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
         # post-clamp, so this reproduces the model's `w` exactly.
         w_d = gen_interval_pmf_log(pooled.w_mu[d], pooled.w_sigma[d]; smax = cfg.smax)
         for (c, t) in enumerate(fitcols)
-            N = build_ngm(Cstar_by_m[m][t], pooled.susc[d, :], pooled.inf[d, :],
+            N = build_ngm(Cstar_by_m[m][t - cfg.smax + off], pooled.susc[d, :], pooled.inf[d, :],
                           pooled.F[d], wd.antibody[:, t]; gamma_sar = pooled.gamma_sar[d])
             out[:, c, d] = renewal_next(N, wd.I_mean, t, w_d)
         end
@@ -835,10 +890,13 @@ end
 §2c — contact mean μ over the fit window + horizons h1..h4, reconstructed from the SINGLE
 horizon-`h_chain` chain (default h4), for one degree family. One panel per `cell`
 `(i, j, panel_title)`. Unlike §2b (`make_mu_horizon_fig`, which reads each horizon from its OWN
-chain at that chain's forecast week), this traces μ over TIME from one fit: the h4 chain's per-week
-GP spans exactly the origin window's 8 fit weeks (its `all_weeks[1:8]`, ending at t₀) ++ the 4
-horizon weeks h1..h4 (`all_weeks[9:12]`, ending at t₀+4), because `constant_contacts = false`
-estimates μ per week. It is the μ analogue of §1's h4 in-sample fit.
+chain at that chain's forecast week), this traces μ over TIME from one fit: the h`h_chain` chain's
+per-week GP spans `[t₀−n_fit+1 … t₀+h_chain]` (`-w8h`, 2026-08-09), so at h4 that is the origin's 8
+fit weeks ++ the 4 horizon weeks — 12 points with t₀ at position 8. (The `smax` renewal-lag weeks
+that used to precede them are gone; a same-day intermediate, `-w8`, slid the window instead of
+anchoring it and left this figure with only 8 points starting at t₀−3, which is what prompted the
+correction.) `constant_contacts = false` is what makes μ per-week at all. It is the μ analogue of
+§1's h4 in-sample fit.
 
 `reconstruct_mu_draws(lbl, origin, h_chain; week_index = t)` reads μ at each window week `t`;
 observed comes from that same window `apd_h` (= `apd_o[h_chain]`) per week (`_observed_cell_mean`).
@@ -853,7 +911,7 @@ function make_mu_timeline_fig(dm::ContactDegreeModel, cells, tag::AbstractString
                               res_dir::AbstractString = "../res")
     weighted = is_weighted(dm)
     ncell = length(cells)
-    weeks = apd_h.weeks                       # Tn dates: origin's 8 fit weeks ++ horizons h1..h_chain
+    weeks = apd_h.weeks                       # n_fit + h_chain dates, [t₀−n_fit+1 … t₀+h_chain] (`-w8h`)
     Tn = length(weeks)
     xdate = week_mid.(weeks)
 
