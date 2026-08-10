@@ -1848,6 +1848,45 @@ is precisely what the NUTS smoke must answer.
 pairs AR(1) has the *higher* end-to-end correlation in 16 of them. At NegBin's magnitudes
 ($0.012$ vs $0.002$) that is a structural property of the kernel, not a pathology.
 
+**⚠ INITIALISATION PROBE (2026-08-10): $\phi$ is not identified by the data under Pathfinder, on
+EITHER degree model.** Prompted by the question of whether $\phi$ should get the shrunk start `z`
+gets (`stage1_z_init_scale`). Same cell, same seed as the driver (`Xoshiro(1236)`), everything fixed
+except $\phi$'s *starting value* — the shipped result reproduces exactly ($\phi_0 = 0.654 \Rightarrow
+\phi = 1.000000$, $\log\eta = -1.56$, $\max|z| = 4.38$):
+
+| $\phi_0$ | hurdle-Weibull $\phi$ | NegBin $\phi$ |
+|---|---|---|
+| $0.100$ | $\mathbf{0.011}$ | $0.150$ |
+| $0.300$ | $0.670$ | $0.319$ |
+| $0.500$ | $0.997$ | $0.395$ |
+| $0.654$ (prior draw) | $\mathbf{1.000000}$ | $0.551$ |
+| $0.900$ | $0.710$ | $0.726$ |
+
+The final $\phi$ is largely a function of where the optimiser started. Hurdle-Weibull spans
+$0.011$–$1.000$ and is not even monotone in the start; NegBin spans $0.150$–$0.726$, monotone, with
+only $\approx 30\%$ shrinkage toward the middle. **Two ordinary starting points therefore produce
+opposite conclusions about the temporal structure of the same data.**
+
+Consequences. **(i)** Giving $\phi$ a shrunk or fixed start would not fix the boundary pile-up — it
+would *choose the answer*, and the naive reading ("SD $0.1$", i.e. $\phi = 0.5 \pm 0.025$ on the
+logit scale) lands at $0.997$, the pooled boundary. This is **not** analogous to the `z` fix, where a
+diffuse start dropped the optimiser into the saturated $[-8,6]$ clamp with no gradient to escape and
+there was a stable right answer ($\max|z| \approx 3.5$) to reach; $\phi$ is bounded, its gradient is
+fine, and there is no stable answer to find. **(ii)** Every $\phi$ median quoted from a Pathfinder
+fit — including the 252-fit `-ar1` survey — partly measures the optimiser's starting distribution.
+The prior still does real work (Uniform $\to 0.726$, $\mathrm{Beta}(2,2) \to 0.568$,
+$\mathrm{Beta}(3,3) \to 0.487$, all at prior median $0.5$), so it is not purely init-driven, but the
+DATA is the weakest of the three inputs. **(iii)** This is what makes the NUTS smoke decisive rather
+than merely confirmatory, and it sharpens the question: NUTS is initialised from the Pathfinder mean,
+so at 2021-05-02 h1 it *starts* at $\phi = 1.0$ — does it walk away?
+
+⚠ **This corrects the head-to-head above** where NegBin was read as corroborating the kernel
+correspondence. That corroboration was weaker than stated: the $\phi = 0.726$ figure comes from the
+**Uniform-prior** survey rather than the matched Beta(3,3) run, and on the same 24 chains the two
+parameterisations disagree (lag-1 $0.487$ AR(1) vs $0.660$ Matérn). The defensible statement is that
+NegBin is far better behaved than hurdle-Weibull — no boundary collapse, no window collapse — **not**
+that its $\phi$ is well identified.
+
 **Method note.** The `-m32t` generation was committed (`69e43df`), smoke-fitted, measured and
 reverted within one day, and the revert was *targeted* — the kernel, the prior, the token and the
 mirrors — while the unrelated fixes found along the way were kept: 13j's missing `stage1_use_nuts`

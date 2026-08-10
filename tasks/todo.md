@@ -364,10 +364,56 @@ posterior mode is exactly what the NUTS smoke answers.
 24 pairs AR(1) has the *higher* end-to-end correlation in 16, though at NegBin's values (0.012 vs
 0.002) that is a structural property, not a pathology.
 
+## Measured — φ's INITIALISATION PROBE: φ is not identified by the data under Pathfinder
+
+Prompted by "should φ also start from a 0.1 range, like `z`?". Answer: **no**, and the probe that
+settles it is more important than the question. Same cell, same seed (`Xoshiro(1236)`, the driver's),
+everything held fixed except φ's *starting value*. The shipped result reproduces exactly (φ₀ = 0.654
+⇒ φ = 1.000000, log_eta −1.56, max|z| 4.38 — matching the artefact).
+
+| φ₀ | hurdle-Weibull φ final | NegBin φ final |
+|---|---|---|
+| 0.100 | **0.011** | 0.150 |
+| 0.300 | 0.670 | 0.319 |
+| 0.500 (= "SD 0.1 on the logit scale") | 0.997 | 0.395 |
+| 0.654 (prior draw, SHIPPED) | **1.000000** | 0.551 |
+| 0.900 | 0.710 | 0.726 |
+
+**The final φ is largely a function of where it started, on BOTH degree models.** Hurdle-Weibull
+spans 0.011–1.000 and is not even monotone in the start; NegBin spans 0.150–0.726, monotone, with
+only ~30% shrinkage toward the middle. Setting φ's init would therefore not fix the boundary
+pile-up — **it would choose the answer**. Note the literal reading of the question is the worst
+option tested: φ is logit-linked, so `N(0, 0.1²)` unconstrained means φ = 0.5 ± 0.025, and 0.5 lands
+at 0.997.
+
+**Why this is NOT analogous to the `z` fix.** There a diffuse start dropped the optimiser into the
+saturated `[-8,6]` exponent clamp with no gradient to escape, and there WAS a right answer
+(max|z| ≈ 3.5) the shrunk start could reach, after which results were stable. φ has no dead zone —
+bounded support, finite gradient — and no stable answer to find. `z` also mattered because it is 251
+of 293 coordinates entering composed as `η·(Q·La·z·Ltᵀ)`; φ is one scalar with no composed amplitude.
+
+⚠ **CORRECTION to the head-to-head census above.** It reported NegBin as corroborating the kernel
+correspondence (`φ = 0.726 ⇒ ρ_time ≈ 2.0 wk` against a measured 1.44). That is weaker than stated,
+in two ways. (i) The 0.726 comes from the 252-fit **Uniform-prior** survey — a different prior from
+the Beta(3,3) used here, so it is not a matched comparison. (ii) On the SAME 24 chains the two
+parameterisations do **not** agree: AR(1) gives lag-1 0.487, Matérn gives 0.660. Combined with this
+probe, the honest statement is: **NegBin is far better behaved than hurdle-Weibull — no boundary
+collapse, no window collapse — but its φ is not well identified either, and no single Pathfinder φ
+should be read as a posterior summary for either path.**
+
+⚠ Consequence for everything φ-shaped that has been quoted from Pathfinder fits, including the
+252-fit `-ar1` survey: those medians partly measure the optimiser's starting distribution. The
+prior still does real work (Uniform → 0.726, Beta(2,2) → 0.568, Beta(3,3) → 0.487, all at prior
+median 0.5), so it is not purely init-driven — but the data is the weakest of the three inputs.
+
 ## Open
 
-- [ ] **NUTS smoke** — running under `temporal-w8h-lc0-nuts`. The trustworthy read, and specifically:
-      **does 2021-05-02 h1 hurdle-Weibull still pin φ at 1.0, or was that a Pathfinder artefact?**
+- [ ] **NUTS smoke** — running under `temporal-w8h-lc0-nuts` (8/24 at ~2 h). Now the decisive run,
+      and the specific question is sharper than before: NUTS starts from the Pathfinder mean, so for
+      2021-05-02 h1 it starts AT φ = 1.0. **Does it walk away?** If it does, Pathfinder's φ is an
+      artefact throughout and the `constant_contacts` conclusion needs re-deriving from NUTS. If it
+      does not, the pooled limit is a genuine mode.
+- [ ] **Re-examine whether φ should be reported from Pathfinder fits at all**, or only from NUTS.
 - [ ] **NUTS smoke** — same 3 origins. Outstanding since 2026-08-09, and the trustworthy read on
       whether the pooled limit is a genuine posterior mode or a Pathfinder artefact.
 - [ ] **`constant_contacts = true` for hurdle-Weibull** — now the fifth independent indication.
