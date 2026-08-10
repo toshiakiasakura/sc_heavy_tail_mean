@@ -1255,7 +1255,7 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
                 dstb[lbl].hi[oi, a]  = quantile(rb[:, a], 0.95)
             end
         end
-        for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.phi_time))  # ρ_diag,ρ_gap,φ → cols 1,2,3
+        for (g, rv) in enumerate((d.rho_diag, d.rho_gap, d.rho_time))  # ρ_diag,ρ_gap,ρ_time → cols 1,2,3
             all(isnan, rv) && continue                   # ρ_time absent (pooled) → leave NaN
             rho_store[lbl].med[oi, g] = median(rv)
             rho_store[lbl].lo[oi, g]  = quantile(rv, 0.05)
@@ -1571,19 +1571,23 @@ end
 """
     plot_lengthscales(rho, labels4, origins; h) -> Plot
 
-One panel per config of the separable spatio-temporal-GP length-scales: ρ_diag (total-age, solid)
-and ρ_gap (age-gap, dashed) in age-years, plus ρ_time (temporal, dotted) in weeks, each with a 90%
-ribbon. All three share one axis (units age-yrs / weeks; ρ_time ∈ [0.25,104]w, the spatial ρ ∈
-[0.5,500]y); ρ_time is absent (NaN, not plotted) for pooled chains. Configs with NO Stage-1 contact
-fit at all (the NULL model) have no length-scales and are skipped entirely rather than drawn as
-blank panels.
+**TWO panels per config**, because the quantities have different units: a SPATIAL panel with ρ_diag
+(total-age, solid) and ρ_gap (age-gap, dashed) in **age-years**, and a TEMPORAL panel with ρ_time in
+**weeks**, each with a 90% ribbon. ρ_time is absent (NaN, not plotted) for pooled chains. Configs
+with NO Stage-1 contact fit at all (the NULL model) have no length-scales and are skipped entirely
+rather than drawn as blank panels.
+
+`cfg` (optional) draws the identifiability limit on the temporal panel: a ρ_time at or beyond the
+window length `n_fit + h` means the field is effectively constant across the window, so the
+parameter has stopped being identified. See `gp_time_len_prior`.
 """
-function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
-    # ⚠ TWO DIFFERENT QUANTITIES, TWO AXES (`-ar1`, 2026-08-06). Columns 1–2 are the SPATIAL GP
-    # length-scales in age-years (0–50); column 3 used to be ρ_time in weeks but is now the AR(1)
-    # coefficient φ ∈ (0,1), which is dimensionless. Plotting φ on the age-year axis would render it
-    # as an invisible flat line at the bottom — misleading rather than merely wrong — so each model
-    # gets a spatial panel and a φ panel side by side.
+function plot_lengthscales(rho, labels4, origins; h::Integer = 1, cfg = nothing)
+    # ⚠ TWO DIFFERENT QUANTITIES, TWO AXES. Columns 1–2 are the SPATIAL GP length-scales in
+    # age-years (0–50); column 3 is ρ_time in WEEKS. Drawing all three on one axis (the state until
+    # 2026-08-06) mixes units on a single "age-yrs / weeks" label and hides the temporal series in
+    # the bottom of a 0–50 age-year range. The split was introduced by `-ar1`, when column 3 was a
+    # dimensionless φ ∈ (0,1); `-m32t` (2026-08-10) put ρ_time back in weeks but the split is KEPT,
+    # because the units never did match.
     spatial_dirs = ["ρ_diag (total age, yr)", "ρ_gap (age gap, yr)"]
     spatial_ls   = [:solid, :dash]
     shown = [l for l in labels4 if any(isfinite, rho[l].med)]   # drop contact-fit-free configs
@@ -1600,22 +1604,31 @@ function plot_lengthscales(rho, labels4, origins; h::Integer = 1)
         end
         push!(panels, ps)
 
-        pt = plot(; title = "$(lbl) — temporal", titlefontsize = 8, xlabel = "forecast origin",
-                  ylabel = "AR(1) φ (lag-1 correlation)", legend = false,
-                  xrotation = 45, ylims = (0, 1))
         m, lo, hi = rho[lbl].med[:, 3], rho[lbl].lo[:, 3], rho[lbl].hi[:, 3]
+        # The window length is where ρ_time stops being identified, and it is also the natural top
+        # of the axis. `cfg` is optional, so fall back to the project default n_fit = 8.
+        Tn_win = (cfg === nothing ? 8 : cfg.n_fit) + h
+        # `filter` first, then test emptiness — `all(isnan, hi)` would not catch a hi that mixes NaN
+        # with a non-finite value, and `maximum` of an empty collection throws.
+        fin_hi = filter(isfinite, hi)
+        yhi = max(Tn_win * 1.15, isempty(fin_hi) ? 0.0 : maximum(fin_hi) * 1.05)
+        pt = plot(; title = "$(lbl) — temporal", titlefontsize = 8, xlabel = "forecast origin",
+                  ylabel = "ρ_time (weeks)", legend = (lbl == shown[1] ? :topright : false),
+                  legendfontsize = 6, xrotation = 45, ylims = (0, yhi))
         if !all(isnan, m)                                # NaN for pooled / contact-free chains
             plot!(pt, origins, m; lw = 1.8, marker = :circle, ms = 2, ls = :dot, color = :black,
-                  label = "φ", ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
-            # φ→1 is the pooled limit (contacts constant across the window); mark it so a chain
-            # sitting on the boundary is visible rather than just "near the top".
-            hline!(pt, [1.0]; ls = :dash, color = :red, lw = 1, label = false)
+                  label = "ρ_time", ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
+            # ρ_time ≥ the window length is the pooled/unidentified limit (the field is effectively
+            # constant across the window); mark it so a posterior sitting there is visible rather
+            # than merely "high". This is the check `gp_time_len_prior` asks for at every refit.
+            hline!(pt, [Tn_win]; ls = :dash, color = :red, lw = 1,
+                   label = (lbl == shown[1] ? "window = $(Tn_win) wk" : false))
         end
         push!(panels, pt)
     end
     isempty(panels) && return plot(; title = "no chains with finite length-scales")
     return plot(panels...; layout = (length(shown), 2), size = (1150, 390 * length(shown)),
-                plot_title = "8j — spatial GP length-scales and AR(1) φ over time (h=$h)",
+                plot_title = "8j — spatial (age-yrs) and temporal (weeks) GP length-scales (h=$h)",
                 plot_titlefontsize = 11)
 end
 

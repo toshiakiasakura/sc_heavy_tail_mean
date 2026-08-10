@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, phi_time,
+# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -26,22 +26,31 @@ matrix μ_{i→j} for one week, once per posterior draw:
 
 with the per-week rate `rvec` built for the requested `week` (`wk`):
 
-- **Separable spatio-temporal regime** (`phi_time` present; the cached `contacts="temporal"`
-  chains): scalar intercept `c`, temporal-level GP and matrix-normal structure field share the
-  temporal Cholesky `Lt` built from the AR(1) kernel `Kt[s,t] = phi_time^|s−t|` (read CONSTRAINED,
-  no exp/softclamp) over the
-  full `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
-  `z` (P×Tn) and level `z_c` (Tn) are needed, not just week `wk`:
+- **Separable spatio-temporal regime** (the cached `contacts="temporal"` chains): scalar intercept
+  `c`, weekly level and matrix-normal structure field share the temporal Cholesky `Lt` over the full
+  `Tn` window weeks. `Lt[wk,:]` (= column `wk` of `Ltᵀ`) mixes weeks `1..wk`, so the FULL field
+  `z` (P×Tn) and level `z_c` (Tn−1) are needed, not just week `wk`:
 
-      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Kt[s,t]=phi_time^|s-t|;  Lt=chol(Kt+1e-4 I).L
+      σ_c = exp(softclamp(log_sigma_c, -3, 2));   Lt = chol(Kt + 1e-4 I).L
       Qt = _sum_zero_basis(Tn)                                              # `-t0`, level only
       rvec = ( c + σ_c·(Qt·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )        # `-lc0`: level is iid
 
-  ⚠ The LEVEL's whitening depends on the generation and is selected by the `-lc0` marker in
-  `contacts`: from `-lc0` (2026-08-09) the level is iid-with-sum-to-zero as written above, so
-  `phi_time` enters ONLY through `Lt`; under `-t0-ar1` and earlier it was whitened through
-  `Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L` and `phi_time` acted on the level too. Replaying an archived
-  chain with the wrong branch silently returns a different μ.
+  ⚠ TWO INDEPENDENT GENERATION FORKS, decided by DIFFERENT evidence. Both are live because all four
+  combinations exist on disk, and replaying a chain through the wrong branch silently returns a
+  plausible but different μ.
+
+  1. **Which temporal kernel** — forked on the chain's own PARAMETER NAME, which is reliable here
+     because the two parameterisations chose different ones:
+
+         log_rho_time present ⇒ ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))
+                                Kt[s,t] = m32(|s−t|/ρ_time)      # `-m32t` (current) and pre-`-ar1`
+         phi_time     present ⇒ Kt[s,t] = phi_time^|s−t|         # `-ar1`, read CONSTRAINED
+
+  2. **Whether the level is whitened** — forked on the `-lc0` marker in `contacts`, because here the
+     parameter names are IDENTICAL across generations and only the token distinguishes them. From
+     `-lc0` (2026-08-09) the level is iid-with-sum-to-zero as written above, so the temporal
+     parameter enters ONLY through `Lt`; before it the deviation went through
+     `Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L` and the temporal kernel acted on the level too.
 
 - **Legacy per-week iid** (`c[t]`, `z[p,t]`): `rvec = c[wk] .+ η .* (Lp * z[:,wk])`.
 - **Pooled** (scalar `c`, `z[p]`): `rvec = c .+ η .* (Lp * z)`.
@@ -96,15 +105,24 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # Without it, `reconstruct_mu_draws(…; contacts = CONTACTS_TOKEN_PF)` — a supported way to read
     # the retained Pathfinder grid — would silently replay SE draws through a Matérn kernel and
     # every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
-    # ---- which TEMPORAL kernel? (`-ar1`, 2026-08-06) ----
-    # A pre-`-ar1` chain carries `log_rho_time` (Matérn 3/2 length-scale in weeks) instead of
-    # `phi_time` (AR(1) coefficient). Replaying one through `Kt = φ^|s−t|` would treat a
-    # length-scale of e.g. 26 weeks as a correlation of 26 — nonsense that raises nothing. Caught
-    # by NAME here; the token check below additionally covers same-name/different-kernel forks.
-    if !any(n -> n == "phi_time", pnames)
-        @warn "chain has no `phi_time`: a pre-`-ar1` chain whose temporal kernel was a Matérn 3/2 \
-               length-scale (`log_rho_time`), not an AR(1) coefficient. Refusing to reconstruct \
-               rather than replay it through the wrong temporal kernel." path
+    # ---- which TEMPORAL kernel? (`-m32t`, 2026-08-10) ----
+    # This is a FORK, not a guard, and deliberately so: BOTH temporal kernels are on disk and both
+    # must stay replayable.
+    #   • `log_rho_time` ⇒ Matérn 3/2 length-scale in weeks — the current `-m32t` generation, and
+    #     also every generation before `-ar1`.
+    #   • `phi_time`     ⇒ AR(1) coefficient φ ∈ (0,1) — the `-ar1` generation, whose complete
+    #     504/1512-file grid is retained in `dt_intermediate_ar1/` (`CONTACTS_TOKEN_AR1`) and is
+    #     read by this function as a supported cross-generation replay.
+    # Getting it wrong is silent and severe in either direction: a length-scale of 26 weeks read as
+    # a correlation of 26, or a correlation of 0.99 read as a 0.99-week length-scale. The name is a
+    # reliable discriminator here (unlike the spatial kernel family, which needs the token) BECAUSE
+    # the two parameterisations chose different names — which is the only reason this fork can be
+    # made on the chain itself. `-m32t` changed no dimension, so the count cannot help.
+    temporal_is_ar1 = any(n -> n == "phi_time", pnames)
+    if !temporal_is_ar1 && !any(n -> n == "log_rho_time", pnames)
+        @warn "chain carries neither `log_rho_time` nor `phi_time` — its temporal kernel cannot be \
+               identified, so it is not a per-week `model_degree` Stage-1 chain. Refusing to \
+               reconstruct." path
         return nothing
     end
     # Current-generation tokens have the Matérn 3/2 kernel by construction; only a RETAINED legacy
@@ -162,7 +180,10 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     end
     μ = Array{Float64,3}(undef, D, A, A)
 
-    if any(n -> n == "phi_time", pnames)                     # separable spatio-temporal regime (`-ar1`)
+    # Separable spatio-temporal regime — the only one the guard above admits. (The per-week-iid and
+    # pooled branches at the foot of this function are consequently unreachable in normal use; they
+    # predate the guard and are left as documentation of those chain layouts.)
+    if temporal_is_ar1 || any(n -> n == "log_rho_time", pnames)
         # infer Tn from the structure-field names z[p,t] (z_c[t]/z_s/z_i don't match "^z\[")
         Tn = maximum(parse(Int, match(r"^z\[\d+\s*,\s*(\d+)\]$", n).captures[1])
                      for n in pnames if occursin(r"^z\[\d+\s*,\s*\d+\]$", n))
@@ -180,9 +201,15 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         end
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
-        # `-ar1`: the chain stores the CONSTRAINED φ ∈ (0,1) directly — no exp, no softclamp
-        # (`model_degree` has none either: φ^k cannot overflow, so RHO_TIME_BOUNDS is unused).
-        φ_time = vec(Array(chn[:phi_time]))                                             # D
+        # The temporal parameter, read the way ITS OWN generation stored it (see the fork above):
+        #   • `-m32t` and earlier: `log_rho_time` is a raw log-latent, so it must be soft-clamped
+        #     with `RHO_TIME_BOUNDS` and exponentiated — mirroring `model_degree` exactly. Getting
+        #     this wrong is the silent-length-scale failure the constants' docstring warns about.
+        #   • `-ar1`: `phi_time` is stored CONSTRAINED in (0,1) — no exp, no softclamp, because
+        #     `model_degree` had none either (φ^k cannot overflow).
+        # `tpar` carries whichever it is; `temporal_is_ar1` says how to turn it into `Kt` below.
+        tpar = temporal_is_ar1 ? vec(Array(chn[:phi_time])) :
+               exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))    # D
         Z  = Array{Float64,3}(undef, D, zrows, Tn)           # structure-field raw z[p,t]; `zrows`, NOT `P` — see the generation sniff above
         for n in pnames
             m = match(r"^z\[(\d+)\s*,\s*(\d+)\]$", n); m === nothing && continue
@@ -207,16 +234,22 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
             Zc[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
         end
         tz_Q = _sum_zero_basis(Tn)                           # SAME helper the model uses — never re-derive
-        # ---- `-lc0` (2026-08-09): the LEVEL lost its AR(1) whitening ----
+        # ---- `-lc0` (2026-08-09): the LEVEL lost its temporal whitening ----
         # From `-lc0` the level is `c + σ_c·(Qt·z_c)` — iid deviations conditioned to sum to zero, so
-        # `phi_time` reaches μ ONLY through `Lt`. Before it, the deviation was whitened through
-        # `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` and φ acted on the level as well. Both generations are on
-        # disk (`CONTACTS_TOKEN_AR1`), the parameter NAMES are identical in both, and replaying one
-        # with the other's algebra returns a plausible-but-wrong μ with no error — so the branch is
-        # taken on the TOKEN, which is the only thing that distinguishes them.
+        # the temporal parameter reaches μ ONLY through `Lt`. Before it, the deviation was whitened
+        # through `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` and the temporal kernel acted on the level as well.
+        # Both generations are on disk (`CONTACTS_TOKEN_AR1`), the parameter NAMES are identical in
+        # both, and replaying one with the other's algebra returns a plausible-but-wrong μ with no
+        # error — so THIS branch is taken on the TOKEN, which is the only thing that distinguishes
+        # them. (Contrast the kernel-family fork above, which the parameter NAMES do distinguish.)
+        # The two forks are independent and all four combinations occur on disk: current `-m32t`
+        # (m32 + iid), the superseded `temporal-w8-lc0` grid (AR(1) + iid), `-t0-ar1` (AR(1) + Lc)
+        # and the `-m32-t0` NUTS pilots (m32 + Lc).
         level_is_iid = !is_legacy_token(contacts) || occursin("-lc0", contacts)
         for d in 1:D
-            Kt = [φ_time[d]^abs(s - t) for s in 1:Tn, t in 1:Tn]           # AR(1), mirrors model
+            # `Kt` mirrors whichever `model_degree` wrote this chain — see the fork above.
+            Kt = temporal_is_ar1 ? [tpar[d]^abs(s - t) for s in 1:Tn, t in 1:Tn] :
+                                   [_m32(abs(s - t) / tpar[d]) for s in 1:Tn, t in 1:Tn]
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
             # level: cₜ = c + σ_c·(tz_Q·z_c)_wk  (`-lc0`), or ·(tz_Q·Lc·z_c)_wk before it

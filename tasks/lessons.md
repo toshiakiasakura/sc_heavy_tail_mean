@@ -2253,3 +2253,63 @@ re-points whenever the window's length changes; one expressed relative to a **fi
 says never to bypass, **does not exist** — `tmp/` had been cleaned. 13j had to be hand-patched. A
 generator that lives only in a scratch directory is not a generator; either check it in or stop
 claiming the artefact is generated.
+
+---
+
+## 2026-08-10 — `-m32t`: reverting `-ar1`, and what a revert is evidence about
+
+The user asked for the Stage-1 temporal kernel to go back to Matérn 3/2, keeping the structure
+`-ar1` had not changed (one trajectory per age pair, no kernel on the level) and choosing the
+length-scale prior "considering the scale of time". One-line kernel swap in `model_degree`, plus the
+prior, the token, and the two read-only mirrors.
+
+**1. A change can be right when it lands and be retired later by changes that have nothing to do
+with it.** `-ar1` was adopted four days earlier on a measurement that still reproduces exactly:
+at matched effective rank, AR(1) gave `Kt` min eigenvalue 2.7e-5 → 5.1e-3 and `Lt` column spread
+94.2 → 23.1. Nothing about that became false. What happened is that `-lc0` removed the *mechanism*
+the near-pooled limit was fatal through (the level's projection `Qtᵀ·Kt·Qt`, exactly 0 at φ=1
+however well conditioned `Kt` is), and `-w8h` shortened the window to 9–12 weeks, so the regime
+AR(1) was chosen to represent is both less reachable and less worth representing. The measurement
+was sound; the *reason to care about it* was removed by two unrelated commits.
+
+*Transferable:* when a justification rests on a failure mode, re-read it whenever that failure mode
+is fixed elsewhere. `-ar1`'s conditioning advantage was never addressing the thing that actually
+broke — §12.4 had already recorded that in passing ("a property of THIS projection and not of
+`Kt`") without drawing the conclusion for kernel choice. **The evidence to revert was already
+written down; nobody had followed the pointer.**
+
+**2. This is the one recent generation change a chain carries evidence of by itself — so guard it
+differently.** `-m32`, `-t0` and `-lc0` all left parameter names and shapes untouched, which is why
+this project's guards go through `is_legacy_token`. `-m32t` RENAMED the parameter (`phi_time` →
+`log_rho_time`), so the chain proves its own generation. Where that is true, prefer a **fork** over
+a refusal: `reconstruct_mu_draws` now branches on the name and still replays the retained `-ar1`
+grid in `dt_intermediate_ar1/`, which a token-based refusal would have locked out. Where it is not
+true — including the *level*-whitening fork inside that same function — the token remains the only
+evidence. Both kinds now sit side by side there, ten lines apart, each labelled with which evidence
+it uses and why.
+
+*Transferable:* "fork on the chain, refuse on the token" is the rule, and the two mirrors correctly
+differ: 10j forks (it exists to replay old generations), 8j/9j refuses (one figure per generation;
+a dimensionless correlation on a weeks axis is worse than a NaN panel).
+
+**3. "Choose the prior considering the scale of time" is answerable with arithmetic, and was.**
+`gp_time_len_prior` = N(log 2, 0.35²) was not restored because it was the previous value. Three
+measurements decided it, each against the *current* 9–12 week window rather than the 12-week one it
+was originally set for: (i) it matches the data — the 252-fit `-ar1` survey put NegBin at φ median
+0.726, which at matched lag-1 correlation is ρ_time 1.6–2.5 wk; (ii) it keeps `Lt`'s column spread
+at 1.4/2.4/5.2 across its 90% band, against the 228–274 of the chains that would not mix; (iii) it
+puts P(ρ_time > 9 wk) = 8.7e-6, excluding the pooled region even for the shortest window. The
+alternatives (centre 3 wk, or SD 0.5) were priced the same way before being rejected.
+
+*Transferable:* a length-scale prior is a claim about a correlation function over a known window,
+so it can be quoted in the units the reader cares about — lag-k correlations, spread of the
+whitening factor, tail mass past the window — rather than as (μ, σ) on a log scale. Do that, and
+"is this appropriate?" stops being a matter of taste.
+
+**4. The restraint moved back from the support to the prior, and that has to be said out loud.**
+Under `-ar1` the temporal parameter was bounded by construction (φ ∈ (0,1)), so `RHO_TIME_BOUNDS`
+and the soft-clamp were dead code. They are live again — but *inert*: at −5.9σ / +11.3σ under this
+prior the clamp cannot bind. That is the intended division of labour (the prior restrains the
+length-scale, the clamp only stops `exp` overflowing), and this project has twice mistaken one for
+the other in the opposite direction — a clamp narrow enough to absorb the likelihood's preference
+reports false confidence. State which of the two is doing the work, and check the σ distance.
