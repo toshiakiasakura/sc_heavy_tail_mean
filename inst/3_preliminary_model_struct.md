@@ -1812,6 +1812,42 @@ predicts $\rho_{\text{time}} \approx 2.0$ wk at matched lag-1, and `-m32t` measu
 all 12 chains below the prior centre and none near the window. The kernel choice is a hurdle-Weibull
 question, not a global one.
 
+**Head-to-head after the revert (the like-for-like comparison neither earlier smoke could give).**
+The restored AR(1) generation was smoke-fitted on the *same* 3 origins × 4 horizons × 2 degree
+models, same window, same seed, same AD backend — so only the correlation function differs. Compared
+on scales that mean the same thing in both parameterisations (lag-1 correlation, and end-to-end
+correlation across the window at lag $T_n-1$):
+
+| family | kernel | div | lag-1 med | end-to-end med | $\ge 0.5$ | worst |
+|---|---|---|---|---|---|---|
+| unweighted-negbin | AR(1) | 0/12 | $0.487$ | $0.001$ | 0/12 | $0.014$ |
+| unweighted-negbin | Matérn 3/2 | 0/12 | $0.660$ | $0.000$ | 0/12 | $0.003$ |
+| weighted-hweibull | AR(1) | 0/12 | $0.748$ | $0.070$ | **1/12** | **$1.000$** |
+| weighted-hweibull | Matérn 3/2 | 0/12 | $0.942$ | $0.148$ | **3/12** | $0.815$ |
+
+**Zero divergences under either kernel.** NegBin is indifferent to the choice — no chain approaches
+collapse under either — which confirms this is a hurdle-Weibull question and not a global one. On
+the weighted path AR(1) is a real but *partial* improvement: collapsed chains fall $3/12 \to 1/12$
+and it pools less in 7 of 12 paired chains, including both of Matérn's worst cases
+($0.679 \to 0.244$, $0.815 \to 0.001$) — **but its single worst chain is worse.** At 2021-05-02 h1
+AR(1) returned $\phi = 1.000000$ in *every draw* (min $=$ max: a point mass exactly on the boundary)
+where Matérn stopped at $\rho_{\text{time}} \in [8.3, 13.9]$ with genuine spread. The revert trades
+three moderate collapses for one total one.
+
+⚠ Two things follow, and neither is comfortable. **(i)** $\mathrm{Beta}(3,3)$ did not prevent a
+boundary pile-up on the very first smoke, despite vanishing density at $\phi = 1$ — which was the
+entire reason it replaced Uniform. **(ii)** That chain is *not* the `-ar1` catastrophe: its
+$\log\eta = -1.56$ ($\approx -3.1$ prior SD, against the $-238$ that generation produced),
+$\log\sigma_c = -1.17$, $\max|z| = 4.29$ — healthy by every other measure, which is why the
+divergence criterion does not fire. A parameter pinned at a boundary with **zero posterior spread**
+is also the textbook signature of Pathfinder's normal approximation collapsing in a flat direction,
+which `RHO_TIME_BOUNDS`' provenance note already warns about. Whether it is a genuine posterior mode
+is precisely what the NUTS smoke must answer.
+
+⚠ AR(1)'s longer long-lag memory — `-m32t`'s best argument — is visible in the data: across all 24
+pairs AR(1) has the *higher* end-to-end correlation in 16 of them. At NegBin's magnitudes
+($0.012$ vs $0.002$) that is a structural property of the kernel, not a pathology.
+
 **Method note.** The `-m32t` generation was committed (`69e43df`), smoke-fitted, measured and
 reverted within one day, and the revert was *targeted* — the kernel, the prior, the token and the
 mirrors — while the unrelated fixes found along the way were kept: 13j's missing `stage1_use_nuts`

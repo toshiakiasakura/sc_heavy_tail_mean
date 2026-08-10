@@ -322,9 +322,52 @@ chains below the prior centre. Kernel choice here is a hurdle-Weibull question.
 
 ## Open
 
-- [ ] **Pathfinder smoke** — 3 origins under `temporal-w8h-lc0`, then the divergence census reported
-      **head-to-head against the `-m32t` numbers on the same 24 chains** (same origins, window, seed).
-      This is the like-for-like kernel comparison neither earlier smoke could provide.
+## Measured — head-to-head Pathfinder smoke, AR(1) vs Matérn on THE SAME 24 chains
+
+24/24 s1 in 22 min, 72/72 s2 in 9 min. Same 3 origins × 4 horizons × 2 degree models, same window,
+same seed, same AD backend — only the temporal correlation function differs. Compared on the two
+scales that mean the same thing in both parameterisations: **lag-1 correlation** (φ for AR(1);
+`m32(1/ρ_time)` for Matérn) and **end-to-end correlation** across the window (lag Tn−1), which is
+what "the field has collapsed to a constant" actually means.
+
+| family | kernel | div | lag-1 med | end-to-end med | nominal med | max\|z\| |
+|---|---|---|---|---|---|---|
+| unweighted-negbin | AR(1) | **0/12** | 0.487 | 0.001 | φ 0.49 | 2.82 |
+| unweighted-negbin | Matérn | **0/12** | 0.660 | 0.000 | ρ 1.44 wk | 2.65 |
+| weighted-hweibull | AR(1) | **0/12** | 0.748 | 0.070 | φ 0.75 | 4.29 |
+| weighted-hweibull | Matérn | **0/12** | 0.942 | 0.148 | ρ 5.31 wk | 3.31 |
+
+**Zero divergences under either kernel** — the revert is safe on that criterion, and so was `-m32t`.
+
+**NegBin is indifferent to the kernel**, confirming this is a hurdle-Weibull question: no chain gets
+anywhere near collapse under either (end-to-end ≤ 0.014 AR(1), ≤ 0.003 Matérn; 0/12 above 0.5 both).
+
+**Hurdle-Weibull — a genuine improvement, but NOT a clean win.** Chains with end-to-end ≥ 0.5 fall
+**3/12 → 1/12**, and AR(1) pools less in 7 of the 12 paired chains, including both of Matérn's worst
+cases (0.679 → 0.244 and 0.815 → 0.001). ⚠ **But its single worst chain is worse**: at
+2021-05-02 h1 AR(1) returned **φ = 1.000000 in every draw** (min = max — a point mass exactly on the
+boundary) where Matérn stopped at ρ_time 8.3–13.9 with real spread. So the revert trades three
+moderate collapses for one total one.
+
+⚠ **Beta(3,3) did not prevent that boundary pile-up**, on the very first smoke, despite having
+density → 0 at φ = 1 — which is the whole reason it was chosen over Uniform. Worth knowing before
+anyone proposes a sixth prior.
+
+⚠ **It is NOT the `-ar1` Uniform-prior catastrophe**: that chain's `log_eta` is −1.56 (≈ −3.1 prior
+SD, against the −238 that generation produced), `log_sigma_c` −1.17, max\|z\| 4.29 — healthy by every
+other measure, which is why it does not trip the divergence criterion. A φ pinned at exactly 1.0 with
+zero spread is also the classic signature of **Pathfinder's normal approximation collapsing in a flat
+direction**, which this repo already warns about under `RHO_TIME_BOUNDS`. Whether it is a real
+posterior mode is exactly what the NUTS smoke answers.
+
+⚠ AR(1)'s longer long-lag memory shows up as predicted (it was `-m32t`'s best argument): across all
+24 pairs AR(1) has the *higher* end-to-end correlation in 16, though at NegBin's values (0.012 vs
+0.002) that is a structural property, not a pathology.
+
+## Open
+
+- [ ] **NUTS smoke** — running under `temporal-w8h-lc0-nuts`. The trustworthy read, and specifically:
+      **does 2021-05-02 h1 hurdle-Weibull still pin φ at 1.0, or was that a Pathfinder artefact?**
 - [ ] **NUTS smoke** — same 3 origins. Outstanding since 2026-08-09, and the trustworthy read on
       whether the pooled limit is a genuine posterior mode or a Pathfinder artefact.
 - [ ] **`constant_contacts = true` for hurdle-Weibull** — now the fifth independent indication.
