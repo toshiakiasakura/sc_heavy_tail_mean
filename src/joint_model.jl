@@ -51,8 +51,15 @@ block_of(a::Int, cfg::FrameworkConfig) = a <= cfg.child_bins ? 1 : 2
 _softplus(z) = z > zero(z) ? z + log1p(exp(-z)) : log1p(exp(z))
 _softclamp(x, lo, hi, s = 0.25) = lo + s * _softplus((hi - s * _softplus((hi - x) / s) - lo) / s)
 
-# Matérn 3/2 correlation at scaled separation `x = |Δ|/ρ`  (2026-08-05, replaces the squared
-# exponential in BOTH GP kernels — the spatial `Kp` and the temporal `Kt` in `model_degree`).
+# Matérn 3/2 correlation at scaled separation `x = |Δ|/ρ`  (2026-08-05, replaced the squared
+# exponential in BOTH GP kernels — the spatial `Kp` and, at the time, the temporal `Kt` in
+# `model_degree`).
+#
+# ⚠ IT IS NOW THE SPATIAL KERNEL ONLY. The temporal factor went to AR(1) on 2026-08-06 (`-ar1`),
+# back to Matérn 3/2 for one day on 2026-08-10 (`-m32t`), and back to AR(1) the same day when the
+# smoke measured the pooled limit still being reached — see the kernel block in `model_degree`.
+# `_m32` is still used by the read-only mirrors to replay both generations, so do not delete it if
+# the temporal path stops calling it.
 #
 # WHY: the squared exponential's eigenvalues decay super-exponentially, so at the length-scales this
 # model wants it goes numerically low-rank and the non-centred map `z ↦ field` becomes wildly
@@ -287,7 +294,7 @@ end
     # `ρ_diag`, `ρ_gap`, `η` and the 27×27 Cholesky `La` are SHARED
     # across weeks. In the per-week regime the weekly fields are no longer iid: they are
     # coupled by a SEPARABLE temporal GP (§5) — a matrix-normal field R = η·(Q·La·z·Ltᵀ) with a
-    # shared temporal Cholesky Lt(ρ_time) and a decoupled, UNSMOOTHED level cₜ = c + σ_c·(Qt·z_c).
+    # shared temporal Cholesky Lt(φ) and a decoupled, UNSMOOTHED level cₜ = c + σ_c·(Qt·z_c).
     # The population offset is taken RELATIVE to the reference bin (index 1, "2-10"): only
     # relative population matters for reciprocity, and a constant shift log(pop₁) cancels in
     # pop_i·μ_{i→j}=pop_j·μ_{j→i}, so exact reciprocity is preserved — but it rescales the
@@ -474,10 +481,10 @@ end
         K1w = [K1 for _ in 1:Tn]; K2w = [K2 for _ in 1:Tn]; Gw = [G for _ in 1:Tn]
         return (; K1 = K1w, K2 = K2w, G = Gw)
     else
-        # per-week: SEPARABLE spatio-temporal GP (§5). The age-pair field is smoothed over weeks by
-        # a temporal Matérn 3/2 over week indices 1:Tn, sharing one length-scale ρ_time across all
-        # age-pairs; the spatial kernel (ρ_diag, ρ_gap, η, La) is shared as before.
-        #   • temporal kernel  Kt[s,t] = m32(|s−t|/ρ_time),  Lt = chol(Kt + jitter)
+        # per-week: SEPARABLE spatio-temporal field (§5). The age-pair field is smoothed over weeks
+        # by an AR(1) over week indices 1:Tn, sharing one coefficient φ across all age-pairs; the
+        # spatial kernel (ρ_diag, ρ_gap, η, La) is shared as before.
+        #   • temporal kernel  Kt[s,t] = φ^|s−t|  (AR(1) ≡ exponential),  Lt = chol(Kt + jitter)
         #   • structure field  R = η·(Q·La·z·Ltᵀ)  (P×Tn)  ⟹ Cov(vec R) = η²·(Kt ⊗ M·Kage·M),
         #     each age-pair its OWN temporal path, each week the spatial kernel conditioned to
         #     sum to zero over the P pairs (see the `Ap`/`La` block above). "Independently per age
@@ -487,59 +494,71 @@ end
         #     The spatial sum-to-zero constraint is what makes "η governs age-structure only" true
         #     rather than aspirational: without it the field's per-week mean is a second copy of cₜ
         #     and the two amplitudes are confounded.
-        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; ρ_time→0 ⇒ iid weeks, →∞ ⇒ pooled. Since
-        # `-lc0` the ρ_time limits describe the AGE-PAIR FIELD ONLY — the level is iid at every ρ_time.
-        # ---- TEMPORAL CORRELATION IS MATÉRN 3/2 (`-m32t`, 2026-08-10, user request) ----
-        # This REVERTS `-ar1` (2026-08-06), which had swapped the time direction to an AR(1)
-        # correlation `Kt[s,t] = φ^|s−t|` (≡ exponential ≡ Matérn 1/2). Both kernels are again
-        # Matérn 3/2, as they were under `-m32`. Only the correlation FUNCTION moves: the separable
-        # matrix-normal below still gives every age pair its own temporal trajectory under one
-        # shared amplitude η, and the pairs remain correlated across age through `La`. The SPATIAL
-        # kernel and the iid level (`-lc0`) are untouched — this is a time-direction change only,
-        # exactly as `-ar1` was.
+        # ρ_diag/ρ_gap→0 ⇒ iid age-pairs, →∞ ⇒ pooled; φ→0 ⇒ iid weeks, φ→1 ⇒ pooled. Since `-lc0`
+        # the φ limits describe the AGE-PAIR FIELD ONLY — the level is iid at every φ.
+        # ---- TEMPORAL CORRELATION IS AR(1) (`-ar1`, 2026-08-06; RESTORED 2026-08-10) ----
+        # `Kt[s,t] = φ^|s−t|` IS an AR(1) correlation matrix (equivalently the exponential / Matérn
+        # 1/2 kernel), so "AR(1) per age pair, sharing the variance" needs no structural change: the
+        # separable matrix-normal below already gives every pair its own temporal trajectory under
+        # one shared amplitude η, and only the correlation FUNCTION moves. The SPATIAL kernel and
+        # the iid level (`-lc0`) are untouched — a time-direction change only.
         #
-        # WHY REVERT. `-ar1`'s case was conditioning in the near-pooled limit, and it was real:
-        # measured at matched effective rank, AR(1) gave `Kt` min eigenvalue 2.7e-5 → 5.1e-3 and
-        # `Lt` column spread 94.2 → 23.1 at effrank 1.08. But TWO LATER CHANGES RETIRED THAT CASE.
-        #   (i) `-lc0` (2026-08-09) removed the mechanism the φ→1 collapse was fatal through. The
-        #       catastrophe was never `Kt`'s conditioning — it was the LEVEL's projected kernel
-        #       `Qtᵀ·Kt·Qt`, which is exactly 0 in the pooled limit however well conditioned `Kt`
-        #       is. The level is now iid, so the temporal parameter reaches the likelihood only
-        #       through `Lt`.
-        #   (ii) `-w8h` (2026-08-09) shortened the window from a flat 12 weeks to `n_fit + h` =
-        #       9–12. A temporal length-scale is only identified well INSIDE its window, so the
-        #       near-pooled regime AR(1) was chosen to represent is less worth representing.
-        # What is left is the modelling difference, and there Matérn 3/2 is the better description:
-        # AR(1) paths are non-differentiable week to week, and its memory is LONGER at long lag (at
-        # matched lag-1 0.785, lag-4 is 0.380 against 0.140) — a rougher process that nonetheless
-        # forgets more slowly, which is not what a smoothed contact surface should look like.
+        # ⚠ THIS BLOCK WAS SWAPPED TO MATÉRN 3/2 FOR ONE DAY (`-m32t`, 2026-08-10) AND SWAPPED BACK
+        # THE SAME DAY, ON A MEASUREMENT. Read that round trip before touching this kernel again,
+        # because the argument that briefly won is superficially reasonable and was WRONG for a
+        # reason only a fit could expose.
         #
-        # THE PRIOR IS WHAT KEEPS THIS SAFE, NOT THE CLAMP. `gp_time_len_prior` = N(log 2, 0.35²)
-        # (see framework.jl for the full derivation) puts ρ_time's 90% interval at [1.12, 3.56] wk
-        # and P(ρ_time > 9 wk) — the pooled region even for the SHORTEST window — at 8.7e-6.
-        # Measured over that band at Tn = 12: `Kt` min eigenvalue 5.0e-2 … 1.2e-2, full rank, and
-        # `Lt` column spread 1.4 / 2.4 / 5.2 at q05 / median / q95, against the 228–274 that broke
-        # NUTS on 2026-08-05. The centre is not a guess: the 252-fit `-ar1` survey put NegBin at φ
-        # median 0.726 (max 0.844), which at matched lag-1 correlation is ρ_time 1.6–2.5 wk.
-        # ⚠ Hurdle-Weibull is the direction to watch. Its likelihood is nearly flat in time (p⁰ ≈
-        # 0.95), so it wanted φ → 1 under `-ar1` and wanted ρ_time 20–66 wk before that. Under this
-        # prior that pull is restrained rather than followed — which is the intent, because an
-        # unidentified parameter running to a degenerate boundary is not a measurement. If a refit
-        # shows ρ_time piling up on the UPPER tail for NegBin too, the data disagree with the
-        # centre and it should move; see the same rule recorded for `gp_len_prior`.
+        # `-m32t`'s case was that two later changes had retired AR(1)'s justification: `-lc0` removed
+        # the mechanism the φ→1 collapse was fatal through (the LEVEL's projected kernel
+        # `Qtᵀ·Kt·Qt`, exactly 0 in the pooled limit however well conditioned `Kt` is), and `-w8h`
+        # shortened the window to `n_fit + h` = 9–12 weeks, so the near-pooled regime was argued to
+        # be "less worth representing". Both premises are true. The CONCLUSION did not follow, and
+        # the 3-origin `-m32t` Pathfinder smoke refuted it directly: on the hurdle-Weibull path
+        # **3 of 12 chains came back with ρ_time AT OR PAST THE LENGTH OF THEIR OWN WINDOW** —
+        # 12.0 wk on a 9-week window, 10.2 on 9, 24.4 on 12 — i.e. an end-to-end within-window
+        # correlation of 0.61–0.82 and a field collapsed to essentially one constant repeated across
+        # the window. The pooled limit is still REACHED. "Less worth representing" was an inference
+        # about reachability; the fit measured reachability and disagreed.
         #
-        # SOFT-CLAMP IS BACK, as an overflow guard only. `log ρ_time` is unbounded and a stray LBFGS
-        # step could overflow `exp` (φ ∈ (0,1) by construction needed no such guard, which is why
-        # `RHO_TIME_BOUNDS` went dead under `-ar1`). Under this prior the floor sits at −5.9σ and
-        # the ceiling at +11.3σ, so the clamp CANNOT BIND — the prior restrains the length-scale and
-        # the clamp only stops the optimiser from leaving the representable range. That division of
-        # labour is the point; do not narrow the bounds to shape the posterior.
-        # Jitter stays 1e-4 (not 1e-6): `Kt`'s min eigenvalue is 4.5e-7 at the ρ_time = 104 ceiling,
-        # and the Pathfinder call is not try/caught, so a PosDefException would abort the whole fit
-        # (see tasks/lessons.md).
-        log_rho_time ~ Normal(cfg.gp_time_len_prior[1], cfg.gp_time_len_prior[2])
-        ρ_time = exp(_softclamp(log_rho_time, RHO_TIME_BOUNDS...))   # weeks, soft-bounded
-        Kt = [_m32(abs(s - t) / ρ_time) for s in 1:Tn, t in 1:Tn]
+        # So the operative question is not whether the pooled limit is visited (it is) but whether
+        # it is SAFE to visit, and that is exactly what AR(1) buys. Measured at matched effective
+        # rank — equal temporal pooling, so the comparison is not confounded by how much smoothing
+        # each kernel applies. `spread` is `Lt`'s column-scale ratio, the quantity that broke NUTS on
+        # 2026-08-05 (2.4 in healthy chains, 228–274 in the chains that would not mix):
+        #
+        #   effrank | Matérn 3/2 | AR(1)     | Kt min eig        | Lt spread   | Lc cond
+        #   --------|------------|-----------|-------------------|-------------|-----------------
+        #   ≈4.5    | ρ=2        | φ=0.785   | 5.0e-2 → 1.2e-1   | 2.4 → 2.6   | 61 → 21
+        #   ≈1.4    | ρ=10       | φ=0.95    | 4.6e-4 → 2.6e-2   | 26.8 → 8.6  | 3.5e3 → 45
+        #   ≈1.08   | ρ=26       | φ=0.99    | 2.7e-5 → 5.1e-3   | 94.2 → 23.1 | 1.6e4 → 55
+        #   ≈1.03   | ρ=47       | φ=0.995   | 4.5e-6 → 2.6e-3   | 151.5→ 33.4 | 3.5e4 → 56
+        #
+        # A wash in NegBin's regime (φ ≈ 0.73, ρ_time ≈ 2); 4–6× better column spread and 2–3 orders
+        # better min eigenvalue in hurdle-Weibull's. MECHANISM: AR(1) is MARKOV — tridiagonal
+        # precision, eigenvalues decaying only polynomially — so it keeps spectral mass in the
+        # non-constant directions even at φ = 0.995, where Matérn 3/2's spectrum has collapsed onto
+        # one direction and `Lt`'s first column absorbs the whole field.
+        #
+        # ⚠ WHAT THIS DOES NOT FIX. Reverting the kernel does not stop hurdle-Weibull WANTING the
+        # pooled limit — that is a property of its likelihood (p⁰ ≈ 0.95 leaves it nearly flat in
+        # time), not of the kernel, and it has now surfaced under FOUR parameterisations: ρ_time
+        # 20–27 wk under the pre-`-ar1` log-normal, 47–66 under the reverted `-ig`, φ → 0.9985–
+        # 0.9998 under `-ar1`, and ρ_time past the window under `-m32t`. The indicated action for
+        # that path is `constant_contacts = true`, which its posterior has now said five times — see
+        # tasks/todo.md open items.
+        # ⚠ A MODELLING difference, not only a numerical one: AR(1) paths are non-differentiable
+        # (rougher week to week) and memory is LONGER at long lag — at matched lag-1 correlation
+        # 0.785, lag-4 is 0.380 against Matérn 3/2's 0.140 and lag-8 is 0.115 against 0.008. That
+        # was `-m32t`'s best argument and it is a real cost, accepted here for the conditioning.
+        #
+        # NO SOFT-CLAMP: φ ∈ (0,1) by construction (Turing's bijector), and φ^k cannot overflow, so
+        # there is nothing for `_softclamp` to guard — unlike `log ρ_time`, where a stray LBFGS step
+        # could overflow `exp`. `RHO_TIME_BOUNDS` is consequently UNUSED by this path (dead code
+        # again, retained only so archived Matérn-temporal chains can be replayed by the mirrors).
+        # Jitter stays 1e-4 (not 1e-6): the Pathfinder call is not try/caught, so a PosDefException
+        # would abort the whole fit (see tasks/lessons.md).
+        phi_time ~ Beta(cfg.ar1_phi_prior...)              # AR(1) coefficient, (0,1)
+        Kt = [phi_time^abs(s - t) for s in 1:Tn, t in 1:Tn]
         Lt = Matrix(cholesky(Symmetric(Kt) + 1e-4 * I).L)   # DENSE (see La note above): Ltᵀ must not be a triangular type
 
         # ---- SUM-TO-ZERO over the Tn weeks, for the LEVEL (`-t0`, 2026-08-06) ----
@@ -554,21 +573,22 @@ end
         # ---- THE LEVEL'S TEMPORAL SMOOTHING IS GONE (`-lc0`, 2026-08-09, user request) ----
         # This block used to whiten through `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)`, i.e. the level was a
         # 1-D process on the SAME `Kt` as the field, giving Cov = σ_c²·(Mt·Kt·Mt). It now whitens
-        # through the identity. **`ρ_time` therefore reaches the likelihood ONLY through `Lt`, i.e.
+        # through the identity. **`phi_time` therefore reaches the likelihood ONLY through `Lt`, i.e.
         # only through the per-age-pair temporal correlation** — which is the whole point of the
-        # change: one kernel per age pair and nothing else. It survives the `-m32t` revert unchanged
-        # (the request was to swap the kernel family, not to re-smooth the level).
+        # change: one kernel per age pair and nothing else. It survived BOTH kernel swaps of
+        # 2026-08-10 unchanged (each request was to swap the family, not to re-smooth the level).
         #
         # A second, structural benefit falls out, and it is why the pooled limit is no longer
-        # dangerous. Under `-ar1` a φ→1 degeneracy destroyed whole fits, and it was a property of
-        # THIS projection rather than of `Kt`: `Qtᵀ·J·Qt = 0` EXACTLY, so in the pooled limit the
-        # projected kernel went to zero however well conditioned `Kt` was, `Lc` collapsed to
-        # `chol(1e-4·I)`, and the weekly level died into the jitter (marginal SD per unit σ_c: 0.958
-        # at φ=0 → 0.260 at 0.99 → 0.028 at 0.9999). With `Lc` removed the level's amplitude is
-        # ρ_time-independent by construction and that failure mode cannot occur — which is half of
-        # why `-ar1`'s conditioning argument no longer justifies the rougher kernel. The field-side
-        # consequence survives (`Lt`'s first column absorbs the field as ρ_time → ∞), and that is
-        # what `gp_time_len_prior` restrains.
+        # dangerous. Under `-ar1` + `-t0` a φ→1 degeneracy destroyed whole fits, and it was a
+        # property of THIS projection rather than of `Kt`: `Qtᵀ·J·Qt = 0` EXACTLY, so in the pooled
+        # limit the projected kernel went to zero however well conditioned `Kt` was, `Lc` collapsed
+        # to `chol(1e-4·I)`, and the weekly level died into the jitter (marginal SD per unit σ_c:
+        # 0.958 at φ=0 → 0.260 at 0.99 → 0.028 at 0.9999). With `Lc` removed the level's amplitude is
+        # φ-independent by construction and that failure mode cannot occur. ⚠ It does NOT rescue the
+        # FIELD side — `Lt`'s first column still absorbs the field as φ→1 — which is what
+        # `ar1_phi_prior` restrains, and which is why removing `Lc` did NOT make the kernel choice
+        # irrelevant (the `-m32t` round trip of 2026-08-10 tested exactly that inference and the
+        # smoke refuted it; see the kernel block above).
         #
         # WHY (unchanged by `-lc0` — the confound is with the deviation's MEAN, not its correlation):
         # `c` and the time-MEAN of the weekly deviation are two parameterisations of the same
@@ -579,9 +599,10 @@ end
         # `-w8h` (Tn = n_fit + h = 9..12): 5 + 32·Tn = **293/325/357/389** (NegBin), 5 + 81·Tn =
         # **734/815/896/977** (hurdle-Weibull) at h = 1..4.
         # ⚠ Do NOT date a chain by its dimension. 389/977 is ALSO what `-diag` and `-t0-ar1` had (at
-        # their flat Tn = 12), and `-m32t` changed no dimension at all — one scalar (`log_rho_time`)
-        # replaced one scalar (`phi_time`). Identify the model by the token and by which names are
-        # present: `log_rho_time` ⇒ Matérn 3/2 in time, `phi_time` ⇒ the `-ar1` generation.
+        # their flat Tn = 12), and NEITHER kernel swap of 2026-08-10 changed a dimension at all —
+        # each replaced one scalar by one scalar. Identify the model by the token and by which names
+        # are present: `phi_time` ⇒ AR(1) (current, and `-ar1`), `log_rho_time` ⇒ a Matérn 3/2
+        # temporal kernel (the one-day `-m32t` generation, and everything before `-ar1`).
         #
         # LEVEL ONLY — do NOT also project the structure field's time axis. `R`'s per-pair mean over
         # weeks duplicates nothing (no other parameter carries persistent age-pair structure), so

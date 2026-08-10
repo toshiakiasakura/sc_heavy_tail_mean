@@ -66,12 +66,12 @@ Load the two-stage artefacts for `(lbl, origin, h)` and return per-draw transmis
 The infection block (susc / inf / `gamma_sar`) comes from the **Stage-2 pooled** file — susc/inf are
 the stored `N×A` pooled draws (relative to the reference bin `cfg.ref_bin`, default 4 = "25-34", = 1), `gamma_sar` the pooled per-contact
 secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **Stage-1 chain**:
-`rho_diag`/`rho_gap`/`rho_time[d] = exp(softclamp(log_rho_diag|log_rho_gap|log_rho_time,…))` — the
-GP length-scales in the total-age, age-gap and (in the separable spatio-temporal regime) temporal
-directions. ⚠ `rho_time` is in **WEEKS** and the two spatial ρ are in **age-years**, so they are
-still drawn on separate axes by `plot_lengthscales`; `rho_time` is `NaN` for pooled chains. Note
-susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ (Stage-1, ~200 draws) have different draw
-counts — they are consumed by separate figures.
+`rho_diag`/`rho_gap[d] = exp(softclamp(log_rho_diag|log_rho_gap,…))` are the spatial GP
+length-scales in age-years (total-age and age-gap directions); `phi_time[d]` is the AR(1) temporal
+coefficient, read CONSTRAINED from the chain (dimensionless — NOT a length-scale in weeks, so it
+must not share an axis with the two spatial ρ; see `plot_lengthscales`). `phi_time` is `NaN` for
+pooled chains. Note susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ (Stage-1, ~200 draws) have
+different draw counts — they are consumed by separate figures.
 
 Also returns the per-draw **observation SD** `sigma_inf` (the infection-likelihood noise scale,
 `N⁺(0.05, 0.025²)` in `model_transmission`) — Stage-2, so present for the NULL model too.
@@ -110,7 +110,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     if chn === nothing                                                   # NULL model: no contact fit
         nan1 = fill(NaN, 1)
         return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
-                  rho_time = nan1,
+                  phi_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F/σ_inf are Stage-2, always there
     end
     s1names = string.(names(chn, :parameters))
@@ -122,37 +122,38 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     # identical to the current one (same names, same shapes) and so invisible to any `s1names` sniff.
     # ρ is on the same scale in both, but it means a different correlation function, so plotting the
     # two together on one axis would silently mix kernel families. Same fork as `reconstruct_mu_draws`.
-    # `-m32t` (2026-08-10): the temporal parameter must be `log_rho_time`, a Matérn 3/2 length-scale
-    # in weeks. A chain carrying `phi_time` is the `-ar1` generation, whose dimensionless correlation
-    # in (0,1) must not be reported on a weeks axis — it would render as ρ_time ≈ 1 week, plausible
-    # and wrong. UNLIKE `reconstruct_mu_draws`, which FORKS on this name to keep archived chains
-    # replayable, this function REFUSES: 9j draws one figure per generation and mixing units on it
-    # is worse than a NaN panel. Spatial guard (`log_rho_gap` + `-m32`) is unchanged.
+    # The temporal parameter must be `phi_time`, the AR(1) coefficient. A chain carrying
+    # `log_rho_time` instead is either pre-`-ar1` or the one-day `-m32t` generation, and its
+    # weeks-valued length-scale must not be read as a correlation — ρ_time = 24 wk reported as
+    # φ = 24 is plausible-looking nonsense on a (0,1) axis. UNLIKE `reconstruct_mu_draws`, which
+    # FORKS on this name to keep both generations replayable, this function REFUSES: 9j draws one
+    # figure per generation and mixing units on it is worse than a NaN panel. Spatial guard
+    # (`log_rho_gap` + `-m32`) is unchanged.
     # Token half of the guard: current-style tokens are `-m32` by construction, only a RETAINED
     # legacy one must carry the marker (`is_legacy_token`, framework.jl). A bare
     # `occursin("-m32", contacts)` here would reject every chain fitted after the accumulated token
     # prefix was dropped on 2026-08-09.
-    if !("log_rho_gap" in s1names) || !("log_rho_time" in s1names) ||
+    if !("log_rho_gap" in s1names) || !("phi_time" in s1names) ||
        (is_legacy_token(contacts) && !occursin("-m32", contacts))
-        @warn "Stage-1 chain is not the current generation (no `log_rho_gap`, no `log_rho_time` \
-               i.e. an `-ar1` chain, or a pre-`-m32` token); ρ set to NaN" s1p contacts
+        @warn "Stage-1 chain is not the current generation (no `log_rho_gap`, no `phi_time` \
+               i.e. a Matérn-temporal chain, or a pre-`-m32` token); ρ set to NaN" s1p contacts
         nan1 = fill(NaN, 1)
         return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
-                  rho_time = nan1,
+                  phi_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)
     end
     # `RHO_BOUNDS`/`RHO_TIME_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree`
     # or every reconstructed length-scale is silently wrong. See the constants' docstring.
     rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))  # total-age dir, mirrors model
     rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))  # age-gap dir, mirrors model
-    # `-m32t`: the temporal parameter is a Matérn 3/2 length-scale in WEEKS, soft-clamped with
-    # `RHO_TIME_BOUNDS` exactly as `model_degree` does (live again since 2026-08-10 — it was dead
-    # code for the four days `-ar1` used a bounded φ instead).
-    # ⚠ Its units differ from rho_diag/rho_gap (weeks vs age-years), so it must NOT share their axis
-    # in 9j — see `plot_lengthscales`, which keeps a separate panel for it.
-    rho_time = exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))
+    # `-ar1`: the temporal parameter is the AR(1) coefficient φ ∈ (0,1), NOT a length-scale in
+    # weeks — stored constrained, so read it directly (no exp/softclamp; `model_degree` has none
+    # either, and `RHO_TIME_BOUNDS` is dead code on this path).
+    # ⚠ It is returned as `phi_time`, not `rho_time`: the units differ from rho_diag/rho_gap
+    # (dimensionless correlation vs age-years), so it must NOT share their axis in 9j.
+    phi_time = vec(Array(chn[:phi_time]))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
-    return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag, rho_gap, rho_time,
+    return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag, rho_gap, phi_time,
               w_mu, w_sigma)
 end
 

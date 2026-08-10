@@ -3,7 +3,7 @@
 # Reconstructs the GP-smoothed directional contact mean μ_{i→j} per posterior draw from a
 # cached STAGE-1 chain, WITHOUT rebuilding the model — mirroring the `load_transmission_draws`
 # pattern in 8j_viz_utils.jl. μ is a deterministic transform of the raw sampled columns
-# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, log_rho_time,
+# (log_rho_diag, log_rho_gap, log_eta; and, for the separable spatio-temporal regime, phi_time,
 # log_sigma_c, scalar level c, temporal-level raw z_c, structure-field raw z[·,·]); see `model_degree`
 # (joint_model.jl §5/§6). Requires 8j_viz_utils.jl (for `stage1_chain_path`) to be included first.
 # LinearAlgebra (cholesky/Symmetric/I/dot) and `_unordered_pairs`/`cis_age_midpoints` come in via
@@ -42,9 +42,9 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
   1. **Which temporal kernel** — forked on the chain's own PARAMETER NAME, which is reliable here
      because the two parameterisations chose different ones:
 
+         phi_time     present ⇒ Kt[s,t] = phi_time^|s−t|         # AR(1) — CURRENT, read CONSTRAINED
          log_rho_time present ⇒ ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))
-                                Kt[s,t] = m32(|s−t|/ρ_time)      # `-m32t` (current) and pre-`-ar1`
-         phi_time     present ⇒ Kt[s,t] = phi_time^|s−t|         # `-ar1`, read CONSTRAINED
+                                Kt[s,t] = m32(|s−t|/ρ_time)      # `-m32t` and everything pre-`-ar1`
 
   2. **Whether the level is whitened** — forked on the `-lc0` marker in `contacts`, because here the
      parameter names are IDENTICAL across generations and only the token distinguishes them. From
@@ -105,14 +105,16 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     # Without it, `reconstruct_mu_draws(…; contacts = CONTACTS_TOKEN_PF)` — a supported way to read
     # the retained Pathfinder grid — would silently replay SE draws through a Matérn kernel and
     # every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
-    # ---- which TEMPORAL kernel? (`-m32t`, 2026-08-10) ----
+    # ---- which TEMPORAL kernel? ----
     # This is a FORK, not a guard, and deliberately so: BOTH temporal kernels are on disk and both
-    # must stay replayable.
-    #   • `log_rho_time` ⇒ Matérn 3/2 length-scale in weeks — the current `-m32t` generation, and
-    #     also every generation before `-ar1`.
-    #   • `phi_time`     ⇒ AR(1) coefficient φ ∈ (0,1) — the `-ar1` generation, whose complete
-    #     504/1512-file grid is retained in `dt_intermediate_ar1/` (`CONTACTS_TOKEN_AR1`) and is
-    #     read by this function as a supported cross-generation replay.
+    # must stay replayable. It was introduced by `-m32t` (2026-08-10) and KEPT when that generation
+    # was reverted the same day — which is precisely what it earned its place for, since the fork is
+    # what lets the `-m32t` smoke chains still be read as evidence for the revert.
+    #   • `phi_time`     ⇒ AR(1) coefficient φ ∈ (0,1) — the CURRENT kernel, and the `-ar1`
+    #     generation whose complete 504/1512-file grid is retained in `dt_intermediate_ar1/`
+    #     (`CONTACTS_TOKEN_AR1`).
+    #   • `log_rho_time` ⇒ Matérn 3/2 length-scale in weeks — the one-day `-m32t` generation
+    #     (24 s1 / 72 s2 on disk under `temporal-w8h-lc0-m32t`) and every generation before `-ar1`.
     # Getting it wrong is silent and severe in either direction: a length-scale of 26 weeks read as
     # a correlation of 26, or a correlation of 0.99 read as a 0.99-week length-scale. The name is a
     # reliable discriminator here (unlike the spatial kernel family, which needs the token) BECAUSE
@@ -202,11 +204,12 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         cc     = vec(Array(chn[:c]))                                                    # D scalar intercept
         σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])), -3.0, 2.0))            # D
         # The temporal parameter, read the way ITS OWN generation stored it (see the fork above):
-        #   • `-m32t` and earlier: `log_rho_time` is a raw log-latent, so it must be soft-clamped
-        #     with `RHO_TIME_BOUNDS` and exponentiated — mirroring `model_degree` exactly. Getting
-        #     this wrong is the silent-length-scale failure the constants' docstring warns about.
-        #   • `-ar1`: `phi_time` is stored CONSTRAINED in (0,1) — no exp, no softclamp, because
-        #     `model_degree` had none either (φ^k cannot overflow).
+        #   • AR(1) (current, and `-ar1`): `phi_time` is stored CONSTRAINED in (0,1) — no exp, no
+        #     softclamp, because `model_degree` has none either (φ^k cannot overflow).
+        #   • `-m32t` and pre-`-ar1`: `log_rho_time` is a raw log-latent, so it must be soft-clamped
+        #     with `RHO_TIME_BOUNDS` and exponentiated — mirroring the `model_degree` of ITS OWN
+        #     generation. Getting this wrong is the silent-length-scale failure the constants'
+        #     docstring warns about, which is why `RHO_TIME_BOUNDS` is retained though dead.
         # `tpar` carries whichever it is; `temporal_is_ar1` says how to turn it into `Kt` below.
         tpar = temporal_is_ar1 ? vec(Array(chn[:phi_time])) :
                exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))    # D
@@ -242,9 +245,9 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         # both, and replaying one with the other's algebra returns a plausible-but-wrong μ with no
         # error — so THIS branch is taken on the TOKEN, which is the only thing that distinguishes
         # them. (Contrast the kernel-family fork above, which the parameter NAMES do distinguish.)
-        # The two forks are independent and all four combinations occur on disk: current `-m32t`
-        # (m32 + iid), the superseded `temporal-w8-lc0` grid (AR(1) + iid), `-t0-ar1` (AR(1) + Lc)
-        # and the `-m32-t0` NUTS pilots (m32 + Lc).
+        # The two forks are independent and all four combinations occur on disk: the current
+        # `temporal-w8h-lc0` and the superseded `temporal-w8-lc0` grid (AR(1) + iid), the one-day
+        # `-m32t` smoke (m32 + iid), `-t0-ar1` (AR(1) + Lc) and the `-m32-t0` NUTS pilots (m32 + Lc).
         level_is_iid = !is_legacy_token(contacts) || occursin("-lc0", contacts)
         for d in 1:D
             # `Kt` mirrors whichever `model_degree` wrote this chain — see the fork above.

@@ -2313,3 +2313,54 @@ prior the clamp cannot bind. That is the intended division of labour (the prior 
 length-scale, the clamp only stops `exp` overflowing), and this project has twice mistaken one for
 the other in the opposite direction — a clamp narrow enough to absorb the likelihood's preference
 reports false confidence. State which of the two is doing the work, and check the σ distance.
+
+---
+
+## 2026-08-10 (later) — `-m32t` reverted the same day: what the round trip taught
+
+`-m32t` was committed, smoke-fitted, measured and reverted inside one day. The measurement is in
+`inst/3` §12.6; these are the transferable parts.
+
+**1. "This failure mode is now unreachable" is an EMPIRICAL claim, and it is cheap to test.**
+`-m32t`'s whole case was that `-lc0` (which removed the level's projection) and `-w8h` (which
+shortened the window) had made the near-pooled temporal regime unreachable enough that AR(1)'s
+conditioning advantage there stopped being worth its modelling cost. Both premises were true and
+carefully argued from the code. The inference — *therefore the regime does not matter* — was never
+checked against a fit, and the first fit refuted it: 3 of 12 hurdle-Weibull chains came back with
+ρ_time at or past the length of their own window, under a prior placing 8.7e-6 of its mass there.
+
+*Transferable:* when an argument's load-bearing step is "X can no longer happen", that step is a
+prediction about the posterior, not a property of the code — and a 45-minute smoke settles it. **Run
+the smoke before the argument feels finished, not after.** The static conditioning tables that
+justified both `-ar1` and `-m32t` were correct and identical; they simply could not answer the
+question that decided the matter.
+
+**2. A prior can be tight and still be overridden — which is itself the finding.** N(log 2, 0.35²)
+put P(ρ_time > 9 wk) at 8.7e-6, and the hurdle-Weibull posterior went past the window anyway. That
+is not a reason to tighten further. It is the clearest evidence yet that this path's LIKELIHOOD, not
+its prior, wants the pooled limit — the same conclusion four parameterisations have now reached
+(ρ_time 20–27 wk, 47–66 under `-ig`, φ → 0.9985–0.9998, ρ_time past the window). The indicated
+action is `constant_contacts = true` for that degree model, not a fifth temporal prior.
+
+*Transferable:* prior-vs-likelihood conflict is diagnosed by how far the posterior moves against
+known prior mass, not by whether the posterior "looks reasonable". Quote the tail probability the
+posterior had to overcome.
+
+**3. Revert targeted, not by `git revert`.** The `-m32t` commit had picked up four unrelated fixes on
+the way through: 13j's missing `stage1_use_nuts` (it took the framework default `true`, pointed every
+lookup at a token with no artefacts, and — since 13j calls `two_stage_forecast` — would have silently
+REFIT rather than erred), the 10j/13j Notes still describing the superseded sliding window, stale
+latent counts in `joint_model.jl`, and a plotting robustness fix. Reverting the commit wholesale
+would have reintroduced all four. Revert the *change*, keep the *findings*.
+
+**4. Design for the possibility that you are wrong, and it pays immediately.** `-m32t` replaced a
+refuse-if-not-`phi_time` guard in `reconstruct_mu_draws` with a FORK on the chain's own parameter
+name, so both temporal generations stay replayable. One day later that fork is what lets the `-m32t`
+smoke chains still be read — i.e. the evidence for reverting `-m32t` is only accessible because
+`-m32t` itself made the mirror generation-agnostic. A token-based refusal would have locked out the
+artefacts that justified the decision.
+
+*Transferable:* in a codebase that keeps every generation on disk, read-only mirrors should FORK on
+whatever evidence the artefact itself carries and REFUSE only when it carries none. The rule this
+project already had — "fork on the chain, refuse on the token" — is what made a same-day reversal
+cheap instead of destructive.

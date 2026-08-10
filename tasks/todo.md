@@ -163,6 +163,9 @@ time."
 **Cache token: `temporal-w8h-lc0-m32t` (+`-nuts`).** Confirmed with the user before implementing:
 prior `N(log 2, 0.35²)`, and the AR(1) path **removed** rather than kept behind a config switch.
 
+⚠ **THIS GENERATION LASTED ONE DAY AND WAS REVERTED** — see the section below. Kept here because
+its smoke is the measurement that decided the matter, and its 24 s1 / 72 s2 artefacts are on disk.
+
 ## What changed
 
 1. **`-m32t`** — `Kt[s,t] = m32(|s−t|/ρ_time)` with `log_rho_time ~ Normal(cfg.gp_time_len_prior…)`
@@ -268,3 +271,62 @@ not a clean comparison of kernels.
 - [ ] **NUTS smoke** — same 3 origins. Outstanding since 2026-08-09.
 - [ ] The `-w8h`/`-lc0` open items above carry over unchanged: the full-grid divergence census, and
       attributing the φ drop (now a ρ_time question) between window length, `-lc0` and the prior.
+
+---
+
+# 2026-08-10 (later) — reverted: the temporal kernel goes back to AR(1)
+
+User request, after reading the `-m32t` census: "stop the fitting process and revert it back to the
+AR(1)." **Cache token back to `temporal-w8h-lc0` (+`-nuts`)** — safe to reuse, because that
+generation was never fitted (its smoke was killed at one file, which was deleted), so nothing on disk
+has ever carried it.
+
+## Why — the `-m32t` premise was testable and the smoke refuted it
+
+`-m32t` argued that `-lc0` and `-w8h` had made the near-pooled temporal regime unreachable enough not
+to matter. Both premises are true; the conclusion was not. Its own smoke put **3 of 12
+hurdle-Weibull chains at or past the length of their own window** (12.0 wk on 9, 10.2 on 9, 24.4 on
+12 — end-to-end within-window correlation 0.61–0.82, a field collapsed to one constant), under a
+prior placing 8.7e-6 of its mass beyond 9 weeks. The pooled limit is still reached, so the question
+is whether it is **safe** to visit — which is the original AR(1) argument (`Kt` min eigenvalue
+2.7e-5 → 5.1e-3, `Lt` column spread 94.2 → 23.1 at matched effective rank).
+
+⚠ **The revert does not fix the hurdle-Weibull pull**, and should not be expected to. That is its
+likelihood (p⁰ ≈ 0.95 ⇒ nearly flat in time), not the kernel, now seen under four parameterisations.
+The indicated action for that path is `constant_contacts = true`.
+
+⚠ **NegBin was never the problem** and the two parameterisations agree on it quantitatively: φ median
+0.726 under `-ar1` ⇒ ρ_time ≈ 2.0 wk at matched lag-1, against `-m32t`'s measured 1.44 wk with all 12
+chains below the prior centre. Kernel choice here is a hurdle-Weibull question.
+
+## Done
+
+- [x] `joint_model.jl::model_degree` — `phi_time ~ Beta(ar1_phi_prior…)`, `Kt = φ^|s−t|`, clamp gone;
+      the comment block now records the round trip and the measurement that ended it
+- [x] `framework.jl` — `ar1_phi_prior` restored (⚠ flagged NEVER FITTED AT SCALE at (3,3)),
+      `gp_time_len_prior` removed, `RHO_TIME_BOUNDS` dead again, token back to `temporal-w8h-lc0`
+- [x] `8j/9j/12j` mirrors back to `phi_time`; `plot_lengthscales`' temporal panel back to φ ∈ (0,1)
+      with the φ=1 line — **the two-panel split is KEPT** (weeks and age-years never matched either)
+- [x] `10j_viz_utils.jl` — **fork logic unchanged**; only the "which is current" wording moved. This
+      is what keeps the `-m32t` chains readable, i.e. what keeps the evidence for this revert alive
+- [x] Docs: `CLAUDE.md`, `inst/3` §5/§6/§10 + new §12.6, `tasks/lessons.md`
+
+## Kept from the `-m32t` commit (deliberately NOT reverted)
+
+- 13j's missing `stage1_use_nuts` — it defaulted to `true`, pointed at a token with no artefacts and,
+  since 13j calls `two_stage_forecast`, would have silently **refit serially** rather than erred
+- 10j / 13j Notes that still described the superseded sliding window (`week_index = t_o − 1`)
+- `joint_model.jl` stale latent counts (261/653 → per-horizon 293–389 / 734–977)
+- `plot_lengthscales`' two-panel split and its `filter`-then-`isempty` robustness fix
+- The `-m32t` census in `inst/3` §12.5 and above — it is the evidence for this revert
+
+## Open
+
+- [ ] **Pathfinder smoke** — 3 origins under `temporal-w8h-lc0`, then the divergence census reported
+      **head-to-head against the `-m32t` numbers on the same 24 chains** (same origins, window, seed).
+      This is the like-for-like kernel comparison neither earlier smoke could provide.
+- [ ] **NUTS smoke** — same 3 origins. Outstanding since 2026-08-09, and the trustworthy read on
+      whether the pooled limit is a genuine posterior mode or a Pathfinder artefact.
+- [ ] **`constant_contacts = true` for hurdle-Weibull** — now the fifth independent indication.
+- [ ] Beta(3,3) has still never been fitted at scale; the 0/252 divergence result is the (2,2)
+      measurement under `Tn = 12` and an AR(1) level.
