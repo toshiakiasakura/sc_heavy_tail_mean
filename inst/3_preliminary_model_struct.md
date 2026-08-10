@@ -1887,6 +1887,31 @@ parameterisations disagree (lag-1 $0.487$ AR(1) vs $0.660$ Matérn). The defensi
 NegBin is far better behaved than hurdle-Weibull — no boundary collapse, no window collapse — **not**
 that its $\phi$ is well identified.
 
+**⚠ `stage1_phi_init_scale = 0.1` (2026-08-10, user request) — and the probe above under-predicted
+it.** φ's start is now `logistic(N(0, 0.1^2))`, i.e. $N(0,0.1^2)$ **on the logit scale** where
+Turing's bijector puts it, giving $\phi_0 \approx 0.5 \pm 0.025$ (verified over 400 inits:
+$\mathrm{logit}(\phi_0)$ mean $-0.0055$, SD $0.1024$; $\phi_0 \in [0.417, 0.574]$; the `z` block
+unchanged at SD $0.0996$). Refitting the motivating cell **through the shipped code path**:
+
+| init | $\phi$ median | $\phi$ spread | $\log\eta$ | $\max|z|$ |
+|---|---|---|---|---|
+| prior draw (before) | $\mathbf{1.000000}$ | $7.2\times10^{-10}$ | $-1.56$ | $4.38$ |
+| $\mathrm{logistic}(N(0,0.1^2))$ (now) | $\mathbf{0.820}$ | $4.4\times10^{-2}$ | $-0.48$ | $2.39$ |
+
+**The boundary collapse is gone** — φ returns interior with genuine posterior spread, and the rest of
+the fit is healthier ($\log\eta$ nearer its prior mean, $\max|z|$ down). ⚠ The probe table above
+predicted $\phi_0 = 0.5 \Rightarrow 0.997$; that reading came from a **non-shipped RNG arrangement**
+(the probe seeded the init and the Pathfinder run from two fresh streams, whereas `fit_stage1`
+consumes ONE stream sequentially). Read the probe as evidence of start-*sensitivity*, not as a
+prediction of this setting — the shipped-path measurement is the one that counts.
+
+This does **not** identify φ, and is not claimed to. What it removes is a degenerate hand-off:
+`_pf_mean_init` passes the Pathfinder mean to NUTS as `initial_params`, so a finite logit is a
+workable NUTS start where $\mathrm{logit}(1.0)$ is not. ⚠ Not in the cache token, so the 96 Pathfinder
+artefacts under `temporal-w8h-lc0` predate it; the 12 old-init NUTS chains were moved to
+`dt_intermediate_oldinit_nuts/` before the smoke was relaunched, precisely so `fit_or_load_stage1`
+could not silently reuse them.
+
 **Method note.** The `-m32t` generation was committed (`69e43df`), smoke-fitted, measured and
 reverted within one day, and the revert was *targeted* — the kernel, the prior, the token and the
 mirrors — while the unrelated fixes found along the way were kept: 13j's missing `stage1_use_nuts`

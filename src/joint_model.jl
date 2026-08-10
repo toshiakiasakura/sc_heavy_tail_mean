@@ -838,10 +838,41 @@ stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
 
 Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vector.
 
-Every latent is drawn from its prior *except* the standard-normal non-centred random terms — any
-variable whose name starts with `z` (`z`, `z_c`) — which are drawn from `N(0, z_scale²)` instead of
-`N(0,1)`. These dominate the parameter space (251 of 293/734 unconstrained coordinates at Tn = 9, i.e. h=1; Tn = n_fit + h varies 9..12 since `-w8h`) and are only
-weakly identified, so where the path starts largely decides where it ends.
+Every latent is drawn from its prior *except* two blocks, both shrunk toward the centre of the
+**unconstrained** space because they are weakly identified and the LBFGS path largely ends where it
+starts:
+
+1. the standard-normal non-centred terms — any variable whose name starts with `z` (`z`, `z_c`) —
+   drawn from `N(0, z_scale²)` instead of `N(0,1)`. These dominate the parameter space (251 of
+   293/734 unconstrained coordinates at Tn = 9, i.e. h=1; Tn = n_fit + h varies 9..12 since `-w8h`);
+2. the AR(1) coefficient `phi_time`, drawn as `logistic(N(0, cfg.stage1_phi_init_scale²))`
+   (2026-08-10, user request) — i.e. **`N(0, 0.1²)` ON THE LOGIT SCALE**, which is where Turing's
+   bijector puts it, giving φ ≈ 0.5 ± 0.025. Skipped when the model has no `phi_time`
+   (`constant_contacts = true` has no temporal kernel).
+
+⚠ The two are shrunk toward *different things* and it matters. `z` is identity-linked (a standard
+normal is already unconstrained), so `N(0, 0.1²)` is 1/10 of prior scale, near the prior mean, and
+`z = 0` means "no field". φ is LOGIT-linked, so `N(0, 0.1²)` unconstrained is φ ≈ 0.5 — the prior
+median, *not* a small φ. "Start φ small" (φ₀ = 0.1, weeks nearly independent) is a different
+operation and is NOT what this does.
+
+**MEASURED on the cell that motivated it** (weighted-hweibull @ 2021-05-02 h1, through the shipped
+code path with the driver's `Xoshiro(1236)`):
+
+| | φ median | φ spread | log_eta | max\|z\| |
+|---|---|---|---|---|
+| prior-draw init (before) | **1.000000** | 7.2e-10 | −1.56 | 4.38 |
+| `logistic(N(0,0.1²))` (now) | **0.820** | 4.4e-02 | −0.48 | 2.39 |
+
+The boundary collapse is gone: φ comes back interior with real posterior spread, and the rest of the
+fit is healthier too (`log_eta` closer to its prior mean, `max|z|` down). That matters beyond φ
+itself because `_pf_mean_init` hands the Pathfinder mean to NUTS as `initial_params` — a finite logit
+is a workable NUTS start, `logit(1.0)` is not.
+
+⚠ **It does not IDENTIFY φ.** The initialisation probe (`inst/3` §12.6) held everything fixed but φ₀
+and found the final φ largely determined by the start on both degree models (hurdle-Weibull
+0.011→1.000 non-monotonically, NegBin 0.150→0.726). A defined, reproducible start replaces an
+arbitrary one; it does not make the data informative. Read φ from NUTS, not from Pathfinder.
 
 The name filter is a **prefix**, not a fixed list, so it automatically covers any future `z*` block;
 it also covered the dispersion RE's `z_kappa`/`z_k` while that existed (2026-07-30 → 2026-08-02).
@@ -866,6 +897,15 @@ function _stage1_init(model, z_scale::Real, rng, cfg::FrameworkConfig)
     zk = filter(k -> startswith(string(k), "z"), keys(nt))
     isempty(zk) && return nothing
     vals = NamedTuple{Tuple(zk)}(Tuple(z_scale .* randn(rng, size(nt[k])) for k in zk))
+    # φ, on the scale Turing's bijector actually optimises. Set CONSTRAINED here (InitFromParams
+    # takes constrained values and the `link!!` below transforms) — so the normal draw is pushed
+    # through the logistic, which is the inverse of the logit link. Doing it the other way round
+    # would put N(0,0.1²) on the (0,1) scale and immediately leave the support.
+    φs = cfg.stage1_phi_init_scale
+    if φs > 0 && haskey(nt, :phi_time)
+        u = φs * randn(rng)
+        vals = merge(vals, (; phi_time = 1 / (1 + exp(-u))))
+    end
     _, vi2 = DynamicPPL.init!!(rng, model, DynamicPPL.VarInfo(),
                                DynamicPPL.InitFromParams(merge(nt, vals)))
     # `collect(Float64, …)` is REQUIRED, not tidying: the InitFromParams round-trip yields a
