@@ -2364,3 +2364,43 @@ artefacts that justified the decision.
 whatever evidence the artefact itself carries and REFUSE only when it carries none. The rule this
 project already had — "fork on the chain, refuse on the token" — is what made a same-day reversal
 cheap instead of destructive.
+
+---
+
+## 2026-08-10 — A cache token that is right can still name the wrong chains
+
+**What happened.** Before launching the formal 63-origin Pathfinder grid, `dt_intermediate/` was
+found to contain 96 artefacts under `temporal-w8h-lc0` — *exactly* the token the new run would
+write. They were not stale in any way the machinery could see: same model (`git diff 8eab971 HEAD`
+showed the only code change since the AR(1) revert was the `_stage1_init` φ block), same parameter
+names, same dimensions, same key set. They differed only in `stage1_phi_init_scale`, which landed
+three hours after they were fitted and is deliberately **not** in the token.
+
+`prefit_stage1!` skips existing artefacts. So the run would have **loaded** 24 of 504 Stage-1 chains
+at the old init and built 72 Stage-2 cells on them, with nothing in any filename, dimension or
+parameter name to record it. The `-nuts`-vs-Pathfinder split would not have caught it; nor would
+`check_grid.jl` as it then stood.
+
+**Why this is worse than the `ad_backend` case it resembles.** Both are absent from the token; both
+leave the chain's shape untouched. But a different AD backend perturbs the optimiser path and gives
+a *chaotically* different draw from the *same* posterior. A different φ init can put the fit in a
+**different mode** — measured on the motivating cell, φ = 1.000000 (spread 7.2e-10) against 0.820
+(spread 4.4e-2), with `log_eta` −1.56 against −0.48. That is a systematic difference, not a
+stochastic one, and it does not average out over a grid.
+
+**Fixed by**: recording `phi_init_scale` in every Stage-1 artefact (`fit_or_load_stage1`), auditing
+it in `tmp/check_grid.jl` (pre-2026-08-10 files tally `:ABSENT`, which *is* the signal), and moving
+the four superseded 2026-08-10 smoke generations to `dt_intermediate_superseded_20260810/` rather
+than deleting them — the old-init set is the "before" side of the measurement above.
+
+⚠ **Glob the token as a delimited field.** `temporal-w8h-lc0` is a strict prefix of both
+`temporal-w8h-lc0-nuts` and `temporal-w8h-lc0-m32t`, so `*temporal-w8h-lc0*` would have swept up the
+generation being kept. Match `_<token>_` — as `run_grid_batched.sh`'s `count()` does — and check the
+partition arithmetic before moving anything (289 moved + 96 kept = 385 present).
+
+*Transferable, and the general form of a rule this file already half-states:* **"skip if the file
+exists" is only safe when the filename encodes everything that changes the file's contents.** Every
+config field sorts into one of three boxes — in the token, recorded in the artefact, or a silent
+correctness hazard — and a field moves between boxes the moment it starts affecting results. When
+adding a knob, decide which box it is in *at that moment*, and if it is the second, remember that
+existing artefacts predate it and must be moved aside, not refitted over.
