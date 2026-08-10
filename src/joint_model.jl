@@ -859,7 +859,7 @@ operation and is NOT what this does.
 **MEASURED on the cell that motivated it** (weighted-hweibull @ 2021-05-02 h1, through the shipped
 code path with the driver's `Xoshiro(1236)`):
 
-| | φ median | φ spread | log_eta | max\|z\| |
+| | φ median | φ spread | log_eta | max abs(z) |
 |---|---|---|---|---|
 | prior-draw init (before) | **1.000000** | 7.2e-10 | −1.56 | 4.38 |
 | `logistic(N(0,0.1²))` (now) | **0.820** | 4.4e-02 | −0.48 | 2.39 |
@@ -1125,15 +1125,16 @@ end
     fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
-(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts, nuts_draws)`).
-Idempotent skip ⇒ resumable prefit.
+(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts, nuts_draws,
+phi_init_scale)`). Idempotent skip ⇒ resumable prefit.
 
 `sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`), `ad_backend` (`cfg.ad_backend`),
-`target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06) and the NUTS
-iteration counts `nuts_adapts`/`nuts_draws` (`500→2000` on 2026-08-07) are written
-alongside `result` so an artefact is self-describing. The cache filename encodes the SAMPLER via
-`contacts_label`, but deliberately NOT the AD backend or the NUTS tuning, so for those the file's own
-contents are the *only* record — which is what makes a mixed-provenance grid auditable:
+`target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06), the NUTS
+iteration counts `nuts_adapts`/`nuts_draws` (`500→2000` on 2026-08-07) and `phi_init_scale`
+(`cfg.stage1_phi_init_scale`, added 2026-08-10) are written alongside `result` so an artefact is
+self-describing. The cache filename encodes the SAMPLER via `contacts_label`, but deliberately NOT
+the AD backend, the NUTS tuning or the initialisation, so for those the file's own contents are the
+*only* record — which is what makes a mixed-provenance grid auditable:
 
 ```julia
 using JLD2, Glob, StatsBase
@@ -1142,7 +1143,13 @@ countmap([jldopen(p) do f; haskey(f, "ad_backend") ? f["ad_backend"] : :legacy; 
 ```
 
 Adding keys is backward compatible: every existing reader asks for `load(path, "result")` by name,
-and the 504 Pathfinder-generation files that predate this simply have neither key.
+and files that predate a key simply do not have it — `haskey` first, as the snippet above does.
+
+⚠ `phi_init_scale` is the one to read most carefully, because it is the only key here that changes
+the answer SYSTEMATICALLY rather than chaotically. A different `ad_backend` perturbs the optimiser
+path and gives a different draw from the same posterior; a different φ init can land the fit in a
+different MODE (measured: 1.000000 vs 0.820 on weighted-hweibull @ 2021-05-02 h1). Chains that
+differ only in this key are not interchangeable, and nothing outside the file says so.
 """
 function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, pop,
                             cfg::FrameworkConfig; adtype = ad_type(cfg), rng = nothing)
@@ -1156,11 +1163,19 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
     # recoverable only as `size(chn, 1)`, which means loading the whole (now ~28/72 MB) chain just to
     # ask how it was fitted. Under the Pathfinder path these three describe settings that were not
     # consulted — kept anyway so every artefact has the same key set and the audit needs no branch.
+    #   `phi_init_scale` was added 2026-08-10 after this gap cost a near-miss. `stage1_phi_init_scale`
+    # is deliberately NOT in the cache token (it is a starting value, not a model property), and it
+    # changes NOTHING about the chain's parameter names or shapes — yet it moved the motivating cell
+    # from φ = 1.000000 to 0.820. So a grid refitted in part across that change is mixed in a way
+    # NOTHING visible records: same token, same dimensions, same key set. That is strictly worse than
+    # the `ad_backend` case, where at least the draws differ chaotically rather than systematically.
+    # Applies on BOTH paths — Pathfinder consumes it directly, NUTS inherits it through `_pf_mean_init`.
     jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
                   ad_backend = res.ad_backend,
                   target_accept = cfg.stage1_nuts_target_accept,
                   nuts_adapts = cfg.stage1_nuts_adapts,
-                  nuts_draws  = cfg.stage1_nuts_draws)
+                  nuts_draws  = cfg.stage1_nuts_draws,
+                  phi_init_scale = cfg.stage1_phi_init_scale)
     return (; chn = res.chn)
 end
 
