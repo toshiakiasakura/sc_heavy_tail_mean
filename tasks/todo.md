@@ -419,3 +419,102 @@ median 0.5), so it is not purely init-driven — but the data is the weakest of 
 - [ ] **`constant_contacts = true` for hurdle-Weibull** — now the fifth independent indication.
 - [ ] Beta(3,3) has still never been fitted at scale; the 0/252 divergence result is the (2,2)
       measurement under `Tn = 12` and an AR(1) level.
+
+# 2026-08-10 (later still) — 10j §7: the Stage-1 GP smoothing hyperparameters get a section
+
+User request: "update 10j to include the estimates of smoothing parameters, length scale for diagonal
+and off-diagonal and φ for AR(1)". Scope agreed in-session: a table + two figures, the three named
+parameters plus the amplitudes η/σ_c, **raw sampled parameters only** — no derived rows (no ρ/√2, no
+`−1/log φ`, no `φ^(Tn−1)`, no projected `field_sd`/`level_sd`); those two conversions are stated in
+§7's prose instead.
+
+## What changed
+
+- `src/10j_viz_utils.jl`: `reconstruct_gp_hyper_draws` (per-draw ρ_diag/ρ_gap/φ/η/σ_c + `Tn`,
+  `sampler`, `phi_init_scale`, `diag`, per-scalar `ess_bulk`/split-R̂), `_prior_hyper` (the ONE
+  prior↔parameter mapping, read from `cfg`), `collect_gp_hyper`, `gp_hyper_table` (+CSV),
+  `plot_gp_hyper_horizons` (§7a, 3 panels), `plot_gp_hyper_marginals` (§7b, 2×5 prior-vs-posterior).
+- **The three shared generation checks moved into `_stage1_gp_generation`** — the `-diag` refusal, the
+  `phi_time`↔`log_rho_time` FORK, the pre-`-m32` token refusal — used by BOTH GP readers rather than
+  hand-copied into the new one. 8j's `load_transmission_draws` deliberately keeps its own copy (it
+  REFUSES where 10j FORKS).
+- `src/10j_model_diagnostics.ipynb`: §7 (4 cells), plus cell 0's overview, which had gone stale
+  (it advertised "two diagnostics" while the notebook had six sections).
+- `reconstruct_gp_hyper_draws` takes **NO default `contacts`**: nothing depended on it yet, so the
+  `CONTACTS_TOKEN` footgun (2026-08-08 / 08-09) is unrepresentable here rather than documented.
+
+## Done
+
+- [x] Guard extraction verified **bit-identical**: μ from `reconstruct_mu_draws` compared element-wise
+      against a pre-change snapshot of the file for 3 (family, h) cells, `μ == baseline` exactly, and
+      the `CONTACTS_TOKEN_PF` refusal unchanged. Measured, not asserted.
+- [x] φ cross-checks `tmp/nuts_phi_report.log` on all 8 chains (independent code path, same chains).
+- [x] `-m32t` fork exercised: the archived Matérn-temporal chain still READS (φ all-NaN, ρ_time
+      finite — median 8.23 wk over a 9-week window, i.e. one of the collapses the revert was made on),
+      and `gp_hyper_table` survives it (φ row NaN median, `prior_pctl` missing).
+- [x] `_prior_hyper`'s band pushes through the model's own `_softclamp`, and that is **not** cosmetic:
+      measured against the analytic quantiles the clamp shifts ρ by ≤6.4e-6 relative but the
+      amplitudes by 8e-5 at the median and **2.3e-3 at the 95th** (`log_eta`'s +1.645σ sits only 1.18
+      nats below its upper bound of 2). `_softclamp` is the identity NOWHERE.
+- [x] §7's cells executed verbatim (extracted from the .ipynb) against the on-disk NUTS smoke: CSV +
+      3 PNGs written, no warnings. ⚠ The FULL `nbconvert` render was NOT run — a 10 h Pathfinder grid
+      (`temporal-w8h-lc0`, ~17 GB peak) was live and 27 GB total is not enough for both. Run
+      `STAGE1_USE_NUTS=true jupyter nbconvert --execute` once the grid finishes.
+- [x] Closes the standing item **"re-examine whether φ should be reported from Pathfinder fits at
+      all"**: it now always travels with its provenance — `sampler` and `phi_init_scale` are table
+      columns read straight from the artefact, the per-chain printout states the sampler, and §7's
+      text says outright that a Pathfinder φ is largely a function of its start.
+
+## Measured — the first NUTS read of ρ, and the prior is doing real work
+
+Origin 2021-05-09, token `temporal-w8h-lc0-nuts`, 8 chains (2 families × h1–h4), 2000 draws each.
+**0 divergences in all 8**, ESS ≥ 233, split-R̂ ≤ 1.020. `prior_pctl` = prior CDF at the posterior
+median (0.5 ⇒ the data moved nothing; < 0.05 ⇒ pushed into the prior's lower tail).
+
+| parameter | negbin median (h1→h4) | pctl | hweibull median | pctl |
+|---|---|---|---|---|
+| ρ_diag | 17.9 → 13.4 → 11.7 → 11.6 | 0.376 → 0.058 | 19.2 → 20.3 → 19.0 → 18.8 | 0.43–0.52 |
+| **ρ_gap** | 7.95 → 7.58 → 10.4 → 11.6 | **0.0042 → 0.060** | 12.2 → 10.9 → 10.3 → 11.8 | **0.028–0.077** |
+| φ | 0.848 / 0.844 / 0.854 / 0.837 | 0.966–0.975 | 0.9933 / 0.9936 / 0.9904 / 0.9918 | > 0.99999 |
+| η | 0.80 / 0.80 / 0.74 / 0.79 | 0.28–0.33 | 0.53 / 0.53 / 0.49 / 0.51 | 0.074–0.099 |
+| σ_c | 0.35 / 0.32 / 0.30 / 0.30 | 0.008–0.017 | 0.161 / 0.152 / 0.134 / 0.125 | 1.6e-5–1.3e-4 |
+
+1. **ρ_gap sits in the prior's lower tail in ALL EIGHT chains** (pctl 0.0028–0.077, three below
+   0.005) — the exact condition `gp_len_prior`'s docstring says to watch for, now measured under NUTS
+   rather than Pathfinder. Direction and rough magnitude agree with the pre-`-m32` Pathfinder survey
+   (ρ_gap ≈ 4.65): the data want **less** smoothing across the age gap than N(log 20, 0.35²) asserts,
+   and the prior is holding the posterior up (medians 7.6–12.2 against that 4.65). ⚠ It is the OFF-
+   DIAGONAL direction specifically. ρ_diag is comfortable for hweibull (0.43–0.52) and only drifts low
+   for negbin at h3/h4 (0.058–0.062) — so a single shared `gp_len_prior` for both directions is the
+   thing under strain, not the centre alone.
+2. **φ reproduces the Pathfinder → NUTS story exactly**: negbin ≈ 0.84 (nowhere near the boundary),
+   hweibull 0.990–0.994 with `prior_pctl` > 0.99999 under Beta(3,3). The pooled limit is a genuine
+   mode on the weighted path — the fifth independent indication for `constant_contacts = true` there.
+3. **σ_c's tiny percentiles are NOT a conflict** — `gp_level_scale_prior` N(0, 0.5²) is centred at 1
+   and the weekly level deviations are genuinely small (0.13–0.35). That is the prior being loose in
+   the direction the data chose, the opposite situation from ρ_gap.
+4. **These five scalars ARE the Stage-1 chain's worst-mixing block.** In all 8 chains the artefact's
+   own `diag.min_ess` — the minimum over ALL 293–977 coordinates — is attained at one of them, matching
+   the per-scalar `ess_bulk` to 13 digits (ρ_diag ×3, σ_c ×3, φ ×1, η ×1; also equal to
+   `tmp/nuts_phi_report.log`'s min-ESS column). So `ess_bulk` in §7's table is not decoration: it is
+   simultaneously the chain's global mixing floor, which is worth knowing for 12j (its per-block worst
+   ESS will keep landing here) and for anyone reading a 90% interval off this table.
+5. ⚠ **`phi_init_scale` comes back BLANK for this generation** — `fit_or_load_stage1` only started
+   writing that key on 2026-08-10 and these chains predate it (their key set is `result`, `sampler`,
+   `diag`, `ad_backend`, `target_accept`, `nuts_adapts`, `nuts_draws`). The `missing` is the designed
+   behaviour of the `haskey` read, not a bug; `tmp/nuts_phi_report.log` is the record that they used
+   the `logistic(N(0, 0.1²))` init.
+
+## Open
+
+- [ ] **Should `gp_len_prior` split into two priors, one per direction?** §7 says the shared
+      N(log 20, 0.35²) is fought by the data in the ρ_gap direction on both degree paths and in both
+      directions for negbin at long h, while being comfortable for hweibull's ρ_diag. Bringing the
+      shared centre down would loosen ρ_diag where it is fine. ⚠ Read the SD history first: 0.35 → 0.75
+      measurably broke NUTS (min ESS 118 → 1.8/500, 100 % tree-depth cap), so widening is not the lever.
+- [ ] **Full `nbconvert` render of 10j** once the `temporal-w8h-lc0` grid finishes (memory).
+- [ ] **13j now lags 10j by one section** and `tmp/build_13j_nb.py` is no longer in the tree. Restore
+      the generator rather than hand-porting §7 — at `horizons = 1:1` the §7a figure is one x-point.
+- [ ] §7 reads ONE origin. The rolling-origin view of ρ/φ is 9j's `plot_lengthscales`, which is
+      Stage-2-gated and refuses Matérn-temporal chains — worth reconciling if the ρ_gap finding is
+      pursued across the 63 origins.

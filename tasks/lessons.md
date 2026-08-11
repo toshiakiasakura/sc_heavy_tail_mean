@@ -2404,3 +2404,43 @@ config field sorts into one of three boxes — in the token, recorded in the art
 correctness hazard — and a field moves between boxes the moment it starts affecting results. When
 adding a knob, decide which box it is in *at that moment*, and if it is the second, remember that
 existing artefacts predate it and must be moved aside, not refitted over.
+
+## 2026-08-10 — Two ways a figure lies about a bound: `hline!` widens the axis, and a prior band is not its distribution's quantiles
+
+Both surfaced building 10j §7 (Stage-1 GP hyperparameters vs prior), both were caught by *looking at
+the rendered PNG and at the asserted numbers* rather than by the code running without error.
+
+**1. `hline!` / `vline!` EXPAND a panel's limits to include their value — they are NOT clipped.** The
+intent was the `plot_gamma` idiom: draw the soft-clamp bounds so clamp compression is visible on the
+panel instead of being inferred from the draws. For γ_SAR that is free, because its medians genuinely
+span the clamp window. For ρ it is not: `RHO_BOUNDS` is `[0.5, 500]` against medians of 8–20, so the
+bound lines silently stretched the log axis over three decades and squashed every median and ribbon
+into the middle one. Same thing on the marginals' x-axis, where the posterior became a spike. The fix
+is to compute limits from the posteriors **and the prior band only**, pass them as explicit
+`ylims`/`xlims`, and let the bound lines be clipped — after which a bound appears exactly when a
+posterior runs out to it, which was the point.
+
+*Transferable:* **"draw the bound and let the axis sort itself out" is not a decision, it is a
+decision to let the widest annotation set the scale.** Whenever a reference line's value can be far
+outside the data (clamps, priors, hard limits), the panel needs explicit limits or the annotation wins.
+
+**2. `_softclamp` is the identity NOWHERE, so a prior band must be pushed through it.** `_prior_hyper`
+builds its 90% band by pushing Normal quantiles through the same `_softclamp` + `exp` the model
+applies, rather than taking `quantile(LogNormal(...))`. That looked like pedantry; it is not.
+Measured against the analytic quantiles: ρ shifts by ≤6.4e-6 relative (its bounds are ~10σ out) but
+**the amplitudes shift by 8e-5 at the median and 2.3e-3 at the 95th percentile**, because `log_eta`'s
+clamp window is `(-3, 2)` and +1.645σ sits only 1.18 nats below the upper bound. `_softclamp` is a
+softplus pair: it moves every point by O(exp(−distance/s)), and with `s = 0.25` that is visible two
+nats away. The first version of the check asserted the analytic values and failed — correctly.
+
+*Transferable:* **the prior a diagnostic draws must be the prior the sampler saw, not the prior the
+model's docstring names.** Any transform between the declared distribution and the sampled quantity
+(clamp, truncation, reparameterisation) belongs in the band. Keep the untransformed distribution too
+— it is the right thing for a density *curve* and for a percentile of a monotone transform — but
+label which is which, and never compute the band from it.
+
+**Third, smaller, and the reason both were caught:** GR has no glyph for the superscripts `² ³ ⁻`
+(U+00B2/B3/207B). It prints `glyph missing from current font: 178` to stderr and drops the character
+from the PNG, so `"softclamp [e⁻³, e²]"` renders as `"softclamp [e, e]"`. Greek (ρ η σ φ) and `√ ÷`
+are fine. Use ASCII `^2` / `exp(-3)` in anything that reaches a plot label; keep the pretty forms for
+markdown and docstrings.

@@ -10,6 +10,90 @@
 # forecast_utils.jl.
 
 """
+    _stage1_gp_generation(pnames, contacts, path) -> (; temporal_is_ar1)  |  nothing
+
+The three generation checks EVERY `model_degree` Stage-1 GP mirror in this file must apply before it
+touches a draw, factored out (2026-08-10) so a new reader cannot ship with two of the three. Returns
+`nothing` having already `@warn`ed — callers just `return nothing` — or the one FORK decision the
+caller needs: which temporal kernel wrote this chain.
+
+Extracted because the failure this repo actually suffers is a guard fixed in one mirror and missed in
+another: the 2026-08-08 `contacts`-default sweep fixed five 10j call sites and missed
+`collect_transmission_structure`, blanking all eight 9j transmission figures until 2026-08-09; and the
+`occursin("-m32", …)` → `is_legacy_token` rewrite had to land in two functions in lockstep. These
+guards exist precisely because the offending chain looks IDENTICAL to a current one, so a missed copy
+fails silently.
+
+⚠ NOT here, deliberately — the checks needing quantities only the caller has:
+  • `-s0`: the `z` ROW count, which needs `P` from the grid (`reconstruct_gp_hyper_draws` makes its
+    own, because η's MEANING depends on that projection while μ's shape does not);
+  • `-t0`: the `z_c` COLUMN count, which needs `Tn`;
+  • `-rhs` (`c2`): `_read_disp_chain`'s, about the dispersion block rather than the GP.
+⚠ And NOT `load_transmission_draws` (8j_viz_utils.jl), which applies the same three checks with a
+REFUSAL where this FORKS — 9j draws one figure per generation and mixing week-units onto a (0,1) axis
+is worse there than a NaN panel. That asymmetry is deliberate and documented on both sides; keep the
+two in step BY HAND rather than unifying them, which would pull 8j and all of 9j into a viz change.
+
+# ---- which SPATIAL KERNEL generation is this chain? (`-m32`, 2026-08-05) ----
+`model_degree` uses a SEPARABLE ANISOTROPIC kernel with TWO length-scales, so `log_rho_gap` must be
+present. A chain lacking it was fitted under the short-lived `-diag` generation (diagonal-only
+smoothing, one length-scale), and replaying it through the two-length-scale formula would silently
+rebuild a DIFFERENT kernel — every μ / C* / contact matrix / CCDF wrong with nothing raised. The
+`zrows` sniff at the call site cannot catch this (the `z` shape is identical to `-diag`'s), so it
+needs its own. NOTE this guard was INVERTED on 2026-08-05: it previously refused chains that CARRIED
+`log_rho_gap`.
+⚠ It does NOT distinguish `-m32` from the pre-`-diag` squared-exponential generation, which also
+carried two length-scales — that fork is the token check below, since `-m32` renamed it. Do not rely
+on this sniff alone if you stage a chain under a hand-written filename.
+
+# ---- which TEMPORAL kernel? ----
+This is a FORK, not a guard, and deliberately so: BOTH temporal kernels are on disk and both must stay
+replayable. It was introduced by `-m32t` (2026-08-10) and KEPT when that generation was reverted the
+same day — which is precisely what it earned its place for, since the fork is what lets the `-m32t`
+smoke chains still be read as the evidence for the revert.
+  • `phi_time`     ⇒ AR(1) coefficient φ ∈ (0,1) — the CURRENT kernel, and the `-ar1` generation
+    whose complete 504/1512-file grid is retained in `dt_intermediate_ar1/` (`CONTACTS_TOKEN_AR1`).
+  • `log_rho_time` ⇒ Matérn 3/2 length-scale in weeks — the one-day `-m32t` generation and every
+    generation before `-ar1`.
+Getting it wrong is silent and severe in either direction: a length-scale of 26 weeks read as a
+correlation of 26, or a correlation of 0.99 read as a 0.99-week length-scale. The NAME is a reliable
+discriminator here (unlike the spatial kernel family, which needs the token) BECAUSE the two
+parameterisations chose different names. `-m32t` changed no dimension, so the count cannot help.
+
+# ---- which KERNEL FAMILY? (`-m32`, 2026-08-05) ----
+A pre-`-diag` chain is PARAMETRICALLY IDENTICAL to a current one — same names, same shapes, two
+length-scales — but its kernel was the SQUARED EXPONENTIAL. No sniff over `pnames` can tell them
+apart, so this forks on the TOKEN, which `-m32` renamed for exactly that reason. Without it,
+`contacts = CONTACTS_TOKEN_PF` — a supported way to read the retained Pathfinder grid — would
+silently replay SE draws through a Matérn kernel. Current-generation tokens have Matérn 3/2 BY
+CONSTRUCTION; only a RETAINED legacy token has to prove it (see `is_legacy_token`). This was a bare
+`occursin("-m32", contacts)` until the accumulated token prefix was dropped on 2026-08-09 — which
+would have rejected every current chain.
+"""
+function _stage1_gp_generation(pnames::AbstractVector{<:AbstractString},
+                               contacts::AbstractString, path::AbstractString)
+    if !any(n -> n == "log_rho_gap", pnames)
+        @warn "chain has no `log_rho_gap`, i.e. the `-diag` diagonal-only spatial kernel. \
+               Refusing to reconstruct rather than replay it through the two-length-scale kernel." path
+        return nothing
+    end
+    temporal_is_ar1 = any(n -> n == "phi_time", pnames)
+    if !temporal_is_ar1 && !any(n -> n == "log_rho_time", pnames)
+        @warn "chain carries neither `log_rho_time` nor `phi_time` — its temporal kernel cannot be \
+               identified, so it is not a per-week `model_degree` Stage-1 chain. Refusing to \
+               reconstruct." path
+        return nothing
+    end
+    if is_legacy_token(contacts) && !occursin("-m32", contacts)
+        @warn "contacts token `$contacts` predates `-m32`, so this chain's kernel was the squared \
+               exponential, not Matérn 3/2. The chain columns are indistinguishable from a current \
+               one, so this cannot be detected from the chain — refusing on the token." path
+        return nothing
+    end
+    return (; temporal_is_ar1)
+end
+
+"""
     reconstruct_mu_draws(lbl, origin, h; week_index=nothing, grid, contacts, save_dir)
         -> ndraws × A × A  |  nothing
 
@@ -78,66 +162,20 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
     mid = cis_age_midpoints(; grid = grid)
     logpop = log.(grid.POP ./ grid.POP[1])          # relative to reference bin (index 1, "2-10")
 
-    # `RHO_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree` or every
-    # reconstructed μ / C* is silently wrong. See the constants' docstring.
     pnames = string.(names(chn, :parameters))
 
-    # ---- which SPATIAL KERNEL generation is this chain? (`-m32`, 2026-08-05) ----
-    # `model_degree` uses a SEPARABLE ANISOTROPIC kernel with TWO length-scales, so `log_rho_gap`
-    # must be present. A chain lacking it was fitted under the short-lived `-diag` generation
-    # (diagonal-only smoothing, one length-scale), and replaying it through the formula below would
-    # silently rebuild a DIFFERENT kernel — every μ / C* / contact matrix / CCDF would be wrong with
-    # nothing raised. The `zrows` sniff below cannot catch this (the `z` shape is identical to
-    # `-diag`'s), so it needs its own. NOTE this guard was INVERTED on 2026-08-05: it previously
-    # refused chains that CARRIED `log_rho_gap`.
-    # ⚠ It does NOT distinguish `-m32` from the pre-`-diag` squared-exponential generation, which
-    # also carried two length-scales — that fork is caught by the cache token instead, since `-m32`
-    # renamed it. Do not rely on this sniff alone if you stage a chain under a hand-written filename.
-    if !any(n -> n == "log_rho_gap", pnames)
-        @warn "chain has no `log_rho_gap`, i.e. the `-diag` diagonal-only spatial kernel. \
-               Refusing to reconstruct rather than replay it through the two-length-scale kernel." path
-        return nothing
-    end
-    # ---- which KERNEL FAMILY? (`-m32`, 2026-08-05) ----
-    # A pre-`-diag` chain is PARAMETRICALLY IDENTICAL to a current one — same names, same shapes,
-    # two length-scales — but its kernel was the SQUARED EXPONENTIAL. No sniff over `pnames` can
-    # tell them apart, so this forks on the TOKEN, which `-m32` renamed for exactly this reason.
-    # Without it, `reconstruct_mu_draws(…; contacts = CONTACTS_TOKEN_PF)` — a supported way to read
-    # the retained Pathfinder grid — would silently replay SE draws through a Matérn kernel and
-    # every μ / C* / contact matrix / CCDF would be wrong with nothing raised.
-    # ---- which TEMPORAL kernel? ----
-    # This is a FORK, not a guard, and deliberately so: BOTH temporal kernels are on disk and both
-    # must stay replayable. It was introduced by `-m32t` (2026-08-10) and KEPT when that generation
-    # was reverted the same day — which is precisely what it earned its place for, since the fork is
-    # what lets the `-m32t` smoke chains still be read as evidence for the revert.
-    #   • `phi_time`     ⇒ AR(1) coefficient φ ∈ (0,1) — the CURRENT kernel, and the `-ar1`
-    #     generation whose complete 504/1512-file grid is retained in `dt_intermediate_ar1/`
-    #     (`CONTACTS_TOKEN_AR1`).
-    #   • `log_rho_time` ⇒ Matérn 3/2 length-scale in weeks — the one-day `-m32t` generation
-    #     (24 s1 / 72 s2 on disk under `temporal-w8h-lc0-m32t`) and every generation before `-ar1`.
-    # Getting it wrong is silent and severe in either direction: a length-scale of 26 weeks read as
-    # a correlation of 26, or a correlation of 0.99 read as a 0.99-week length-scale. The name is a
-    # reliable discriminator here (unlike the spatial kernel family, which needs the token) BECAUSE
-    # the two parameterisations chose different names — which is the only reason this fork can be
-    # made on the chain itself. `-m32t` changed no dimension, so the count cannot help.
-    temporal_is_ar1 = any(n -> n == "phi_time", pnames)
-    if !temporal_is_ar1 && !any(n -> n == "log_rho_time", pnames)
-        @warn "chain carries neither `log_rho_time` nor `phi_time` — its temporal kernel cannot be \
-               identified, so it is not a per-week `model_degree` Stage-1 chain. Refusing to \
-               reconstruct." path
-        return nothing
-    end
-    # Current-generation tokens have the Matérn 3/2 kernel by construction; only a RETAINED legacy
-    # token has to prove it by carrying `-m32` (see `is_legacy_token`). This was a bare
-    # `occursin("-m32", contacts)` until the accumulated token prefix was dropped on 2026-08-09 —
-    # which would have rejected every current chain.
-    if is_legacy_token(contacts) && !occursin("-m32", contacts)
-        @warn "contacts token `$contacts` predates `-m32`, so this chain's kernel was the squared \
-               exponential, not Matérn 3/2. The chain columns are indistinguishable from a current \
-               one, so this cannot be detected from the chain — refusing on the token." path
-        return nothing
-    end
+    # The three SHARED generation checks — (1) the `-diag` spatial-kernel refusal, (2) the
+    # `phi_time`-vs-`log_rho_time` temporal FORK, (3) the pre-`-m32` kernel-family refusal on the
+    # TOKEN. All three live in `_stage1_gp_generation` (above) so this mirror and
+    # `reconstruct_gp_hyper_draws` cannot drift apart; read its docstring for why each exists and
+    # which evidence — chain name or token — it is allowed to use. The `-s0`/`-t0` sniffs below stay
+    # here: they need `P` and `Tn`, which only this caller has.
+    gen = _stage1_gp_generation(pnames, contacts, path)
+    gen === nothing && return nothing                    # it has already warned
+    temporal_is_ar1 = gen.temporal_is_ar1
 
+    # `RHO_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree` or every
+    # reconstructed μ / C* is silently wrong. See the constants' docstring.
     ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))   # soft-bounded, mirrors model
     ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))   # soft-bounded, mirrors model
     η = exp.(_softclamp.(vec(Array(chn[:log_eta])), -3.0, 2.0))
@@ -299,6 +337,578 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
         end
     end
     return μ
+end
+
+"""
+    reconstruct_gp_hyper_draws(lbl, origin, h; grid, contacts, save_dir)
+        -> (; rho_diag, rho_gap, eta, sigma_c, phi, rho_time, temporal_is_ar1, Tn, ndraws,
+              sampler, phi_init_scale, diag, ess_bulk, rhat, path)  |  nothing
+
+Per-draw posterior of the Stage-1 GP SMOOTHING hyperparameters from a cached chain, without
+rebuilding the model — the scalar companion to `reconstruct_mu_draws` (same chain, same draw order).
+`model_degree` samples these five ONCE PER FIT and applies them to all 28 age pairs and all `Tn`
+window weeks, so they are the whole smoothing story in five numbers:
+
+    ρ_diag = exp(softclamp(log_rho_diag, RHO_BOUNDS...))   # total-age direction, ROTATED age-yrs
+    ρ_gap  = exp(softclamp(log_rho_gap,  RHO_BOUNDS...))   # age-gap direction,  ROTATED age-yrs
+    η      = exp(softclamp(log_eta,     -3, 2))            # age-structure field amplitude
+    σ_c    = exp(softclamp(log_sigma_c, -3, 2))            # weekly-level amplitude
+    φ      = phi_time                                      # AR(1) lag-1 corr — READ RAW, (0,1)
+
+⚠ `phi_time` is stored CONSTRAINED: no `exp`, no `_softclamp`, because `model_degree` has neither
+(`φ^k` cannot overflow, so `RHO_TIME_BOUNDS` is dead on this path). The three log-latents MUST go
+through `_softclamp` with the model's own bounds or every reported value is silently wrong at the
+edges — the same mirrors-match-model invariant `reconstruct_mu_draws` and `_read_disp_chain` carry.
+`c` is deliberately absent: it is the level INTERCEPT, not a smoothing parameter, and its prior
+centre is data-dependent (`c0 = mean(log_emp − logpop)`), so it is not comparable across windows.
+Two units caveats that belong to the READER of these numbers, not to this function: both ρ live on
+the √2-ROTATED coordinates, so an effective age-DIFFERENCE length-scale is `ρ/√2`; and since `-s0`
+η is no longer exactly the field's marginal SD (that is `η·sqrt(diag(M·Kp·M))`, ×0.71–1.08 at the
+`gp_len_prior` mode), so η and σ_c each compare across chains but not directly with each other.
+
+**`contacts` has NO DEFAULT, and that is deliberate.** Every sibling reader here defaults to
+`CONTACTS_TOKEN`, which is a compile-time literal that always ends `-nuts` and silently ignores
+`cfg` — the bug that blanked four 10j figures on 2026-08-08 and all eight 9j transmission figures on
+2026-08-09 (CLAUDE.md's `CONTACTS_TOKEN` gotcha). Nothing depends on this function yet, so the
+footgun is made UNREPRESENTABLE rather than documented. Pass `contacts_label(cfg)`, or go through
+`collect_gp_hyper`.
+
+**Generations.** The three shared checks via `_stage1_gp_generation` (refuses `-diag` chains and
+pre-`-m32` tokens, FORKS on the temporal parameter name), plus its own `-s0` check: η is an age-
+STRUCTURE amplitude only because the field is projected to sum to zero over the 28 pairs, so a
+pre-`-s0` chain's η means something else and must not be tabulated beside a current one. The temporal
+fork fills exactly one of the two temporal fields:
+
+    temporal_is_ar1 == true  ⇒ `phi` populated,      `rho_time` all-NaN   # `-ar1` and current
+    temporal_is_ar1 == false ⇒ `rho_time` populated, `phi`      all-NaN   # `-m32t`, pre-`-ar1`
+
+so a consumer must be NaN-safe on both (use `_fmed`/`_fq`), and a figure must never put weeks on a
+(0,1) axis. Keeping the fork rather than refusing is what lets the retained `-m32t` smoke chains be
+read as the evidence for reverting `-m32t`.
+
+**Provenance, because the token does not carry it.** `sampler`, `phi_init_scale` and `diag` are read
+straight out of the artefact (`fit_or_load_stage1` has written them since 2026-08-05 / 2026-08-10),
+via `haskey` so an older artefact yields `missing` rather than throwing. ⚠ Read `sampler` before
+quoting φ: measured, a PATHFINDER φ is largely a function of its starting value (0.011 → 1.000 across
+five inits on one cell), so φ is a posterior summary only on the NUTS path.
+
+`ess_bulk`/`rhat` are `Dict{Symbol,Float64}` over the SAMPLED columns (`missing` if `summarystats`
+fails), so a 90% interval resting on ~200 effective draws can be read as such. They are computed on
+the log-scale latents and apply unchanged to the exponentiated values: both statistics are RANK-based
+and ranks are invariant under the monotone `exp ∘ _softclamp`.
+
+Returns `nothing` when the file is missing (silently — the standing contract of every reader here) or
+when it is unreadable / of a refused generation (with a warning).
+"""
+function reconstruct_gp_hyper_draws(lbl::AbstractString, origin::Date, h::Integer;
+                                    grid,
+                                    contacts::AbstractString,      # NO DEFAULT — see the docstring
+                                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(path) || return nothing
+    # `jldopen` + `haskey`, never a bare `load(path, key)`: the provenance keys were added over time
+    # (`sampler`/`diag` 2026-08-05, `phi_init_scale` 2026-08-10) and a retained artefact predating one
+    # of them must come back `missing`, not throw. Same pattern as 12j's `load_nuts_chain`.
+    chn, sampler, phi_init, dg = try
+        jldopen(path, "r") do f
+            (f["result"],
+             haskey(f, "sampler")        ? f["sampler"]        : missing,
+             haskey(f, "phi_init_scale") ? f["phi_init_scale"] : missing,
+             haskey(f, "diag")           ? f["diag"]           : missing)
+        end
+    catch err
+        @warn "could not load chain" path err
+        return nothing
+    end
+
+    pnames = string.(names(chn, :parameters))
+    gen = _stage1_gp_generation(pnames, contacts, path)   # shared guards + the temporal fork
+    gen === nothing && return nothing
+
+    A = grid.N
+    pair_list, _ = _unordered_pairs(A)
+    P = length(pair_list)
+    # ---- `-s0` (2026-08-05): the field sums to zero over the P pairs, so `z` has P−1 rows ----
+    # Unlike the μ mirror this function never touches `z`, so nothing here would BREAK on a 28-row
+    # chain — which is exactly why the check has to be explicit: η's meaning is "amplitude of the
+    # PROJECTED field", and reporting a pre-`-s0` η in the same table as a current one would compare
+    # two different quantities under one name.
+    zrows = maximum((parse(Int, match(r"^z\[(\d+)", n).captures[1])
+                     for n in pnames if occursin(r"^z\[\d+", n)); init = 0)
+    if zrows != P - 1
+        @warn "chain's structure field has $zrows rows, expected $(P-1) (sum-to-zero `-s0`) for \
+               A=$A — refusing to report η, whose meaning depends on that projection." path
+        return nothing
+    end
+    # `Tn` from the `z[p,t]` column names. VARIES 9..12 across one origin's four horizon chains since
+    # `-w8h` (Tn = n_fit + h), where it used to be a flat 12 — so it is reported, not assumed.
+    tcols = [parse(Int, m.captures[1]) for n in pnames
+             for m in (match(r"^z\[\d+\s*,\s*(\d+)\]$", n),) if m !== nothing]
+    if isempty(tcols)
+        @warn "chain has no 2-D `z[p,t]` columns — not a per-week `model_degree` chain" path
+        return nothing
+    end
+    Tn = maximum(tcols)
+
+    # MIRRORS `model_degree` — `RHO_BOUNDS` from framework.jl, and the (-3, 2) pair as the literals
+    # the model itself writes for both amplitudes. Keep these in lockstep with §5/§6 of joint_model.jl.
+    ρ_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))
+    ρ_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))
+    η      = exp.(_softclamp.(vec(Array(chn[:log_eta])),      -3.0, 2.0))
+    σ_c    = exp.(_softclamp.(vec(Array(chn[:log_sigma_c])),  -3.0, 2.0))
+    D = length(ρ_diag)
+    # The temporal parameter, read the way ITS OWN generation stored it (see the fork). The unused
+    # one is all-NaN rather than absent, so consumers have a fixed field set and NaN-safe summaries
+    # (`_fmed`/`_fq`) do the right thing on either generation.
+    φ  = gen.temporal_is_ar1 ? vec(Array(chn[:phi_time])) : fill(NaN, D)
+    ρt = gen.temporal_is_ar1 ? fill(NaN, D) :
+         exp.(_softclamp.(vec(Array(chn[:log_rho_time])), RHO_TIME_BOUNDS...))
+
+    # Per-scalar mixing. Computed on the SAMPLED (log/constrained) columns; `summarystats` is wrapped
+    # because it is a convenience, not the payload — a version skew here must not cost the estimates.
+    syms = [:log_rho_diag, :log_rho_gap, :log_eta, :log_sigma_c]
+    gen.temporal_is_ar1 && push!(syms, :phi_time)
+    ess_bulk, rhat = missing, missing
+    try
+        nt = summarystats(chn[:, syms, :]).nt         # sub-chain: 5 columns, not the 293–977 of them
+        ks = Symbol.(string.(nt.parameters))          # zip against the RETURNED order, never assume
+        # `haskey` per statistic, as `convergence_table` (12j) does — the set `summarystats` returns
+        # depends on the number of chains, and one chain per fit means no R̂ at all on some versions.
+        haskey(nt, :ess_bulk) && (ess_bulk = Dict(zip(ks, Float64.(collect(nt.ess_bulk)))))
+        haskey(nt, :rhat)     && (rhat     = Dict(zip(ks, Float64.(collect(nt.rhat)))))
+    catch err
+        @warn "summarystats failed; ESS/R̂ reported as missing" path err
+    end
+
+    return (; rho_diag = ρ_diag, rho_gap = ρ_gap, eta = η, sigma_c = σ_c, phi = φ, rho_time = ρt,
+              temporal_is_ar1 = gen.temporal_is_ar1, Tn, ndraws = D,
+              sampler, phi_init_scale = phi_init, diag = dg, ess_bulk, rhat, path)
+end
+
+"""
+    _prior_hyper(cfg, par; q=(0.05,0.5,0.95)) -> (; dist, band, bounds, label, logscale, sym, pretty)
+
+The prior of ONE reported hyperparameter, keyed by `par ∈ (:rho_diag, :rho_gap, :eta, :sigma_c, :phi)`
+and read from `cfg` — never from a literal — so a prior change lands in one place and cannot desync
+between the table and the two figures.
+
+  • `band`  = the (5%, 50%, 95%) quantiles of the prior the model ACTUALLY uses, i.e. Normal quantiles
+    pushed through the SAME `_softclamp` + `exp` the model applies (9j's `_prior_gamma_band` pattern:
+    a band from the unclamped log-normal would not be that prior).
+  • `dist`  = the UNCLAMPED distribution, for the density CURVE and for `prior_pctl`. It is NOT the
+    same as `band`, and never exactly: `_softclamp` is a softplus pair, so it shifts every point by
+    O(exp(−distance/s)) rather than being the identity anywhere. Measured against the analytic
+    quantiles — ρ by ≤7e-6 relative (its bounds are ~10σ out), the amplitudes by 8e-5 at the median
+    and 2.3e-3 at the 95th, because `log_eta`'s (−3, 2) window puts +1.645σ only 1.18 nats below the
+    upper bound. Since `_softclamp` is monotone, a percentile read off `dist` at a clamped value is
+    wrong only by that same fraction, which is why `prior_pctl` uses the analytic CDF rather than
+    inverting the clamp. Never use `dist` for `band` — the band is the prior the sampler SAW.
+  • `bounds`= the soft-clamp bounds, drawn as dashed red lines. For `:phi` they are `(0, 1)`, the
+    SUPPORT: 1.0 is the POOLED LIMIT (contacts constant across the window, the parameter unidentified),
+    not a clamp — `RHO_TIME_BOUNDS` and the temporal soft-clamp are dead on the AR(1) path. Label it
+    as such wherever it is drawn.
+  • `sym`   = the chain column, so `ess_bulk`/`rhat` can be looked up without a second mapping.
+
+⚠ THE BAND IS ONLY HONEST FOR CHAINS FITTED UNDER `cfg`'s PRIORS. `contacts_label` encodes no prior
+at all, so pointing a figure at a retained generation (`CONTACTS_TOKEN_AR1` spans Uniform → Beta(2,2)
+→ Beta(3,3) for φ, and a different `gp_len_prior` before `-m32`) would draw today's band against
+another generation's draws with nothing raised. Hence `label`, which every figure PRINTS, so a
+mismatch is at least visible. (`plot_tau_over_weeks` hard-codes its σ for the mirror-image reason:
+ITS chains are legacy, so `cfg` would be the wrong source.)
+"""
+function _prior_hyper(cfg, par::Symbol; q = (0.05, 0.5, 0.95))
+    # Push the Normal quantiles through the model's own clamp+exp, rather than using LogNormal's
+    # quantiles, so the band IS the prior the sampler saw.
+    _band(μ, σ, lo, hi) = Tuple(exp(_softclamp(μ + quantile(Normal(), p) * σ, lo, hi)) for p in q)
+    if par === :rho_diag || par === :rho_gap
+        μ, σ = cfg.gp_len_prior                      # ONE prior SHARED by both spatial length-scales
+        return (; dist = LogNormal(μ, σ), band = _band(μ, σ, RHO_BOUNDS...),
+                  bounds = exp.(RHO_BOUNDS), logscale = true,
+                  sym = par === :rho_diag ? :log_rho_diag : :log_rho_gap,
+                  pretty = par === :rho_diag ? "ρ_diag" : "ρ_gap",
+                  # ⚠ ASCII `^2`, not the superscript ²: GR has no glyph for U+00B2/U+00B3/U+207B and
+                  # prints "glyph missing from current font" while dropping it from the PNG. Greek
+                  # (ρ η σ φ) and √ ÷ DO render — it is only the superscripts that are missing.
+                  label = "log ρ ~ N(log $(round(exp(μ); digits = 1)), $(σ)^2)")
+    elseif par === :eta || par === :sigma_c
+        μ, σ = par === :eta ? cfg.gp_scale_prior : cfg.gp_level_scale_prior
+        return (; dist = LogNormal(μ, σ), band = _band(μ, σ, -3.0, 2.0),
+                  bounds = (exp(-3.0), exp(2.0)), logscale = true,
+                  sym = par === :eta ? :log_eta : :log_sigma_c,
+                  pretty = par === :eta ? "η" : "σ_c",
+                  label = "log $(par === :eta ? "η" : "σ_c") ~ N($μ, $(σ)^2)")   # ASCII ^2 — see above
+    elseif par === :phi
+        a, b = cfg.ar1_phi_prior
+        d = Beta(a, b)
+        return (; dist = d, band = Tuple(quantile(d, p) for p in q), bounds = (0.0, 1.0),
+                  logscale = false, sym = :phi_time, pretty = "φ",
+                  label = "φ ~ Beta($a, $b)")
+    end
+    error("_prior_hyper: no prior registered for `$par`")
+end
+
+# The five reported hyperparameters, in the order every §7 table and figure uses: the three smoothing
+# parameters first (the section's subject), then the two amplitudes. These are BOTH the `_prior_hyper`
+# keys AND the `reconstruct_gp_hyper_draws` field names — deliberately kept identical so consumers can
+# `getproperty(r, par)` without a lookup table. Keep them in step if either side gains a parameter.
+const GP_HYPER_PARS = (:rho_diag, :rho_gap, :phi, :eta, :sigma_c)
+
+"""
+    collect_gp_hyper(dms, origin, cfg; grid, hz, contacts, save_dir)
+        -> Dict{Tuple{String,Int},NamedTuple}
+
+`reconstruct_gp_hyper_draws` over `dms × hz` at ONE origin, keyed `(degree_label, h)` — the store the
+§7 table and both §7 figures consume, so the chains are deserialised once instead of three times
+(`collect_transmission_structure`'s role in 9j, one origin wide instead of 63).
+
+Keyed by DEGREE LABEL, not by `"<degree>|<ngm>"`, because Stage 1 is NGM-INDEPENDENT: there are TWO
+chains per horizon, not four, and making that structural stops 10j's four combos turning into four
+identical loads of the same file. Missing chains are warned about and simply absent from the store
+(the `isfile || return nothing` contract), so consumers iterate `keys(store)` and never assume 8
+entries.
+"""
+function collect_gp_hyper(dms, origin::Date, cfg; grid,
+                          hz = collect(cfg.horizons),
+                          contacts::AbstractString = contacts_label(cfg),
+                          save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    store = Dict{Tuple{String,Int},NamedTuple}()
+    for dm in dms, h in hz
+        deg = degree_label(dm)
+        # The `|mean` is a FORMALITY: `stage1_chain_path` drops the ngm token entirely.
+        r = reconstruct_gp_hyper_draws("$(deg)|mean", origin, h;
+                                       grid = grid, contacts = contacts, save_dir = save_dir)
+        if r === nothing
+            @warn "no Stage-1 chain for the GP hyperparameters" deg origin h contacts
+        else
+            store[(deg, h)] = r
+        end
+    end
+    return store
+end
+
+"""
+    gp_hyper_table(store, cfg; contacts, csv_path=nothing) -> DataFrame
+
+§7's summary: one row per (degree family × horizon × hyperparameter) — 5 × 8 = 40 rows at the standard
+two-family / h1–h4 store — with the posterior beside the PRIOR it was fitted under.
+
+Columns: `degree, h, Tn, ndraws, sampler, phi_init_scale, divergences, parameter, median, q05, q95,
+prior_q05, prior_med, prior_q95, prior_pctl, ess_bulk, rhat, contacts`.
+
+`prior_pctl = cdf(prior, posterior_median)` gives ONE uniform semantics across the LogNormal and Beta
+priors alike: 0.5 means the data moved nothing, `< 0.05` means the posterior median has been pushed
+into the prior's lower tail. That is the numeric form of the standing question in `gp_len_prior`'s
+docstring — "if the posterior piles up against the LOWER edge, the data are disagreeing with the
+assumed smoothness" — whose earlier Pathfinder answer was quoted as −2.7σ / −4.2σ.
+
+Quantiles go through `_fmed`/`_fq` (8j_viz_utils.jl) because ONE of the two temporal fields is
+all-NaN by construction (see `reconstruct_gp_hyper_draws`' fork): a `-m32t` chain has no φ, and a
+plain `median` would throw rather than report a blank row.
+
+`contacts` is a COLUMN as well as part of the filename: this table IS a generation's measurement, and
+the token is the only thing that distinguishes two of them at one origin (`-lc0` changed no parameter
+name and no dimension). Same reasoning as `8j_s1_*` recording `ad_backend`.
+
+⚠ Writes a CSV only when `csv_path` is given — deliberately unlike this file's `make_*_fig` helpers,
+which `savefig` internally. A figure's PNG is a by-product of displaying it; a DataFrame IS the
+artefact, so persisting it is the notebook's decision and a check script can exercise this without
+writing into `res/`.
+
+⚠ RAW SAMPLED PARAMETERS ONLY. Derived readings — `ρ/√2` (the age-DIFFERENCE length-scale, since ρ
+lives on the √2-rotated coordinates), φ's e-folding time `−1/log φ`, the end-to-end correlation
+`φ^(Tn−1)`, and the field's true marginal SD `η·sqrt(diag(M·Kp·M))` (η is not it, since `-s0`) — are
+deliberately NOT rows here (2026-08-10 scope decision); `Tn` is carried per row so `φ^(Tn−1)` is one
+step away, and the two units caveats live in §7's markdown.
+"""
+function gp_hyper_table(store, cfg; contacts::AbstractString = contacts_label(cfg),
+                        csv_path::Union{Nothing,AbstractString} = nothing)
+    rows = NamedTuple[]
+    for (deg, h) in sort(collect(keys(store)))
+        r = store[(deg, h)]
+        ndiv = (r.diag === missing || !hasproperty(r.diag, :divergences)) ? missing : r.diag.divergences
+        for par in GP_HYPER_PARS
+            pri = _prior_hyper(cfg, par)
+            v   = getproperty(r, par)          # `GP_HYPER_PARS` == the reader's field names
+            med = _fmed(v)
+            # `prior_pctl` is undefined for a parameter this generation did not sample (all-NaN).
+            # Read off the UNCLAMPED prior: `_softclamp` is monotone, so the only error is the clamp
+            # shift itself — measured ≤2.3e-3 for the amplitudes, ≤6.4e-6 for ρ (see `_prior_hyper`).
+            pctl = isfinite(med) ? cdf(pri.dist, med) : missing
+            push!(rows, (; degree = deg, h = h, Tn = r.Tn, ndraws = r.ndraws,
+                           sampler = string(r.sampler), phi_init_scale = r.phi_init_scale,
+                           divergences = ndiv, parameter = pri.pretty,
+                           median = med, q05 = _fq(v, 0.05), q95 = _fq(v, 0.95),
+                           prior_q05 = pri.band[1], prior_med = pri.band[2], prior_q95 = pri.band[3],
+                           prior_pctl = pctl,
+                           ess_bulk = r.ess_bulk === missing ? missing :
+                                      get(r.ess_bulk, pri.sym, missing),
+                           rhat = r.rhat === missing ? missing : get(r.rhat, pri.sym, missing),
+                           contacts = contacts))
+        end
+    end
+    tbl = DataFrame(rows)
+    csv_path === nothing || CSV.write(csv_path, tbl)
+    return tbl
+end
+
+# Which of the four 10j model labels a degree family owns, so a family keeps the colour it has in
+# §1/§2b/§3. Stage 1 is NGM-independent, so the `|mean` entry stands for the whole family.
+# `labels4 === nothing` (a caller with no model list to hand) falls back to the per-family default,
+# which is the SAME colour the standard `labels4`/`model_cols` pairing gives — keep the two in step.
+const _GP_FAMILY_FALLBACK = Dict("unweighted-negbin" => :steelblue, "weighted-hweibull" => :seagreen)
+function _gp_family_colour(deg::AbstractString, labels4, model_cols)
+    (labels4 === nothing || model_cols === nothing) && return get(_GP_FAMILY_FALLBACK, deg, :black)
+    i = findfirst(==("$(deg)|mean"), labels4)
+    return i === nothing ? get(_GP_FAMILY_FALLBACK, deg, :black) : model_cols[i]
+end
+
+"""
+    plot_gp_hyper_horizons(store, origin, cfg, labels4, model_cols; hz, res_dir="../res")
+        -> Plots.Plot | nothing
+
+§7a — the five Stage-1 GP hyperparameters across the horizon RE-FITS h1..h4 at one origin, in THREE
+panels, both degree families overlaid.
+
+**Three panels because the units do not mix** — the split `plot_lengthscales` makes in 9j, on the same
+parameters, for the same reason: ρ in (rotated) age-years, φ dimensionless on (0,1), the amplitudes in
+log-scale SD. φ drawn on a 0–50 age-year axis is an invisible line along the bottom.
+
+  1. spatial (`:log10`) — ρ_diag solid, ρ_gap dashed, 90% ribbons;
+  2. temporal (`ylims = (0,1)`) — φ, with **φ = 1 marked**: the pooled limit at which contacts are
+     constant across the window and the parameter stops being identified, so a chain sitting ON the
+     boundary reads as such rather than merely as "near the top". The weighted path has reached that
+     limit under every temporal parameterisation tried (see `ar1_phi_prior`);
+  3. amplitude (`:log10`) — η solid, σ_c dashed, with the `[e⁻³, e²]` soft-clamp bounds drawn, because
+     BOTH pinning at the e⁻³ floor together with φ ≈ 1 is the measured signature of the Uniform-φ
+     divergence mode. `plot_gamma` establishes the idiom: make clamp compression visible on the panel
+     instead of leaving it to be inferred from the draws.
+
+**Both families in ONE figure**, unlike §2b/§2c which split by family — those split because μ is a
+per-capita COUNT mean for negbin and a duration-WEIGHTED mean for hweibull. These five are on
+identical scales for both families, and the negbin-vs-hweibull contrast in φ is the section's
+headline, so separating them would put the two numbers you must compare on different pages.
+
+⚠ y-LIMITS ARE SET EXPLICITLY from the posteriors and the prior band, NOT from the clamp bounds, and
+that takes code: **`hline!` EXPANDS a panel's limits to include its value — it is not clipped by
+default.** Measured on the first render, drawing ρ's `[0.5, 500]` clamp without explicit `ylims`
+stretched the axis over three decades and squashed every median into the middle one. `plot_gamma`
+widens to include its bounds and can afford to (γ_SAR genuinely spans four decades); ρ cannot. With
+limits pinned, the bound lines are clipped and so become visible exactly when a posterior runs out to
+one — which is the point of drawing them — and the numbers are in the legend either way.
+
+The grey band is the prior 90% from `_prior_hyper`, whose `label` is printed so a prior/chain mismatch
+is visible (see that function's warning); the plot title states the SAMPLER, because a Pathfinder φ is
+partly a function of its initialisation. Returns `nothing` on an empty store.
+"""
+function plot_gp_hyper_horizons(store, origin::Date, cfg, labels4, model_cols;
+                                hz = collect(cfg.horizons), res_dir::AbstractString = "../res")
+    isempty(store) && (@warn "plot_gp_hyper_horizons: empty store — nothing to draw"; return nothing)
+    degs = sort(unique(first.(collect(keys(store)))))
+    # Median/90% per (family, horizon) for one field, NaN where that chain is absent or the parameter
+    # belongs to the other temporal generation.
+    function series(deg, field)
+        med = Float64[]; lo = Float64[]; hi = Float64[]
+        for h in hz
+            r = get(store, (deg, h), nothing)
+            v = r === nothing ? [NaN] : getproperty(r, field)
+            push!(med, _fmed(v)); push!(lo, _fq(v, 0.05)); push!(hi, _fq(v, 0.95))
+        end
+        return med, lo, hi
+    end
+    xt   = (hz, ["h$h" for h in hz])                   # integer horizons, as `make_mu_horizon_fig`
+    xlim = (first(hz) - 0.25, last(hz) + 0.25)         # so a single-horizon store (13j) still renders
+    samplers = join(sort(unique(string(store[k].sampler) for k in keys(store))), "/")
+
+    # y-LIMITS MUST BE SET EXPLICITLY, from the posteriors and the prior band only. `hline!` EXPANDS a
+    # panel's limits to include its value — it does NOT get clipped by default — so drawing the ρ
+    # soft-clamp bounds without this stretched the axis over 0.5–500 and squashed every median into the
+    # middle decade (measured on the first render). With explicit limits the bound lines are clipped and
+    # so become visible exactly when a posterior runs out to one, which is the point of drawing them.
+    function _lims(pri, fields; pad = 1.35)
+        vs = Float64[pri.band[1], pri.band[3]]
+        for deg in degs, f in fields, h in hz
+            r = get(store, (deg, h), nothing); r === nothing && continue
+            v = getproperty(r, f)
+            append!(vs, (_fq(v, 0.05), _fq(v, 0.95)))
+        end
+        vs = filter(x -> isfinite(x) && x > 0, vs)
+        isempty(vs) && return :auto
+        return (minimum(vs) / pad, maximum(vs) * pad)
+    end
+
+    # ---- panel 1: the two spatial length-scales -------------------------------------------------
+    pri_r = _prior_hyper(cfg, :rho_diag)               # ONE prior shared by ρ_diag and ρ_gap
+    ps = plot(; title = "spatial GP length-scales", titlefontsize = 9, xlabel = "horizon (re-fit)",
+              ylabel = "ρ (rotated age-yrs; ÷√2 for age difference)", yscale = :log10,
+              ylims = _lims(pri_r, (:rho_diag, :rho_gap)),
+              xticks = xt, xlims = xlim, legend = :outertop, legendfontsize = 6, legendcolumns = 2)
+    # Prior band FIRST as a flat ribbon (`plot_gamma`'s pattern), so the posteriors draw over it.
+    plot!(ps, [first(hz), last(hz)], fill(pri_r.band[2], 2); ls = :dot, color = :grey40, lw = 1,
+          ribbon = (fill(pri_r.band[2] - pri_r.band[1], 2), fill(pri_r.band[3] - pri_r.band[2], 2)),
+          fillcolor = :grey60, fillalpha = 0.10, label = "prior 90%: $(pri_r.label)")
+    for deg in degs, (field, lsty, nm) in ((:rho_diag, :solid, "ρ_diag"), (:rho_gap, :dash, "ρ_gap"))
+        med, lo, hi = series(deg, field)
+        all(isnan, med) && continue
+        plot!(ps, hz, med; lw = 1.8, ls = lsty, marker = :circle, ms = 3,
+              color = _gp_family_colour(deg, labels4, model_cols),
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = "$(nm) — $(deg)")
+    end
+    hline!(ps, collect(pri_r.bounds); ls = :dash, color = :red, lw = 1,
+           label = "softclamp [$(round(pri_r.bounds[1]; digits = 2)), $(Int(round(pri_r.bounds[2])))]")
+
+    # ---- panel 2: the AR(1) temporal coefficient ------------------------------------------------
+    pri_p = _prior_hyper(cfg, :phi)
+    # (0, 1.03), not (0, 1): φ = 1 is the whole point of this panel and on a hard (0,1) axis its rule
+    # lands ON the frame, where a posterior sitting at 0.993 is indistinguishable from one at 1.000.
+    pt = plot(; title = "AR(1) temporal coefficient", titlefontsize = 9, xlabel = "horizon (re-fit)",
+              ylabel = "φ (lag-1 correlation between weeks)", ylims = (0, 1.03),
+              xticks = xt, xlims = xlim, legend = :outertop, legendfontsize = 6, legendcolumns = 2)
+    plot!(pt, [first(hz), last(hz)], fill(pri_p.band[2], 2); ls = :dot, color = :grey40, lw = 1,
+          ribbon = (fill(pri_p.band[2] - pri_p.band[1], 2), fill(pri_p.band[3] - pri_p.band[2], 2)),
+          fillcolor = :grey60, fillalpha = 0.10, label = "prior 90%: $(pri_p.label)")
+    for deg in degs
+        med, lo, hi = series(deg, :phi)
+        all(isnan, med) && continue                    # a Matérn-temporal (`-m32t`) chain has no φ
+        plot!(pt, hz, med; lw = 1.8, marker = :circle, ms = 3,
+              color = _gp_family_colour(deg, labels4, model_cols),
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = "φ — $(deg)")
+    end
+    # φ = 1: the pooled limit, NOT a clamp (φ ∈ (0,1) by construction on this path).
+    hline!(pt, [1.0]; ls = :dash, color = :red, lw = 1, label = "φ = 1 (pooled limit)")
+
+    # ---- panel 3: the two amplitudes ------------------------------------------------------------
+    # η and σ_c are SEPARATE `cfg` fields (`gp_scale_prior`, `gp_level_scale_prior`) that happen to
+    # share N(0, 0.5²) today — so read both and draw one band when they agree, two when they do not,
+    # rather than silently showing η's band under a σ_c line.
+    pri_e = _prior_hyper(cfg, :eta)
+    pri_s = _prior_hyper(cfg, :sigma_c)
+    pa = plot(; title = "GP amplitudes", titlefontsize = 9, xlabel = "horizon (re-fit)",
+              ylabel = "amplitude (log-scale SD)", yscale = :log10,
+              ylims = _lims(pri_e, (:eta, :sigma_c)),   # explicit, so the clamp lines are CLIPPED
+              xticks = xt, xlims = xlim, legend = :outertop, legendfontsize = 6, legendcolumns = 2)
+    amp_priors = pri_e.band == pri_s.band ?
+                 ((pri_e, "prior 90% (η, σ_c): $(pri_e.label)", :dot),) :
+                 ((pri_e, "prior 90% η: $(pri_e.label)", :dot),
+                  (pri_s, "prior 90% σ_c: $(pri_s.label)", :dashdot))
+    for (pri, lab, lsty) in amp_priors
+        plot!(pa, [first(hz), last(hz)], fill(pri.band[2], 2); ls = lsty, color = :grey40, lw = 1,
+              ribbon = (fill(pri.band[2] - pri.band[1], 2), fill(pri.band[3] - pri.band[2], 2)),
+              fillcolor = :grey60, fillalpha = 0.10, label = lab)
+    end
+    for deg in degs, (field, lsty, nm) in ((:eta, :solid, "η"), (:sigma_c, :dash, "σ_c"))
+        med, lo, hi = series(deg, field)
+        all(isnan, med) && continue
+        plot!(pa, hz, med; lw = 1.8, ls = lsty, marker = :circle, ms = 3,
+              color = _gp_family_colour(deg, labels4, model_cols),
+              ribbon = (med .- lo, hi .- med), fillalpha = 0.12, label = "$(nm) — $(deg)")
+    end
+    hline!(pa, collect(pri_e.bounds); ls = :dash, color = :red, lw = 1,
+           label = "softclamp [exp(-3), exp(2)]")   # ASCII: GR has no ⁻³/² glyph, see `_prior_hyper`
+
+    fig = plot(ps, pt, pa; layout = (1, 3), size = (1560, 520),
+               left_margin = 7Plots.mm, bottom_margin = 9Plots.mm,
+               plot_title = "10j — Stage-1 GP hyperparameters across horizon re-fits, origin " *
+                            "$(origin) (median + 90%, $(samplers))",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_gp_hyper_horizons_$(origin).png"))
+    return fig
+end
+
+"""
+    plot_gp_hyper_marginals(store, origin, cfg; h=1, res_dir="../res") -> Plots.Plot | nothing
+
+§7b — prior vs posterior MARGINALS of the five hyperparameters at ONE horizon: a `nfamilies × 5` grid,
+rows = degree family, columns = ρ_diag, ρ_gap, φ, η, σ_c.
+
+This is the panel §7's two documented questions are actually about, both being questions about
+marginal SHAPE against an informative prior rather than about a trend across horizons:
+
+  • `gp_len_prior` is deliberately informative and deliberately in tension with the 2026-08-05
+    Pathfinder survey (ρ_diag ≈ 7.9, ρ_gap ≈ 4.65 — −2.7σ / −4.2σ under it). Its standing instruction
+    is to bring the centre down if the posterior piles up on the LOWER edge.
+  • φ's boundary: whether the mass is against 1.0, and for which degree family.
+
+Each panel title carries the posterior median and the prior percentile at it, so the figure is
+self-contained.
+
+⚠ **HISTOGRAM, NOT A KDE, AND THAT IS LOAD-BEARING FOR φ.** φ's posterior can sit hard against 1.0
+(measured medians 0.990–0.994 on the weighted path); a kernel density smears mass PAST the boundary
+and so UNDERSTATES exactly the pile-up this panel exists to show. φ is binned on an explicit
+`range(0, 1; length = 51)` for the same reason. The four log-normal parameters are binned in LOG space
+on a `:log10` axis — the scale they are constructed on (`exp` of a Normal) and where their prior is
+symmetric — and `normalize = :pdf` makes the bar heights directly comparable with the overlaid prior
+density in the same units.
+
+Grey dotted curve = the prior density of the reported quantity (`_prior_hyper(...).dist`); grey
+dash-dot line = the prior median; red dashed = the soft-clamp bounds, with φ's single line at 1.0
+relabelled the pooled limit. A parameter this generation did not sample (φ on a `-m32t` chain) gets an
+annotated empty panel rather than a crash.
+"""
+function plot_gp_hyper_marginals(store, origin::Date, cfg; h::Integer = 1,
+                                 labels4 = nothing, model_cols = nothing,
+                                 res_dir::AbstractString = "../res")
+    degs = sort(unique(d for (d, hh) in keys(store) if hh == h))
+    if isempty(degs)
+        @warn "plot_gp_hyper_marginals: no chains at this horizon" origin h
+        return nothing
+    end
+    panels = Plots.Plot[]
+    for (ri, deg) in enumerate(degs), (ci, par) in enumerate(GP_HYPER_PARS)
+        r   = store[(deg, h)]
+        pri = _prior_hyper(cfg, par)
+        v   = filter(isfinite, getproperty(r, par))   # `GP_HYPER_PARS` == the reader's field names
+        ttl = "$(deg) — $(pri.pretty)"
+        if isempty(v)
+            # The other temporal generation's parameter: state that rather than drawing nothing.
+            push!(panels, plot(; framestyle = :box, title = "$(ttl): not sampled", titlefontsize = 7,
+                               legend = false, xticks = false, yticks = false))
+            continue
+        end
+        med  = median(v)
+        pctl = cdf(pri.dist, med)
+        # x-LIMITS EXPLICITLY, from the posterior and the prior 90% only — `vline!` EXPANDS the axis
+        # rather than being clipped, so drawing the soft-clamp bounds without this stretched every ρ
+        # panel across 0.5–500 and reduced the posterior to a spike (measured on the first render).
+        xl = pri.logscale ?
+             (min(minimum(v), pri.band[1]) / 1.6, max(maximum(v), pri.band[3]) * 1.6) :
+             (0.0, 1.03)          # φ: the full support plus headroom, so the φ=1 rule is ON-panel
+        pnl  = plot(; title = @sprintf("%s  med %.3g (prior pctl %.2f)", ttl, med, pctl),
+                    titlefontsize = 7, legend = (ri == 1 && ci == 1 ? :topright : false),
+                    legendfontsize = 5, xlabel = pri.pretty, ylabel = (ci == 1 ? "density" : ""),
+                    xlims = xl, xscale = pri.logscale ? :log10 : :identity)
+        # Bins on the parameter's OWN scale: log-spaced for the log-normal four (their axis is
+        # :log10, so linear bins would render as wildly unequal bars), linear on (0,1) for φ.
+        bins = if pri.logscale
+            lo, hi = extrema(v)
+            exp.(range(log(lo) - 1e-6, log(hi) + 1e-6; length = 41))
+        else
+            range(0, 1; length = 51)                   # the FULL support, so the boundary is on-panel
+        end
+        histogram!(pnl, v; bins = bins, normalize = :pdf, alpha = 0.55, lw = 0,
+                   color = _gp_family_colour(deg, labels4, model_cols), label = "posterior")
+        xs = pri.logscale ?
+             exp.(range(log(min(minimum(v), pri.band[1])) - 0.3,
+                        log(max(maximum(v), pri.band[3])) + 0.3; length = 300)) :
+             range(0, 1; length = 300)
+        plot!(pnl, xs, pdf.(pri.dist, xs); color = :grey30, ls = :dot, lw = 1.5,
+              label = "prior $(pri.label)")
+        vline!(pnl, [pri.band[2]]; color = :grey40, ls = :dashdot, lw = 1, label = "prior median")
+        # Clamp bounds / support. Plots clips them, so they appear only when the posterior is near one.
+        if par === :phi
+            vline!(pnl, [1.0]; color = :red, ls = :dash, lw = 1, label = "φ = 1 (pooled limit)")
+        else
+            vline!(pnl, collect(pri.bounds); color = :red, ls = :dash, lw = 1, label = "softclamp")
+        end
+        push!(panels, pnl)
+    end
+    fig = plot(panels...; layout = (length(degs), length(GP_HYPER_PARS)),
+               size = (350 * length(GP_HYPER_PARS), 310 * length(degs)),
+               left_margin = 6Plots.mm, bottom_margin = 8Plots.mm,
+               plot_title = "10j — Stage-1 GP hyperparameters: posterior vs prior, origin " *
+                            "$(origin), h=$(h) (Tn = $(store[(degs[1], h)].Tn))",
+               plot_titlefontsize = 10)
+    savefig(fig, joinpath(res_dir, "10j_gp_hyper_marginals_h$(h)_$(origin).png"))
+    return fig
 end
 
 """
