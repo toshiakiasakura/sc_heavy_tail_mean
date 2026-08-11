@@ -2444,3 +2444,71 @@ label which is which, and never compute the band from it.
 from the PNG, so `"softclamp [e⁻³, e²]"` renders as `"softclamp [e, e]"`. Greek (ρ η σ φ) and `√ ÷`
 are fine. Use ASCII `^2` / `exp(-3)` in anything that reaches a plot label; keep the pretty forms for
 markdown and docstrings.
+
+---
+
+## 2026-08-11 — A guard on the Pathfinder→NUTS hand-off, and what "measure before you threshold" bought
+
+**User instruction:** *"Please do not use PathFinder init if φ for AR(1) equals 1.0000."* Landed 25
+minutes into the formal 63-origin NUTS run. The run was stopped immediately — the request changes the
+Stage-1 starting value, and any chain fitted meanwhile would be mixed provenance in exactly the way
+`stage1_phi_init_scale` already taught us is undetectable from the file. **Zero artefacts had been
+written**, so the cost of stopping was the 25 minutes and nothing else.
+
+*Transferable:* **an init change mid-run is a stop, not a "let it finish and refit the tail".** The
+project rule that a starting value is deliberately absent from the cache token is exactly what makes a
+partially-refitted grid unauditable. Stopping is cheap early and unrecoverable late.
+
+**The measurement came before the threshold, and it changed the design.** The obvious implementation
+is `if φ == 1.0`. Censusing the complete 504-chain Pathfinder grid first showed that:
+
+1. **No cell has φ ≥ 0.999999**, let alone exactly 1.0. A literal equality test would have been dead
+   code shipped as a fix — the worst kind, because it looks like the request was honoured.
+2. The distribution is **continuous** at the top (0.99999851, 0.99994415, 0.99990848, 0.99986875, …).
+   There is no cliff, so the threshold is a judgement about how extreme a *logit* start is tolerable,
+   not a detector of a discrete failure mode. That belongs in the docstring, and it is now there.
+3. The firing cells' `log_eta` is −0.79/−1.46/−1.62 against a grid median of 0.21 — elevated but
+   nowhere near the −238 collapse signature. So the rest of the Pathfinder mean is a usable start and
+   the fix is a **one-latent substitution**, not a fallback to `_stage1_init`. Without the census the
+   safe-looking choice would have been to throw the whole mean away and lose a good init on 3 cells.
+4. All 3 firing cells are weighted-hurdle-Weibull at **h = 1**; NegBin fires 0/252. Same localisation
+   as the earlier degeneracy census (19/252, all h=1) — a sixth indication for `constant_contacts =
+   true` on the weighted path, obtained for free.
+5. **None of the 24 retained NUTS smoke chains contain a firing cell (0/24)**, which is what let them
+   be kept rather than refitted.
+
+*Transferable:* **census the artefacts you already have before choosing a threshold.** 504 fitted
+chains were sitting on disk holding the exact quantity in question — the median of the saved
+`phi_time` draws *is* the value handed to NUTS, because the constrained median equals
+`logistic(mean(logit φ))` under a monotone link, and `fit_stage1` runs a bit-identical Pathfinder
+stage on both paths from a fresh `Xoshiro(1236)` per fit. Five minutes of reading them answered
+"how often does this fire", "on which model", "is the rest of the fit degenerate too" and "does it
+touch what I am keeping" — every one of which changed the implementation.
+
+**The exact-1.0 case was a hard failure, not a bad start.** `logit(1.0) = Inf` ⇒ the logjoint is
+non-finite ⇒ `_pf_mean_init` throws ⇒ `prefit_stage1!` counts the cell failed and writes no file. So
+the guard converts an *outright fit failure* into a recoverable substitution. Worth stating plainly
+because it reframes the change: this is robustness, not tuning.
+
+**Two smaller things worth keeping.**
+
+`!(φ < max)` rather than `φ >= max`, so a NaN φ fires the guard instead of sailing through the
+comparison and into the `isfinite` error below.
+
+The replacement `randn(rng)` is taken **inside** the branch. The `rng` is a per-fit stream consumed
+sequentially by `_stage1_init` → Pathfinder → `_pf_mean_init`, so an unconditional draw would shift
+every subsequent random number in *every* fit and silently refork the whole grid — including the 501
+cells the guard never touches. Verified by asserting bit-identity (`===`) of the resulting φ on a
+non-firing control with the guard on and off.
+
+*Transferable:* **when adding a conditional branch to a seeded pipeline, put the RNG consumption
+inside the branch and prove the untaken path is bit-identical.** "It only affects 3 of 504 cells" is a
+claim about the guard's *intent*; it is only true of the code if the RNG stream is untouched.
+
+**Provenance needed two keys, not one.** `phi_pf_max` is the setting and must be uniform across a grid
+(audited). `phi_pf_override` is the per-cell outcome and *varies by design* — auditing it for
+uniformity would fail every healthy grid. `tmp/check_grid.jl` tallies it and says so in the output.
+
+*Transferable:* **"record it in the artefact" is not one decision.** Settings get audited for
+uniformity; outcomes get counted. Putting an outcome through a uniformity audit manufactures a
+permanent false failure, which is how a real one gets ignored.

@@ -1919,3 +1919,67 @@ mirrors — while the unrelated fixes found along the way were kept: 13j's missi
 superseded sliding window, and the 10j temporal name-fork. **Keeping that fork is what lets the
 `-m32t` chains still be read as the evidence for reverting them**; a token-based refusal would have
 locked out the very artefacts that justify the decision.
+
+### 12.7 The Pathfinder $\phi$ is no longer handed to NUTS when it is at the boundary (2026-08-11)
+
+User request, immediately before the formal 63-origin NUTS run: **do not use the Pathfinder init for
+$\phi$ when it comes back at $1.0000$.** Implemented as `cfg.stage1_phi_pf_max = 0.9999` and a guard
+inside `_pf_mean_init` — if the Pathfinder mean's `phi_time` is at or above the threshold it is
+replaced by the same $\mathrm{logistic}(N(0, \texttt{stage1\_phi\_init\_scale}^2)) \approx 0.5$ draw
+`_stage1_init` uses, and **nothing else in the mean is touched**.
+
+This follows directly from §12.6. That probe established that $\phi$ is largely determined by where
+the optimiser starts, and that the trustworthy $\phi$ is NUTS's, not Pathfinder's. But NUTS is
+*initialised from Pathfinder*, so a Pathfinder $\phi$ at the boundary is not merely an uninformative
+number — it is imposed on the sampler that was supposed to correct it.
+
+**Why $\phi$ specifically, and why the boundary specifically.** `initial_params` is consumed on the
+unconstrained scale, where $\phi$ is logit-linked. The grid maximum $\phi = 0.99999851$ is a start at
+$\mathrm{logit} = 13.4$: several $\mathrm{Beta}(3,3)$ tail-decades out, from which the chain must walk
+back while it is still adapting its step size and metric. At exactly $\phi = 1$ it is worse than a bad
+start — $\mathrm{logit}(1) = \infty$, `_pf_mean_init`'s `isfinite(lj)` check throws, and
+`prefit_stage1!` records the cell as failed with no file written. The guard turns a hard failure and a
+family of extreme starts into a defined, reproducible, interior one.
+
+**Measured frequency**, censused over the complete 504-chain Pathfinder grid `temporal-w8h-lc0`
+(the median of the saved `phi_time` draws *is* the value handed to NUTS: the constrained median equals
+$\mathrm{logistic}(\overline{\mathrm{logit}\,\phi})$ under a monotone link, and `fit_stage1` runs the
+identical Pathfinder stage on both paths from a fresh `Xoshiro(1236)` per fit):
+
+| threshold | cells firing | of 504 |
+|---|---|---|
+| $\phi \ge 1.0$ | 0 | 0.0% |
+| $\phi \ge 0.999999$ | 0 | 0.0% |
+| $\boldsymbol{\phi \ge 0.9999}$ | **3** | **0.6%** |
+| $\phi \ge 0.999$ | 12 | 2.4% |
+| $\phi \ge 0.99$ | 38 | 7.5% |
+
+All three firing cells are **weighted-hurdle-Weibull at $h=1$** — the shortest window ($T_n = 9$) on
+the path whose likelihood is nearly flat in time ($p^0 \approx 0.95$). NegBin fires **0 of 252**. This
+is the same $h=1$ localisation the Pathfinder degeneracy census found (19/252, all $h=1$), and the
+sixth independent indication that `constant_contacts = true` is the right setting for the weighted
+path.
+
+⚠ **There is no cliff at $1.0$ in that distribution.** The top values are $0.99999851$, $0.99994415$,
+$0.99990848$, $0.99986875$, … — continuous. So the threshold is a judgement about how extreme a logit
+start is tolerable, **not** a detector of a discrete failure mode, and it should be read that way when
+it is next revisited.
+
+⚠ **Only $\phi$ is replaced, and that is a measurement, not a convenience.** The firing cells'
+`log_eta` is $-0.79/-1.46/-1.62$ against a grid median of $0.21$ — elevated, but nowhere near the
+$-238$ signature of a genuinely collapsed fit (§12.1). The rest of the Pathfinder mean is a usable
+start. If a future census finds firing cells that are *globally* degenerate, the correct response is
+to fall back to `_stage1_init` wholesale, not to widen this threshold.
+
+**Provenance.** `stage1_phi_pf_max` is not in the cache token — same class as `stage1_phi_init_scale`
+and `stage1_z_init_scale`, a starting value rather than a model property — and it changes no parameter
+name and no dimension. `fit_or_load_stage1` therefore writes **two** keys: `phi_pf_max` (the setting,
+which must be uniform across a grid, audited by `tmp/check_grid.jl`) and `phi_pf_override` (whether
+*this* fit fired, which varies by cell by design and is tallied but never audited for uniformity). The
+replacement draw is taken **inside** the branch so a non-firing fit consumes no extra RNG and is
+bit-identical to the ungated code — verified directly on a NegBin control.
+
+**Scope.** NUTS path only: the guard lives in `_pf_mean_init`, which the Pathfinder-only path never
+calls, so the complete `temporal-w8h-lc0` generation is unaffected and remains the reference the
+census above was taken from. None of the 24 retained NUTS smoke chains contain a firing cell (0/24),
+so they are unchanged by this and stay valid.

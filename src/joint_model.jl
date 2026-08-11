@@ -963,7 +963,7 @@ function _fit_pathfinder(model, ndraws::Int, nruns::Int, rng, adtype; init = not
 end
 
 """
-    _pf_mean_init(model, pf, rng) -> DynamicPPL.InitFromParams
+    _pf_mean_init(model, pf, rng, cfg) -> (; init::DynamicPPL.InitFromParams, phi_override::Bool)
 
 Starting point for Stage-1 NUTS: the Pathfinder mean, as a **structured** `InitFromParams`.
 
@@ -993,8 +993,30 @@ single `fit_distribution`, so fall back to the mean of its (also unconstrained) 
 The unconstrained vector is turned into a `NamedTuple` by the same `link!!`/`values_as` round-trip
 `_stage1_init` uses, rather than by writing into index ranges — see that function's docstring for
 why the named round-trip is the only form that cannot silently target the wrong block.
+
+**THE φ BOUNDARY GUARD (2026-08-11, user request).** `phi_time` is taken from the Pathfinder mean
+like every other latent *unless* it comes back at `cfg.stage1_phi_pf_max` (0.9999) or above, in
+which case it is replaced by the `logistic(N(0, cfg.stage1_phi_init_scale²))` draw `_stage1_init`
+uses — φ ≈ 0.5, the prior median — and `phi_override` is returned `true`.
+
+The problem is specific to this latent because φ is LOGIT-linked and `initial_params` is consumed on
+the unconstrained scale: φ = 0.99999851 (the grid maximum) is a start at logit **13.4**, far out in a
+Beta(3,3) tail the chain then has to walk back from while it is still adapting its step size and
+metric. At exactly 1.0 it is not a bad start but a fatal one — `logit(1.0) = Inf`, the `isfinite(lj)`
+check below throws, and `prefit_stage1!` records the cell as failed with no file written. Everything
+else in the mean is kept: see `stage1_phi_pf_max` for the measured evidence that the firing cells are
+extreme in φ only (`log_eta` −0.79/−1.46/−1.62 vs a grid median of 0.21), which is why this is a
+one-latent substitution rather than a fallback to `_stage1_init`.
+
+⚠ The replacement draw is taken INSIDE the branch. That keeps a non-firing fit bit-identical to the
+ungated code — the `rng` is a per-fit stream consumed sequentially by `_stage1_init`, the Pathfinder
+run and then this, so an unconditional `randn(rng)` here would shift every subsequent draw in every
+fit and silently refork the whole grid.
+
+⚠ Returns a NamedTuple, not the init. The caller needs `phi_override` to record it per artefact
+(`fit_or_load_stage1`), because the threshold is not in the cache token and firing is per-cell.
 """
-function _pf_mean_init(model, pf, rng)
+function _pf_mean_init(model, pf, rng, cfg::FrameworkConfig)
     u = hasproperty(pf, :fit_distribution) && pf.fit_distribution !== nothing ?
         collect(Float64, mean(pf.fit_distribution)) :
         vec(mean(pf.draws; dims = 2))                      # multipathfinder: mixture, no single fit
@@ -1009,9 +1031,23 @@ function _pf_mean_init(model, pf, rng)
     missing_keys = setdiff(expect, keys(nt))
     isempty(missing_keys) ||
         error("_pf_mean_init: init misses model varnames $(missing_keys) — would fall back to prior")
+    # φ boundary guard — see the docstring. `nt.phi_time` is CONSTRAINED here (post-`invlink!!`), so
+    # the comparison is against φ itself and the replacement is written on the same scale, exactly as
+    # `_stage1_init` does. `>=` and not `isapprox`: the threshold IS the tolerance. Written as
+    # `!(φ < max)` rather than `φ >= max` so a NaN φ — which would otherwise sail through both the
+    # comparison and, being non-finite, straight into the `isfinite(lj)` error below — also fires.
+    phi_override = false
+    if haskey(nt, :phi_time) && cfg.stage1_phi_pf_max < 1 && !(nt.phi_time < cfg.stage1_phi_pf_max)
+        φ_pf = nt.phi_time
+        φ_new = 1 / (1 + exp(-cfg.stage1_phi_init_scale * randn(rng)))
+        nt = merge(nt, (; phi_time = φ_new))
+        phi_override = true
+        @warn "Stage-1 NUTS init: Pathfinder φ at the boundary — substituting the prior-median start" *
+              " (the rest of the Pathfinder mean is kept)" phi_pathfinder=φ_pf phi_used=φ_new threshold=cfg.stage1_phi_pf_max
+    end
     lj = DynamicPPL.logjoint(model, nt)
     isfinite(lj) || error("_pf_mean_init: Pathfinder mean has non-finite logjoint ($lj)")
-    return DynamicPPL.InitFromParams(nt)
+    return (; init = DynamicPPL.InitFromParams(nt), phi_override)
 end
 
 """
@@ -1101,10 +1137,15 @@ function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
     init = nruns <= 1 ? _stage1_init(model, z_init_scale, rng, cfg) : nothing
     pf = _fit_pathfinder(model, ndraws_pf, nruns, rng, adtype; init = init)
     if !use_nuts
+        # `phi_pf_override` is `false` here by construction, not by omission: the guard lives in
+        # `_pf_mean_init`, which only the NUTS path calls. Kept in the NamedTuple so every artefact
+        # carries the same key set and `fit_or_load_stage1` needs no branch.
         return (; chn = pf.draws_transformed, model, pf, ad_backend = cfg.ad_backend,
-                  sampler = :pathfinder, diag = _nuts_diagnostics(pf.draws_transformed))
+                  sampler = :pathfinder, diag = _nuts_diagnostics(pf.draws_transformed),
+                  phi_pf_override = false)
     end
-    nuts_init = _pf_mean_init(model, pf, rng)
+    pfi = _pf_mean_init(model, pf, rng, cfg)
+    nuts_init = pfi.init
     sampler = NUTS(cfg.stage1_nuts_adapts, cfg.stage1_nuts_target_accept;
                    max_depth = cfg.stage1_nuts_max_depth,
                    adtype = adtype === nothing ? Turing.DEFAULT_ADTYPE : adtype)
@@ -1118,7 +1159,8 @@ function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
     if !ismissing(diag.frac_at_max_depth) && diag.frac_at_max_depth > 0.2
         @warn "Stage-1 NUTS: tree saturating at max_depth" frac=diag.frac_at_max_depth depth=diag.max_tree_depth
     end
-    return (; chn, model, pf, sampler = :nuts, diag, ad_backend = cfg.ad_backend)
+    return (; chn, model, pf, sampler = :nuts, diag, ad_backend = cfg.ad_backend,
+              phi_pf_override = pfi.phi_override)
 end
 
 """
@@ -1170,12 +1212,21 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
     # NOTHING visible records: same token, same dimensions, same key set. That is strictly worse than
     # the `ad_backend` case, where at least the draws differ chaotically rather than systematically.
     # Applies on BOTH paths — Pathfinder consumes it directly, NUTS inherits it through `_pf_mean_init`.
+    #   `phi_pf_max`/`phi_pf_override` were added 2026-08-11 with the φ boundary guard, and they are
+    # TWO KEYS ON PURPOSE. `phi_pf_max` is the SETTING and must be uniform across a grid, exactly like
+    # `phi_init_scale`. `phi_pf_override` is the per-cell OUTCOME — whether this fit's Pathfinder φ was
+    # actually rejected — which VARIES BY DESIGN (measured: 3 of 504 on the Pathfinder grid, all
+    # weighted-hurdle-Weibull at h=1) and so must never be audited for uniformity; it exists so a later
+    # census can separate "started from Pathfinder's φ" from "started from the prior median" without
+    # refitting. Both are false/absent on the Pathfinder path, where the guard is never consulted.
     jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
                   ad_backend = res.ad_backend,
                   target_accept = cfg.stage1_nuts_target_accept,
                   nuts_adapts = cfg.stage1_nuts_adapts,
                   nuts_draws  = cfg.stage1_nuts_draws,
-                  phi_init_scale = cfg.stage1_phi_init_scale)
+                  phi_init_scale = cfg.stage1_phi_init_scale,
+                  phi_pf_max = cfg.stage1_phi_pf_max,
+                  phi_pf_override = res.phi_pf_override)
     return (; chn = res.chn)
 end
 
