@@ -2512,3 +2512,37 @@ uniformity would fail every healthy grid. `tmp/check_grid.jl` tallies it and say
 *Transferable:* **"record it in the artefact" is not one decision.** Settings get audited for
 uniformity; outcomes get counted. Putting an outcome through a uniformity audit manufactures a
 permanent false failure, which is how a real one gets ignored.
+
+### Addendum, same day: `pkill` reported the driver dead and it ran for 24 more minutes
+
+Stopping the run for the change above, `pkill -f '8j_run_grid.jl'` produced exactly the output you
+would take as success — the driver's own log printed
+
+```
+[8966] signal 15: Terminated
+in expression starting at /workdir/src/8j_run_grid.jl:165
+```
+
+**and the process kept running for 24 minutes.** It was still alive when the amended grid was
+relaunched, so for about 40 seconds there were two drivers writing the same `8j_s*.jld2` paths.
+Caught by reading `ps` in the relaunch check; `SIGKILL` ended it, and the artefact count confirmed it
+had written **nothing** (24/504 before and after), so the damage was zero. It would not have stayed
+zero — its first fits were due to land within the hour, as pre-guard chains under the live token,
+indistinguishable from the post-guard ones beside them.
+
+**Mechanism.** Julia raises SIGTERM as an `InterruptException` in the **main task**. `prefit_stage1!`
+is inside a `@sync` over `Threads.@spawn`ed fits; the spawned tasks are not interrupted, so the
+fan-out runs to completion and every finishing fit still writes its artefact. The log line is the
+main task reporting its own interruption — it says nothing about the workers.
+
+*Transferable, and the sharper half of the lesson:* **a process that logs its own death is not
+evidence it died; `ps` is.** I had actually run the check — `ps -p 8966 && echo "still alive"`
+printed `still alive` — and then moved on to the code change without acting on it. A liveness check
+whose result you don't branch on is worse than none, because it manufactures the feeling of having
+verified. Either kill and re-verify in the same command, or don't claim the process is stopped.
+
+*Second transferable:* **for a fan-out driver, escalate by default.** `tmp/stop_grid.sh` now stops
+the stack in the only order that works — supervisor first (or it relaunches the wrapper it finds
+missing), then watcher, then wrapper, then the driver with SIGTERM → verify → SIGKILL — and prints
+the artefact count before and after, because files landing *during* a stop are exactly the ones a
+model or init change makes stale.
