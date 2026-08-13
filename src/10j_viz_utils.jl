@@ -117,10 +117,11 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
 
       σ_c = exp(softclamp(log_sigma_c, -3, 2));   Lt = chol(Kt + 1e-4 I).L
       Qt = _sum_zero_basis(Tn)                                              # `-t0`, level only
-      rvec = ( c + σ_c·(Qt·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )        # `-lc0`: level is iid
+      Pr = Qtᵀ·Kt·Qt;  Lc = chol(Pr/(tr(Pr)/(Tn−1)) + 1e-4 I).L             # `-lcar1`: SCALED
+      rvec = ( c + σ_c·(Qt·Lc·z_c)[wk] )  .+  η·( Lp · (z · Lt[wk,:]) )
 
-  ⚠ TWO INDEPENDENT GENERATION FORKS, decided by DIFFERENT evidence. Both are live because all four
-  combinations exist on disk, and replaying a chain through the wrong branch silently returns a
+  ⚠ TWO INDEPENDENT GENERATION FORKS, decided by DIFFERENT evidence. Both are live because every
+  combination exists on disk, and replaying a chain through the wrong branch silently returns a
   plausible but different μ.
 
   1. **Which temporal kernel** — forked on the chain's own PARAMETER NAME, which is reliable here
@@ -130,11 +131,19 @@ with the per-week rate `rvec` built for the requested `week` (`wk`):
          log_rho_time present ⇒ ρ_time = exp(softclamp(log_rho_time, RHO_TIME_BOUNDS...))
                                 Kt[s,t] = m32(|s−t|/ρ_time)      # `-m32t` and everything pre-`-ar1`
 
-  2. **Whether the level is whitened** — forked on the `-lc0` marker in `contacts`, because here the
-     parameter names are IDENTICAL across generations and only the token distinguishes them. From
-     `-lc0` (2026-08-09) the level is iid-with-sum-to-zero as written above, so the temporal
-     parameter enters ONLY through `Lt`; before it the deviation went through
-     `Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L` and the temporal kernel acted on the level too.
+  2. **How the level is whitened** — forked on the TOKEN, because here the parameter names and
+     dimensions are IDENTICAL across all three generations and nothing else distinguishes them.
+     THREE states, because the level's history is not monotone, so test the older positive marker
+     FIRST (`-lc0` tokens are current-style, i.e. `is_legacy_token` is false for them):
+
+         occursin("-lc0", contacts) ⇒ :iid             dev = (Qt·z_c)[wk]
+         is_legacy_token(contacts)  ⇒ :whitened_raw    Lc = chol(Qtᵀ·Kt·Qt + 1e-4 I).L
+         otherwise                  ⇒ :whitened_scaled Lc as in the snippet above  # `-lcar1`, CURRENT
+
+     `:whitened_raw` is the pre-`-lc0` form (`-t0-ar1`, the `-m32-t0` pilots); `:whitened_scaled`
+     divides the projected kernel by `tr(Pr)/(Tn−1)` BEFORE the jitter, which is what makes σ_c's
+     marginal meaning φ-independent. The two differ by a φ-dependent scalar — at φ=0 they coincide,
+     at φ=0.99 the raw form's level is 4.8× smaller — so mixing them is silent and material.
 
 - **Legacy per-week iid** (`c[t]`, `z[p,t]`): `rvec = c[wk] .+ η .* (Lp * z[:,wk])`.
 - **Pooled** (scalar `c`, `z[p]`): `rvec = c .+ η .* (Lp * z)`.
@@ -275,29 +284,41 @@ function reconstruct_mu_draws(lbl::AbstractString, origin::Date, h::Integer;
             Zc[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)]))
         end
         tz_Q = _sum_zero_basis(Tn)                           # SAME helper the model uses — never re-derive
-        # ---- `-lc0` (2026-08-09): the LEVEL lost its temporal whitening ----
-        # From `-lc0` the level is `c + σ_c·(Qt·z_c)` — iid deviations conditioned to sum to zero, so
-        # the temporal parameter reaches μ ONLY through `Lt`. Before it, the deviation was whitened
-        # through `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` and the temporal kernel acted on the level as well.
-        # Both generations are on disk (`CONTACTS_TOKEN_AR1`), the parameter NAMES are identical in
-        # both, and replaying one with the other's algebra returns a plausible-but-wrong μ with no
-        # error — so THIS branch is taken on the TOKEN, which is the only thing that distinguishes
-        # them. (Contrast the kernel-family fork above, which the parameter NAMES do distinguish.)
-        # The two forks are independent and all four combinations occur on disk: the current
-        # `temporal-w8h-lc0` and the superseded `temporal-w8-lc0` grid (AR(1) + iid), the one-day
-        # `-m32t` smoke (m32 + iid), `-t0-ar1` (AR(1) + Lc) and the `-m32-t0` NUTS pilots (m32 + Lc).
-        level_is_iid = !is_legacy_token(contacts) || occursin("-lc0", contacts)
+        # ---- HOW IS THE LEVEL WHITENED? THREE generations, forked on the TOKEN ----
+        # The parameter NAMES and DIMENSIONS are identical in all three, and replaying one with
+        # another's algebra returns a plausible-but-wrong μ with no error, so the token is the only
+        # evidence there is. (Contrast the kernel-family fork above, which the parameter NAMES do
+        # distinguish — that one is a fork on the chain itself and needs no token.)
+        #   `-lcar1` (2026-08-13, CURRENT): `Lc` on the projected kernel SCALED to unit mean
+        #       eigenvalue before the jitter ⇒ σ_c is the marginal amplitude at every φ.
+        #   `-lc0`   (2026-08-09 → 08-13): no whitening at all; `c + σ_c·(Qt·z_c)`, iid deviations
+        #       conditioned to sum to zero, so the temporal parameter reached μ ONLY through `Lt`.
+        #   pre-`-lc0` (`-t0-ar1`, the `-m32-t0` pilots): `Lc` UNSCALED.
+        # ⚠ ORDER MATTERS AND IS NOT THE USUAL `is_legacy_token` SHAPE. The level's history is not
+        # monotone (whitened → iid → whitened-scaled), and the `-lc0` tokens are CURRENT-style —
+        # `is_legacy_token("temporal-w8h-lc0")` is false — so the middle generation must be caught by
+        # its own positive marker FIRST, and only then does legacy-vs-current separate the outer two.
+        # The forks are independent and every combination occurs on disk: `temporal-w8h-lcar1`
+        # (AR(1) + scaled Lc), `temporal-w8h-lc0` / `temporal-w8-lc0` (AR(1) + iid), the one-day
+        # `-m32t` smoke (m32 + iid), `-t0-ar1` (AR(1) + raw Lc), the `-m32-t0` pilots (m32 + raw Lc).
+        level_mode = occursin("-lc0", contacts) ? :iid :
+                     is_legacy_token(contacts)  ? :whitened_raw :
+                                                  :whitened_scaled
         for d in 1:D
             # `Kt` mirrors whichever `model_degree` wrote this chain — see the fork above.
             Kt = temporal_is_ar1 ? [tpar[d]^abs(s - t) for s in 1:Tn, t in 1:Tn] :
                                    [_m32(abs(s - t) / tpar[d]) for s in 1:Tn, t in 1:Tn]
             Lt = cholesky(Symmetric(Kt) + 1e-4 * I).L
             ltrow = Lt[wk, :]                                # row wk of Lt = column wk of Ltᵀ
-            # level: cₜ = c + σ_c·(tz_Q·z_c)_wk  (`-lc0`), or ·(tz_Q·Lc·z_c)_wk before it
-            dev = if level_is_iid
+            # level: cₜ = c + σ_c·(tz_Q·z_c)_wk (`-lc0`) or ·(tz_Q·Lc·z_c)_wk (raw / scaled `Lc`)
+            dev = if level_mode === :iid
                 dot(view(tz_Q, wk, :), @view Zc[d, :])
             else
-                Lc = cholesky(Symmetric(transpose(tz_Q) * Kt * tz_Q) + 1e-4 * I).L
+                Pr = transpose(tz_Q) * Kt * tz_Q
+                # SCALE BEFORE THE JITTER, exactly as `model_degree` does — reversing the two steps
+                # is the degenerate variant, not a rounding difference.
+                level_mode === :whitened_scaled && (Pr = Pr ./ (tr(Pr) / (Tn - 1)))
+                Lc = cholesky(Symmetric(Pr) + 1e-4 * I).L
                 dot(view(tz_Q, wk, :), Lc * (@view Zc[d, :]))
             end
             c_wk = cc[d] + σ_c[d] * dev

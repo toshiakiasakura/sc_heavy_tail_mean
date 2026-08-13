@@ -518,3 +518,164 @@ median (0.5 ⇒ the data moved nothing; < 0.05 ⇒ pushed into the prior's lower
 - [ ] §7 reads ONE origin. The rolling-origin view of ρ/φ is 9j's `plot_lengthscales`, which is
       Stage-2-gated and refuses Matérn-temporal chains — worth reconciling if the ρ_gap finding is
       pursued across the 63 origins.
+
+# 2026-08-13 — `-lcar1`: the AR(1) is extended to the weekly level `c_t`
+
+User request: *"extend the AR(1) to smooth not only residual part but also the level part (i.e. ct
+part.)"* — the reverse of `-lc0` (2026-08-09) and of the `-m32t` restatement (2026-08-10). Branch
+`ct_level_ar1`.
+
+## What changed
+
+- `model_degree` (`src/joint_model.jl`): `c_vec = c .+ σ_c .* (tz_Q * (Lc * z_c))` with
+  `Pr = tz_Qᵀ·Kt·tz_Q`, `Prn = Pr / (tr(Pr)/(Tn−1))`, `Lc = chol(Prn + 1e-4·I)`. The level now shares
+  the field's `Kt`, so `phi_time` reaches the likelihood through both `Lt` and `Lc`.
+  **Not a straight revert of `-lc0`**: the projected kernel is SCALED to unit mean eigenvalue BEFORE
+  the jitter (scaled-ICAR/BYM2), so σ_c keeps its marginal meaning at every φ.
+- `ETp` promotion now uses `eltype(c_vec)` rather than `typeof(c)` — the level carries σ_c and φ.
+- Token: `temporal-w8h-lc0` → **`temporal-w8h-lcar1`** (`framework.jl`). Chosen to contain none of
+  `-gsar-cut`/`-m32`/`-lc0`/`-ar1` and to be neither prefix nor superstring of any token on disk.
+- `reconstruct_mu_draws` (10j): the level fork goes **three-way** —
+  `occursin("-lc0", c)` ⇒ iid, else `is_legacy_token(c)` ⇒ raw `Lc`, else ⇒ scaled `Lc`. The older
+  generation's positive marker is tested FIRST because the level's history is not monotone and the
+  `-lc0` tokens are themselves current-style.
+- **No change**: latent counts (5 + 32·Tn / 5 + 81·Tn), any parameter name, `gp_level_scale_prior`,
+  `ar1_phi_prior`, `_stage1_init`, `_pf_mean_init`, `8j_viz_utils.jl`, 9j, 11j, 12j code.
+
+## Measured — why scaled and not a straight revert
+
+Mean per-week level SD per unit σ_c (Helmert basis, Tn = 12):
+
+| φ | 0 | 0.75 | 0.95 | 0.99 | 0.9999 |
+|---|---|---|---|---|---|
+| raw `Lc` (pre-`-lc0`) | 0.958 | 0.757 | 0.412 | 0.193 | 0.022 |
+| scaled `Lc` (`-lcar1`) | 0.958 | 0.953 | 0.941 | 0.936 | 0.935 |
+
+The NUTS-measured posterior sits at φ ≈ 0.990–0.994 (hweibull) and ≈ 0.84 (negbin), so the raw form
+would have shrunk the weekly level **3.7×/1.6× at the mode**, invisibly. Scaled: min eigenvalue
+≥ 0.117, cond(Lc) ≤ 7.6, `Prn` PD before the jitter, over Tn = 9..12 × 10 values of φ.
+The φ→1 limit is a Brownian bridge (lag-1 → 0.69), not white noise — which is why this is **not**
+the forbidden `Ap` renormalisation (that one adds the jitter first; order is load-bearing).
+
+## Verified
+
+1. Static kernel sweep, Tn = 9..12 × φ ∈ [0, 0.999999] — all pass the bounds above.
+2. **Mirror round-trip**: `reconstruct_mu_draws` vs the model's own μ (`generated_quantities`) on a
+   freshly fitted cell (negbin @ 2021-05-09 h1, 293 latents) — **max rel diff 3.7e-15**. The same
+   chain read through the wrong branch differs by 5.5% (iid) / 1.4% (raw) at this cell's φ = 0.37.
+3. **Legacy replay regression**: `-t0-ar1`, `-w8-lc0`, `-w8h-lc0-nuts`, `-w8h-lc0-m32t` reconstructed
+   under the old and new `10j_viz_utils.jl` — **bit-identical (max|old−new| = 0.0)** on all four.
+4. `DynamicPPL.TestUtils.AD.run_ad` vs ForwardDiff for ReverseDiff and Mooncake, both degree models
+   (293 and 734 latents) — pass. `Lc` is on the AD tape now, so this mattered.
+
+## Measured — single-origin PATHFINDER smoke, both degree models, all 4 horizons (2026-08-13)
+
+Origin 2021-05-09, `stage1_use_nuts = false`, `ad_backend = :mooncake` (the production Stage-1
+default), through `prefit_stage1!` / `prefit_stage2!`. Fitted to a scratch dir, NOT `dt_intermediate/`.
+**Stage 1: 8 fitted, 0 failed. Stage 2: 24 fitted, 0 failed, 3.5 min.** All six combos present.
+
+| degree | h | dim | φ | σ_c | log_eta | max\|z\| | c | screen |
+|---|---|---|---|---|---|---|---|---|
+| unweighted-negbin | 1 | 293 | 0.3829 | 0.5486 | 0.457 | 2.016 | −0.629 | ok |
+| unweighted-negbin | 2 | 325 | 0.3030 | 0.4343 | 0.398 | 2.775 | −0.631 | ok |
+| unweighted-negbin | 3 | 357 | 0.3451 | 0.3452 | 0.582 | 1.508 | −0.660 | ok |
+| unweighted-negbin | 4 | 389 | 0.3366 | 0.3158 | 0.437 | 1.791 | −0.636 | ok |
+| weighted-hweibull | 1 | 734 | 0.1709 | 0.1653 | −0.354 | 2.067 | −0.429 | ok |
+| weighted-hweibull | 2 | 815 | **0.9884** | 0.1187 | −0.281 | 1.471 | −0.440 | ok |
+| weighted-hweibull | 3 | 896 | 0.4665 | 0.1775 | −0.019 | 1.305 | −0.443 | ok |
+| weighted-hweibull | 4 | 977 | 0.0693 | 0.1853 | −0.210 | 1.795 | −0.457 | ok |
+
+Divergence screen (max|z| > 10 or |log_eta| > 5 or φ ≥ 0.9999): **0 of 8**. Dimensions are exactly
+5 + 32·Tn / 5 + 81·Tn for Tn = 9..12, confirming `-lcar1` moved no latent. Only Pathfinder warnings
+were ≤2.6% inverse-Hessian updates rejected — routine.
+
+**The h=2 hurdle-Weibull chain at φ = 0.9884 is the one that tests the design**, and it landed there
+by accident rather than by construction. Implied per-week level SD:
+
+| | h=1 | h=2 | h=3 | h=4 | spread |
+|---|---|---|---|---|---|
+| scaled `Lc` (shipped) | 0.156 | 0.110 | 0.169 | 0.177 | **×1.61** |
+| same σ_c/φ through raw `Lc` | 0.152 | **0.0225** | 0.156 | 0.176 | **×7.84** |
+
+⚠ The raw column is a **counterfactual** — it applies the raw formula to a σ_c fitted under the
+scaled model. A genuine raw-`Lc` fit would have inflated σ_c to compensate (to the `exp(2)` clamp).
+The claim it supports is the intended one: σ_c's *meaning* is φ-dependent under raw and
+φ-independent under scaled. It is not "a raw fit would have returned 0.0225".
+
+⚠ **φ is NOT identified under Pathfinder** — this project's own init probe found the final φ largely
+determined by its start, hence "read φ from NUTS, never from a Pathfinder fit". So negbin's
+φ ≈ 0.30–0.38 here, against the 0.726–0.844 recorded for the `-lc0`/`-ar1` Pathfinder generation, is
+**suggestive** of the level pulling φ down and nothing more. 8 chains at one origin, not a census.
+
+One cross-check does hold: σ_c at THIS origin under `-lc0` **NUTS** was 0.30–0.35 (negbin) and
+0.125–0.161 (hweibull); here it is 0.32–0.55 and 0.12–0.19 — same magnitude, which is what
+"`gp_level_scale_prior` needs no recalibration" predicted.
+
+`two_stage_forecast` then ran for all six combos off the cached artefacts (no refit — 24 of 24
+present). Every one returns the full 100×100 cut Monte Carlo and **100.00% finite draws**:
+
+| degree | ngm | draws | finite | median I by h=1..4 |
+|---|---|---|---|---|
+| unweighted-negbin | mean | 10000 | 100% | 35697, 43840, 16612, 29146 |
+| unweighted-negbin | neighbourhood | 10000 | 100% | 12034, 35224, 14356, 18821 |
+| unweighted-negbin | mean-diagonal | 10000 | 100% | 38064, 43570, 12719, 21147 |
+| weighted-hweibull | mean | 10000 | 100% | 38721, 31683, 23409, 21016 |
+| weighted-hweibull | neighbourhood | 10000 | 100% | 40245, 36535, 21035, 23566 |
+| no-contact | null | 10000 | 100% | 36961, 33528, 31721, 27433 |
+
+100% finite matters on the **neighbourhood** rows specifically: that builder's `gamma(1+2/κ)` second
+moment is what historically drove the optimiser into the `_softclamp` NaN hazard, and `Lc` is new
+tape on that path.
+
+## Measured — 10j run against the smoke artefacts (2026-08-13)
+
+The 32 smoke artefacts were copied into `dt_intermediate/` (10j hardcodes
+`save_dir = "../dt_intermediate"` in its cell-4 guard), then
+`jupyter nbconvert --to notebook --execute` with `timeout=-1`, output to a scratch dir, never
+`--inplace`. **Exit 0, no `CellExecutionError`, 30 MB of embedded outputs, 25 files written to
+`res/`** — all stamped `2021-05-09`, and the §7 CSV carries `temporal-w8h-lcar1`, confirming it read
+the intended generation rather than silently refitting.
+
+Exactly ONE real warning across the whole notebook (everything else was GKS `p⁰` glyph noise):
+`no Stage-1 chain for τ panel` — expected, that panel reads the retained `-hd` generation and
+`dt_intermediate_hierarchical/` is not in this tree.
+
+§7 table: 40 rows, no NaN, every `prior_pctl` in [0,1]. Readouts worth keeping:
+
+- **ρ_diag / ρ_gap land at 5.6–14.5 against a prior median of 20** (`prior_pctl` 1.3e-4 … 0.18).
+  This REPRODUCES the open `gp_len_prior` question below on the new generation — the shared
+  N(log 20, 0.35²) is fought in both directions, and `-lcar1` did not change that.
+- **η 0.70–1.79** (`prior_pctl` 0.24–0.88) — comfortable, no collapse.
+- **σ_c `prior_pctl` 1.1e-5 … 0.11** — a loose prior in the direction the data chose, the same
+  reading §7 gave for the `-lc0` chains.
+- φ as in the Stage-1 table above; the §7 φ panel's "φ = 1 (pooled limit)" reference line sits just
+  above the hweibull h=2 chain.
+
+⚠ **The `ess_bulk` (min 110.8) and `rhat` (max 1.065) columns are NOT mixing diagnostics here** —
+these are Pathfinder draws from an ELBO-maximising normal, not an MCMC chain. Read them only off
+the NUTS generation.
+
+⚠ **Found while running this: 10j cell 2's `STAGE1_USE_NUTS` is INVERTED relative to its own
+comment.** `get(ENV, "STAGE1_USE_NUTS", "true") == "false"` means `=true` selects **Pathfinder** and
+`=false` selects **NUTS**, while the comment says the opposite. The unset default is correct for a
+read-only notebook, so this run was unaffected — but anyone following the comment gets the wrong
+generation, and the failure mode is a silent serial refit. **Not fixed** (flipping it changes
+behaviour for any caller currently passing `false` to get NUTS); decide and fix deliberately.
+
+## Open
+
+- [ ] **Fix 10j cell 2's inverted `STAGE1_USE_NUTS`** (see above) — and check 9j/11j for the same.
+- [ ] **Fit the grid**: 504 Stage-1 + 1512 Stage-2 under `temporal-w8h-lcar1{,-nuts}`. Nothing had to
+      be moved aside — `dt_intermediate/` holds no chains at all (verified 2026-08-13, 2 CSVs).
+- [ ] **NUTS smoke at this origin** — the Pathfinder smoke above cannot settle φ. That is the run
+      that tests whether the weighted path comes off the boundary.
+- [ ] **⚠ `tmp/` is not on this branch** (`check_grid.jl`, `watch_grid.sh`, `run_grid_batched.sh` are
+      on `smooth_simple`). Restore before a grid run. A shape probe would not help for `-lcar1`
+      anyway: no name and no dimension moves, so only the token separates it from `-lc0`.
+- [ ] **Does φ come off the boundary?** The hypothesis this change makes testable: φ was informed only
+      by the near-flat hurdle-Weibull residual field, and now also by the strongly varying level.
+      Compare against the recorded negbin ≈ 0.84 / hweibull 0.990–0.994. **Not a prediction** — and it
+      does not retire `constant_contacts = true` as the indicated action for the weighted path.
+- [ ] Re-run the divergence census under the new token — `ar1_phi_prior` = Beta(3,3) has still never
+      been fitted at scale, and now φ has a second likelihood channel.
+- [ ] 10j §7's σ_c paragraph reports `-lc0` chains; re-read the percentiles off the new grid.

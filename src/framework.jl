@@ -241,8 +241,8 @@ Base.@kwdef struct FrameworkConfig
     stage1_phi_pf_max::Float64 = 0.9999 # REJECT the Pathfinder mean's `phi_time` as the Stage-1 NUTS starting value when it is AT OR ABOVE this, and substitute the same `logistic(N(0, stage1_phi_init_scale²))` draw `_stage1_init` uses. ADDED 2026-08-11 (user request: "do not use the Pathfinder init for φ if it equals 1.0000"). NUTS-PATH ONLY — it acts inside `_pf_mean_init`, so the Pathfinder-only generation is untouched and every non-firing fit is BIT-IDENTICAL to the ungated code (the replacement draw is taken inside the branch, so a non-firing fit consumes no extra RNG). ⚠ WHAT IT FIXES IS THE START, NOT THE POSTERIOR. `_pf_mean_init` hands NUTS `initial_params` on the unconstrained scale, where φ is LOGIT-linked: φ = 0.99999851 is logit 13.4, i.e. a start ~4.5 Beta(3,3) prior-tail-decades out, from which the adapting sampler must walk back before it samples anything. At exactly φ = 1.0 it is worse than a bad start — `logit(1.0) = Inf` makes the logjoint non-finite and `_pf_mean_init` THROWS, so the cell fails and `prefit_stage1!` leaves no file. This field converts a hard failure and a set of extreme starts into a defined, reproducible, interior one. ⚠ MEASURED FREQUENCY over the complete 504-chain Pathfinder grid (`temporal-w8h-lc0`, 2026-08-11 census; the median of the saved `phi_time` draws IS the value handed to NUTS, since the constrained median equals `logistic(mean(logit φ))` under a monotone link): 0 cells at φ ≥ 0.999999, **3 at ≥ 0.9999** (0.99999851 / 0.99994415 / 0.99990848), 12 at ≥ 0.999, 38 at ≥ 0.99. ALL THREE are weighted-hurdle-Weibull at h=1 — the shortest window (Tn = 9) on the path whose likelihood is nearly flat in time (p⁰ ≈ 0.95); NegBin fires 0/252. There is NO cliff at 1.0 in that distribution — it is continuous — so this threshold is a judgement about how extreme a logit start is acceptable, not a detector of a discrete failure mode: raise it to 0.99995 and only the first cell fires, lower it to 0.999 and 12 do. ⚠ THE REST OF THE PATHFINDER MEAN IS KEPT. Only `phi_time` is replaced; the firing cells' `log_eta` is −0.79/−1.46/−1.62 against a grid median of 0.21, which is elevated but nowhere near the −238 signature of a genuinely collapsed fit, so the mean is a usable start everywhere else. If a future census shows firing cells that ARE globally degenerate, the right change is to fall back to `_stage1_init` wholesale, not to widen this. ⚠ NOT IN THE CACHE TOKEN — same class as `stage1_phi_init_scale` and `stage1_z_init_scale` (a starting value is not a model property), and it likewise changes NO parameter name or dimension. `fit_or_load_stage1` therefore records BOTH `phi_pf_max` (the setting) and `phi_pf_override` (whether this fit actually fired) so a mixed grid is detectable; `tmp/check_grid.jl` audits the former for uniformity and tallies the latter, which VARIES BY CELL BY DESIGN and must never be audited for uniformity. Set ≥ 1.0 to disable.
     gp_len_prior::Tuple{Float64,Float64}   = (log(20.0), 0.35)   # log-ρ Normal(μ,σ), age-years — SHARED by BOTH spatial length-scales, `log_rho_diag` (total age) and `log_rho_gap` (age gap). SET 2026-08-05 (user request) alongside the `-m32` kernel swap and the restoration of the off-diagonal smoothing term. ⚠ UNITS: ρ lives on the rotated (su, df) scale, which is √2× an age difference, so ρ=20 is an effective age-difference length-scale of 20/√2 = 14.1 yr. WHAT IT ASSERTS: at the mode the kernel gives correlation 0.788 to the closest diagonal step (2-10→11-15, Δu=9.90) and 0.028 across the widest age gap — a MUCH smoother contact surface than the (log 4, 0.5) it replaces, which gave 0.047 at that same step, i.e. barely smoothed at all at its own mode. CONDITIONING (measured, kernel_static): under Matérn 3/2 the projected kernel `Ap` has rank 27 and min eigenvalue 2.5e-2 at the mode, 2.1e-3 at +2σ — 3-4 orders above the 1e-6 jitter, with effective rank 16.8/8.3/4.4 at −2σ/mode/+2σ. Under the OLD squared exponential the same ρ=20 gave min eigenvalue 2.9e-5 and, at +2σ, 1.5e-8, i.e. BELOW the jitter: the kernel swap is what makes this centre numerically safe, and the two changes should not be separated. ⚠ IN TENSION WITH THE EARLIER POSTERIOR, DELIBERATELY: the 2026-08-05 Pathfinder survey put ρ_diag≈7.9 and ρ_gap≈4.65, which are −2.7σ and −4.2σ here, so this prior is informative rather than weak. WATCH AT THE REFIT: if the posterior piles up against the LOWER edge, the data are disagreeing with the assumed smoothness and the centre should come down. HISTORY worth keeping: the SD was briefly 0.75 (with centre log 4) and that MEASURABLY BROKE Stage-1 NUTS — at 2021-05-09 h1 negbin, min ESS fell 118→1.8 of 500, step size 1.51e-2→1.17e-3, tree depth 8.40→10.00 (100% at cap), max R̂ 1.027→1.597. The worst blocks were log_rho_time and the z_c/z field it couples to through Lt: a looser length-scale prior let ρ_time drift into the near-pooled region where Kt goes low-rank, collapsing the map z↦Fld. That mechanism is exactly what `-m32` targeted. `-ar1` (2026-08-06) attacked it from the other side — AR(1)'s Markov spectrum keeps `Kt` well conditioned even in the near-pooled limit — and IS THE CURRENT PATH: `-m32t` reverted it to a Matérn temporal kernel for one day on 2026-08-10 and was itself reverted the same day, so the temporal restraint is `ar1_phi_prior` = Beta(3,3), not `gp_time_len_prior`. ⚠ That does NOT license loosening THIS spatial SD: the 0.75 regression above was measured, and the spatial kernel is unchanged.
     gp_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)        # log-η Normal(μ,σ), GP marginal scale (age-pair field)
-    ar1_phi_prior::Tuple{Float64,Float64}   = (3.0, 3.0)   # ⚠ TIGHTENED (2.0,2.0) → (3.0,3.0) ON 2026-08-09 (user request), continuing the 2026-08-08 step off Uniform. P(φ>0.99) falls 2.98e-4 → 9.85e-6 (a further 30×; 3.36e3× below Uniform's 0.0100), and on the unconstrained logit scale the tail decay goes exp(−2u) → exp(−3u). Still symmetric with mode 0.5 and density → 0 at both boundaries, so it asserts no temporal pooling — it only makes the boundary progressively more expensive to reach. Landed together with `-lc0`, which removes the *mechanism* the boundary was fatal through (the level's `Qtᵀ·Kt·Qt` projection, zero at φ=1); the two are complementary, since `Lt`'s field-side column collapse survives `-lc0`. Beta(a,b) on the AR(1) temporal coefficient φ ∈ (0,1) — REPLACES `gp_time_len_prior` under `-ar1` (2026-08-06, user request): the temporal correlation is now `Kt[s,t] = φ^|s−t|` (AR(1) ≡ exponential ≡ Matérn 1/2), not a Matérn 3/2 length-scale in weeks. ⚠ CHANGED (1.0,1.0) → (2.0,2.0) ON 2026-08-08 (user request) BECAUSE UNIFORM WAS MEASURABLY BROKEN — see tasks/lessons.md (and inst/3 §11 for the standing caveat). Under Uniform(0,1), 147 of 252 (58%) hurdle-Weibull Stage-1 Pathfinder fits DIVERGED: φ ran to the boundary (posterior median 0.9992, 160/252 above 0.99) and took the fit with it — log_eta at −238 under a N(0,0.5²) prior (478 prior SD), η and σ_c pinned at the e⁻³ floor, ρ_diag at the 500 ceiling, every μ at the exponent-clamp ceiling 403. NegBin was untouched (0/252, φ median 0.726, max 0.844). MECHANISM: as φ→1, Kt→J (rank 1) and the `-t0` LEVEL dies exactly — `Qtᵀ·J·Qt = 0`, so `Lc → chol(1e-4·I)` and the weekly level deviation collapses to the jitter (marginal SD per unit σ_c: 0.958 at φ=0 → 0.260 at 0.99 → 0.028 at 0.9999) — while `Lt`'s first column grows to 3.46 and its last falls to 0.019, so 297 of 324 `z` latents stop reaching the likelihood. That ~300-dimensional flat subspace is what LBFGS walks into. ⚠ THE ORIGINAL "WELL CONDITIONED AT φ=0.995" ARGUMENT BELOW WAS MEASURED ON `Kt` AND IS STILL TRUE — but the level is built on the PROJECTED kernel `Qtᵀ·Kt·Qt`, whose pooled limit is exactly zero regardless of how well conditioned `Kt` is. Conditioning of `Kt` was never the binding constraint. WHY (2,2) AND NOT THE TAIL-MATCHED Beta(10.22, 3.395): (2,2) is the minimal fix — density → 0 at BOTH boundaries (Uniform's does not), P(φ>0.99) falls 0.0100 → 0.000298 (34×), and on the unconstrained logit scale the tail decay doubles from exp(−u) to exp(−2u), so the raw latent can no longer drift as far for the same likelihood gain. It stays symmetric and mode-at-0.5, so it does NOT assert the strong temporal pooling the tail-matched prior does, and so does not re-open the prior–likelihood conflict the `-ig` experiment diagnosed (rho_time ESS tripled, 76–80 → 188–278, once the prior stopped fighting it; coordinates below ESS 100 fell 38 → 10). ⚠ NOT GUARANTEED SUFFICIENT: Uniform already had exponential tails in u, so this doubles a restoring force rather than introducing one. Re-run the divergence census after any refit (raw |z| > 10 or |log_eta| > 5 flags it) before trusting the weighted path. ⚠ NOT IN THE CACHE TOKEN — `contacts_label` is a literal and encodes no prior, so changing this does NOT fork the grid: stale artefacts must be moved aside by hand or they are silently reused. ⚠ φ→1 is the pooled/degenerate limit; the 1e-4 jitter on `Kt` is what keeps the Cholesky safe there, so do not reduce it. ⚠ RESTORED 2026-08-10 after a ONE-DAY round trip: `-m32t` replaced this with `gp_time_len_prior` and a Matérn 3/2 temporal kernel on the argument that `-lc0` + `-w8h` had made the pooled limit unreachable enough not to matter, and the 3-origin Pathfinder smoke REFUTED that premise — 3 of 12 hurdle-Weibull chains came back with ρ_time at or past the length of their own window (12.0 wk on 9, 10.2 on 9, 24.4 on 12), i.e. 0.61–0.82 end-to-end correlation and a field collapsed to one constant. The pooled limit IS reached, so the kernel that stays conditioned there is the one to use. See tasks/lessons.md and the kernel block in `model_degree`. ⚠ THIS VALUE HAS NEVER BEEN FITTED AT SCALE: (3,3) was set 2026-08-09 and the grid for it was killed at 1 file, so the 0/252 divergence result quoted below is the (2,2) measurement. Re-run the census before trusting the weighted path.
-    gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled weekly level `c_t = c + σ_c·(Qt·z_c)`. UNCHANGED by `-lc0` (2026-08-09), which dropped the level's AR(1) whitening: the deviation is now iid-conditioned-to-sum-to-zero, per-week marginal SD σ_c·√(1−1/Tn) = 0.943–0.958·σ_c over the `-w8h` window lengths Tn = 9..12, so the prior's calibration moves by <6%. Also UNCHANGED by `-m32t` (2026-08-10): the level carries no temporal kernel at all since `-lc0`, so reverting the field's kernel family does not touch it.
+    ar1_phi_prior::Tuple{Float64,Float64}   = (3.0, 3.0)   # ⚠ TIGHTENED (2.0,2.0) → (3.0,3.0) ON 2026-08-09 (user request), continuing the 2026-08-08 step off Uniform. P(φ>0.99) falls 2.98e-4 → 9.85e-6 (a further 30×; 3.36e3× below Uniform's 0.0100), and on the unconstrained logit scale the tail decay goes exp(−2u) → exp(−3u). Still symmetric with mode 0.5 and density → 0 at both boundaries, so it asserts no temporal pooling — it only makes the boundary progressively more expensive to reach. Landed together with `-lc0`, which removes the *mechanism* the boundary was fatal through (the level's `Qtᵀ·Kt·Qt` projection, zero at φ=1); the two are complementary, since `Lt`'s field-side column collapse survives `-lc0`. Beta(a,b) on the AR(1) temporal coefficient φ ∈ (0,1) — REPLACES `gp_time_len_prior` under `-ar1` (2026-08-06, user request): the temporal correlation is now `Kt[s,t] = φ^|s−t|` (AR(1) ≡ exponential ≡ Matérn 1/2), not a Matérn 3/2 length-scale in weeks. ⚠ CHANGED (1.0,1.0) → (2.0,2.0) ON 2026-08-08 (user request) BECAUSE UNIFORM WAS MEASURABLY BROKEN — see tasks/lessons.md (and inst/3 §11 for the standing caveat). Under Uniform(0,1), 147 of 252 (58%) hurdle-Weibull Stage-1 Pathfinder fits DIVERGED: φ ran to the boundary (posterior median 0.9992, 160/252 above 0.99) and took the fit with it — log_eta at −238 under a N(0,0.5²) prior (478 prior SD), η and σ_c pinned at the e⁻³ floor, ρ_diag at the 500 ceiling, every μ at the exponent-clamp ceiling 403. NegBin was untouched (0/252, φ median 0.726, max 0.844). MECHANISM: as φ→1, Kt→J (rank 1) and the `-t0` LEVEL dies exactly — `Qtᵀ·J·Qt = 0`, so `Lc → chol(1e-4·I)` and the weekly level deviation collapses to the jitter (marginal SD per unit σ_c: 0.958 at φ=0 → 0.260 at 0.99 → 0.028 at 0.9999) — while `Lt`'s first column grows to 3.46 and its last falls to 0.019, so 297 of 324 `z` latents stop reaching the likelihood. ⚠ THE LEVEL HALF OF THAT MECHANISM IS DEAD SINCE `-lcar1` (2026-08-13) AND THE FIELD HALF IS NOT. `-lcar1` restored the level's `Lc` but SCALES the projected kernel to unit mean eigenvalue before the jitter, so the level's amplitude is φ-independent (0.921–0.958·σ_c at every φ) and cannot collapse; `Lt`'s column collapse is untouched and is now the ONLY arm this prior guards. Do not read the sentence above as a live description of the level. That ~300-dimensional flat subspace is what LBFGS walks into. ⚠ THE ORIGINAL "WELL CONDITIONED AT φ=0.995" ARGUMENT BELOW WAS MEASURED ON `Kt` AND IS STILL TRUE — but the level is built on the PROJECTED kernel `Qtᵀ·Kt·Qt`, whose pooled limit is exactly zero regardless of how well conditioned `Kt` is. Conditioning of `Kt` was never the binding constraint. WHY (2,2) AND NOT THE TAIL-MATCHED Beta(10.22, 3.395): (2,2) is the minimal fix — density → 0 at BOTH boundaries (Uniform's does not), P(φ>0.99) falls 0.0100 → 0.000298 (34×), and on the unconstrained logit scale the tail decay doubles from exp(−u) to exp(−2u), so the raw latent can no longer drift as far for the same likelihood gain. It stays symmetric and mode-at-0.5, so it does NOT assert the strong temporal pooling the tail-matched prior does, and so does not re-open the prior–likelihood conflict the `-ig` experiment diagnosed (rho_time ESS tripled, 76–80 → 188–278, once the prior stopped fighting it; coordinates below ESS 100 fell 38 → 10). ⚠ NOT GUARANTEED SUFFICIENT: Uniform already had exponential tails in u, so this doubles a restoring force rather than introducing one. Re-run the divergence census after any refit (raw |z| > 10 or |log_eta| > 5 flags it) before trusting the weighted path. ⚠ NOT IN THE CACHE TOKEN — `contacts_label` is a literal and encodes no prior, so changing this does NOT fork the grid: stale artefacts must be moved aside by hand or they are silently reused. ⚠ φ→1 is the pooled/degenerate limit; the 1e-4 jitter on `Kt` is what keeps the Cholesky safe there, so do not reduce it. ⚠ RESTORED 2026-08-10 after a ONE-DAY round trip: `-m32t` replaced this with `gp_time_len_prior` and a Matérn 3/2 temporal kernel on the argument that `-lc0` + `-w8h` had made the pooled limit unreachable enough not to matter, and the 3-origin Pathfinder smoke REFUTED that premise — 3 of 12 hurdle-Weibull chains came back with ρ_time at or past the length of their own window (12.0 wk on 9, 10.2 on 9, 24.4 on 12), i.e. 0.61–0.82 end-to-end correlation and a field collapsed to one constant. The pooled limit IS reached, so the kernel that stays conditioned there is the one to use. See tasks/lessons.md and the kernel block in `model_degree`. ⚠ THIS VALUE HAS NEVER BEEN FITTED AT SCALE: (3,3) was set 2026-08-09 and the grid for it was killed at 1 file, so the 0/252 divergence result quoted below is the (2,2) measurement. Re-run the census before trusting the weighted path.
+    gp_level_scale_prior::Tuple{Float64,Float64} = (0.0, 0.5)      # log-σ_c Normal(μ,σ), amplitude of the decoupled weekly level `c_t = c + σ_c·(Qt·Lc·z_c)`. UNCHANGED by `-lc0` (2026-08-09), which dropped the level's AR(1) whitening: the deviation was iid-conditioned-to-sum-to-zero, per-week marginal SD σ_c·√(1−1/Tn) = 0.943–0.958·σ_c over the `-w8h` window lengths Tn = 9..12, so the prior's calibration moved by <6%. Also UNCHANGED by `-m32t` (2026-08-10): the level carried no temporal kernel at all under `-lc0`, so reverting the field's kernel family did not touch it. ⚠ AND UNCHANGED BY `-lcar1` (2026-08-13), WHICH IS THE WHOLE POINT OF ITS SCALING. `-lcar1` puts the AR(1) back on the level, but scales the projected kernel to unit mean eigenvalue BEFORE the jitter, so the per-week marginal SD is 0.921–0.958·σ_c over Tn = 9..12 × φ ∈ [0,1) — within 2.4% of the iid `√(1−1/Tn)` reference AT EVERY φ, i.e. this prior means the same thing it did. ⚠ THAT WOULD NOT HAVE HELD FOR A STRAIGHT REVERT: the UNSCALED pre-`-lc0` `Lc` gives 0.412·σ_c at φ=0.95 and 0.193 at 0.99, so σ_c's calibration would have become φ-dependent right where the weighted path's posterior sits (NUTS-measured φ ≈ 0.990–0.994) and this centre would have had to move with it.
     # --- secondary attack rate γ_SAR (§3.2/§6; analysis-plan per-contact SAR, non-normalised C*) ---
     gamma_sar_prior::Tuple{Float64,Float64} = (log(0.1), 1.8) # log-γ_SAR Normal(μ,σ): the per-contact secondary attack rate. C* is NOT normalised (the -gnorm C*→C*/S̄ decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so γ_SAR reproduces the reference cell N_11 = susc₁·inf₁ = γ_SAR directly. LOOSENED 2026-07-13 to span γ_SAR∈[0.001,10] (softclamp bounds below): the earlier (log0.27, 1.05) prior [90% γ_SAR∈[0.048,1.52]] and softclamp lower bound log0.02 were actively pinning the low-γ configs — the negbin|neighbourhood posterior median (~0.021) sat right on the log0.02 clamp with an implausibly tight CI (clamp compression). New centre log(0.1) = geometric mean of [0.001,10] with log-SD 1.8 ⇒ 90% γ_SAR∈[0.0052,1.93], weakly-informative across the full range. The softclamp [log0.001,log10] now sits at ≈±2.56σ (outside the 90% band, tails ≈0.5% each), so it comfortably contains the prior and stops biasing the low tail. NOTE: this change invalidates cached 8j_s2_* Stage-2 chains (the contacts token does not encode the prior) — delete them and re-run prefit_stage2! to regenerate; Stage-1 8j_s1_* chains are γ_SAR-independent and unaffected.
     # --- independent per-bin marginal SD of the relative susc/inf age profile (Stage-2 transmission block; NO cross-bin smoothing) ---
@@ -291,9 +291,9 @@ stage2_ad_type(cfg::FrameworkConfig) = _resolve_adtype(cfg.stage2_ad_backend)
 """`contacts_label(cfg)` — tags the contact/model regime for chain-cache filenames so fits with
 different parameter spaces never reload each other's stale chains.
 
-**CURRENT TOKEN: `temporal-w8h-lc0` (+`-nuts`).** The suffix names only the CURRENT generation's
+**CURRENT TOKEN: `temporal-w8h-lcar1` (+`-nuts`).** The suffix names only the CURRENT generation's
 distinguishing changes; it stopped being a running version tag on 2026-08-09, when nine accumulated
-suffixes were dropped (see the `-w8h-lc0` entry at the end). Everything below is the history those
+suffixes were dropped (see the `-w8h-lc0`/`-lcar1` entries at the end). Everything below is the history those
 suffixes recorded, kept as documentation of what each generation on disk means — the retained
 tokens are the `CONTACTS_TOKEN_PF`/`_HD`/`_AR1` literals, not this function.
 
@@ -409,8 +409,9 @@ a chain LACKING it is now the stale generation.
 `-t0` (2026-08-06) — **t**ime sum-to-**0**: the per-week LEVEL's temporal deviation is now constrained
 to be mean-zero over the Tn window weeks, `cₜ = c + σ_c·(Qt·Lc·z_c)` with `Qt = _sum_zero_basis(Tn)`
 and `Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` — the temporal analogue of `-s0`, using the identical machinery.
-`z_c` goes Tn → Tn−1, so Stage 1 is **389** (NegBin) / **977** (hurdle-Weibull). (`Lc` was later
-removed by `-lc0`; the sum-to-zero projection described here is retained and is what `-t0` means.)
+`z_c` goes Tn → Tn−1, so Stage 1 is **389** (NegBin) / **977** (hurdle-Weibull). (`Lc` was removed by
+`-lc0` and restored — SCALED — by `-lcar1`; the sum-to-zero projection described here survived both
+and is what `-t0` means. Note the scaling is what stops that projection collapsing the level as φ→1.)
 
 Why: `c` and the time-mean of the weekly deviation were two parameterisations of the same quantity. The
 flat direction that creates was measured on all four `-m32` chains at corr = **−1.000 exactly**, with
@@ -542,6 +543,36 @@ Stage-1 parameter-space change on both counts, so every `8j_s1_*`/`8j_s2_*` unde
 anything earlier) is unreachable. Nothing is deleted: the complete Pathfinder `…-t0-ar1` grid stays
 on disk and is reached by `CONTACTS_TOKEN_AR1`.
 
+**`-lcar1` — the weekly LEVEL gets its AR(1) BACK, SCALED** (2026-08-13, user request: "extend the
+AR(1) to smooth not only the residual part but also the level part"). `cₜ = c + σ_c·(Qt·Lc·z_c)`
+again, on the SAME `Kt` as the field, so `phi_time` reaches the likelihood through **both** `Lt` and
+`Lc`. ⚠ **This REVERSES `-lc0`**, whose own justification was the user request "AR(1) per age pair
+and nothing else" (restated 2026-08-10); prose anywhere still saying φ acts "only through `Lt`"
+describes 2026-08-09 → 08-13 and is stale.
+
+⚠ **Not a straight revert.** The pre-`-lc0` `Lc` was UNSCALED, and that is precisely the composition
+whose φ→1 collapse is documented on `ar1_phi_prior`: `Qtᵀ·J·Qt = 0` exactly, so the level's
+*amplitude* — not merely its conditioning — went to zero. `-lcar1` scales the projected kernel to
+unit mean eigenvalue **before** the jitter (`Pr ./ (tr(Pr)/(Tn−1))`, the scaled-ICAR/BYM2 device), so
+σ_c stays the marginal amplitude and φ carries the level's correlation only. Measured, mean per-week
+SD per unit σ_c at Tn = 12: raw 0.958 → 0.412 (φ=0.95) → 0.193 (0.99) → 0.022 (0.9999) against
+scaled 0.958 → 0.941 → 0.936 → 0.935. That is a mode-level difference, not a tail one — the only
+NUTS read under Beta(3,3) has hurdle-Weibull at φ ≈ 0.990–0.994. Over Tn = 9..12 × φ ∈ [0,1) the
+scaled kernel keeps min eigenvalue ≥ 0.117 and cond(Lc) ≤ 7.6, and is PD before the jitter.
+⚠ Scaling here is NOT the forbidden `Ap` renormalisation: that one adds the jitter first, so it
+degenerates to white noise and inverts the correct limit, whereas scaling first leaves the mean
+eigenvalue at exactly 1 and the φ→1 limit is a proper Brownian bridge. Order is load-bearing.
+⚠ It does **not** touch the field-side arm (`Lt`'s first column still absorbs the field as φ→1), so
+`ar1_phi_prior` stays Beta(3,3) and the kernel family still matters. `gp_level_scale_prior` also
+stays: the scaled per-week SD is within 2.4% of the iid `√(1−1/Tn)` calibration at every φ.
+
+⚠ **NO NAME AND NO DIMENSION MOVES** — two lines of algebra, the exact hazard class of the `-lc0`
+it reverses — so the token is the ONLY evidence and `reconstruct_mu_draws` forks on it three ways
+(`-lc0` ⇒ iid, else legacy ⇒ raw `Lc`, else ⇒ scaled `Lc`). `-lcar1` was chosen to contain none of
+`-gsar-cut`, `-m32`, `-lc0` or `-ar1`, and to be neither a prefix nor a superstring of any token on
+disk, so no existing `occursin` guard misfires. Nothing is deleted; the `-lc0` generations stay
+readable.
+
 `-m32t` (2026-08-10, user request) — **a ONE-DAY generation in which the temporal kernel went back to
 MATÉRN 3/2**, reverting `-ar1`. ⚠ **ITSELF REVERTED the same day** — read this entry as a record of a
 tested-and-refuted argument, not as the current model. Its 24 s1 / 72 s2 smoke artefacts are on disk
@@ -557,7 +588,8 @@ changes retired the argument rather than contradicting it:
  1. **`-lc0` removed the mechanism the pooled limit was fatal through.** The φ→1 catastrophe (147 of
     252 hurdle-Weibull fits diverging under Uniform) was never `Kt`'s conditioning — it was the
     LEVEL's projected kernel `Qtᵀ·Kt·Qt`, which is exactly 0 in the pooled limit however well
-    conditioned `Kt` is. The level is now iid, so ρ_time reaches the likelihood only through `Lt`.
+    conditioned `Kt` is. (Under `-lc0` the level was iid, so ρ_time reached the likelihood only
+    through `Lt`; `-lcar1` restored the level's own — scaled — projection of the same kernel.)
  2. **`-w8h` shortened the window** to `n_fit + h` = 9–12 weeks. A temporal length-scale is only
     identified well inside its window, so the near-pooled regime AR(1) was chosen to represent is
     less worth representing — and `-ar1`'s own refit outcome recorded that hurdle-Weibull's process
@@ -599,7 +631,7 @@ indicated action for that path is `constant_contacts = true`, not a fifth tempor
 ⚠ **THE ACCUMULATED PREFIX WAS DROPPED HERE (2026-08-09, user request).** The token had grown to
 `temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1-…` — nine historical suffixes, each of which was
 already stale the moment the next one landed, since a token only ever has to distinguish the
-CURRENT generation from the retained ones. It is now just `temporal-w8h-lc0` (+`-nuts`). The history
+CURRENT generation from the retained ones. It is now just `temporal-w8h-lcar1` (+`-nuts`). The history
 above is kept as documentation; it is no longer spelled into every filename.
 
 ⚠ This token was briefly `temporal-w8h-lc0-m32t` on 2026-08-10 and reverted to the short form the
@@ -614,7 +646,7 @@ ones and so invisible to any name-based check. That test now fails on the curren
 carries no `-m32`. Both were rewritten against `is_legacy_token` below — read its docstring before
 adding a third."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-w8h-lc0" *
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-w8h-lcar1" *
     (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """
@@ -629,8 +661,9 @@ was dropped that day. So this is an exact partition of the tokens that exist, no
 
 WHY IT EXISTS. Some model changes leave the chain's parameter names and shapes completely
 unchanged, so a stale chain cannot be detected by inspecting it — the squared-exponential → Matérn
-3/2 kernel swap (`-m32`) is the canonical case, and the AR(1)-level → iid-level change (`-lc0`) is
-another. For those the TOKEN is the only evidence, and the guards in `reconstruct_mu_draws`
+3/2 kernel swap (`-m32`) is the canonical case, and the level's AR(1) is another — twice over, since
+`-lc0` removed it and `-lcar1` put it back scaled, neither touching a name or a dimension.
+For those the TOKEN is the only evidence, and the guards in `reconstruct_mu_draws`
 (10j) and `load_transmission_draws` (8j) refuse rather than silently replaying a chain through the
 wrong algebra. Those guards used to spell `occursin("-m32", contacts)`, which broke the moment the
 prefix was dropped: it would have rejected every current chain. Expressing them as "current unless
@@ -639,6 +672,17 @@ legacy-and-missing-the-marker" is stable under further token shortening.
 ⚠ If a future generation ever needs its own such marker, add it to the SHORT token and test it the
 same way (`is_legacy_token(c) ? occursin("-marker", c) : true`), so the current token never has to
 carry a positive marker for a property it has by construction.
+
+⚠ **`-lcar1` is the case that does NOT fit that shape, and it is worth understanding why before
+copying either pattern.** The level's history is not monotone — whitened (`-t0-ar1`), then iid
+(`-lc0`), then whitened-and-scaled (`-lcar1`) — so no single legacy-vs-current test can separate
+three states, and the middle state's tokens are *current-style* (`is_legacy_token` is false for
+`temporal-w8h-lc0`). `reconstruct_mu_draws` therefore forks THREE ways, testing the OLDER
+generation's positive marker first: `occursin("-lc0", c)` ⇒ iid, else `is_legacy_token(c)` ⇒ raw
+`Lc`, else ⇒ scaled `Lc`. That still honours the rule above — the current token carries no positive
+marker, the ones that must prove a property carry theirs — and it is an exact partition of the
+tokens that exist. `-lcar1` was picked to contain none of `-gsar-cut`, `-m32`, `-lc0` or `-ar1`, and
+to be neither a prefix nor a superstring of any token on disk, so every existing guard is unaffected.
 """
 is_legacy_token(contacts::AbstractString) = occursin("-gsar-cut", contacts)
 
@@ -650,9 +694,11 @@ since `stage1_use_nuts` became the default on 2026-08-05, to the **NUTS** sample
 now carries the `-nuts` suffix.
 
 ⚠ **That is a live migration, not a no-op.** Since `-w8h-lc0` (2026-08-09) NOTHING has been fitted
-under this token at all: the only complete 504/1512-file grid on disk is the *Pathfinder* `-t0-ar1`
-generation, reached by `CONTACTS_TOKEN_AR1` below (and, two generations back, `CONTACTS_TOKEN_PF`).
-Until the `-w8h-lc0` grid has actually been fitted, the read-only viz helpers that default to this
+under this token at all, and `-lcar1` (2026-08-13) moved it again: the only complete 504/1512-file
+grid on disk is the *Pathfinder* `-t0-ar1` generation, reached by `CONTACTS_TOKEN_AR1` below (and,
+two generations back, `CONTACTS_TOKEN_PF`). `dt_intermediate/` itself holds **no chains at all** —
+verified 2026-08-13, two CSVs only — so nothing had to be moved aside for the `-lcar1` token bump.
+Until the `-w8h-lcar1` grid has actually been fitted, the read-only viz helpers that default to this
 constant (`stage1_chain_path`, `reconstruct_p0_draws`, `reconstruct_tau_draws`, the 9j/10j/11j
 figures) will find **no files**. Point them at `CONTACTS_TOKEN_AR1` to read the existing generation,
 exactly as `plot_within_block_sd` already does with `CONTACTS_TOKEN_HD`.
@@ -684,12 +730,15 @@ distinguished by the suffix alone."""
 const CONTACTS_TOKEN_PF = "temporal-gsar-cut-sc-p0-gi"
 
 """The `-t0-ar1` generation's token — the 12-week contact window with an AR(1)-smoothed level, i.e.
-everything up to but not including `-w8h-lc0` (2026-08-09).
+everything up to but not including `-w8h-lc0` (2026-08-09). ⚠ Its level is whitened through the
+**UNSCALED** `Lc`; `-lcar1` (2026-08-13) smooths the level again but scales the projected kernel, so
+this generation and the current one are NOT interchangeable and `reconstruct_mu_draws` gives them
+separate branches (`:whitened_raw` vs `:whitened_scaled`).
 
 ⚠ **THIS IS THE ONLY COMPLETE GRID ON DISK** (504 `8j_s1_*` / 1512 `8j_s2_*`, fitted with
 PATHFINDER — the `-ar1-nuts` run was killed at 1 of 504). 9j/10j/11j default
 `ENV["STAGE1_USE_NUTS"]` to `"false"` precisely so they read a generation that exists, so until the
-`-w8h-lc0` grid has actually been fitted this constant is what the read-only viz must be pointed at.
+`-w8h-lcar1` grid has actually been fitted this constant is what the read-only viz must be pointed at.
 Omit it and every lookup misses — and 9j/10j do not fail: `two_stage_forecast` → `fit_or_load_stage2`
 FITS on miss, serially, while 10j renders blank panels with a warning (see CLAUDE.md's first Gotcha).
 

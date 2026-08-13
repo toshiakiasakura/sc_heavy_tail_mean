@@ -100,8 +100,9 @@ unrelated), and `-w8h` (2026-08-09) took Tn from a flat `n_fit + smax` = 12 to `
 count cannot distinguish them at all, only the token can.
 In-chain signals that DO discriminate: `log_rho_gap` present (absent under `-diag`), `z_c` = Tn−1
 (Tn before `-t0`), and the `z` column count = Tn, which now VARIES ACROSS THE FOUR HORIZON CHAINS of
-one origin (9/10/11/12) where it used to be a constant 12. `-lc0`, which landed with `-w8h`, changes
-no name and no dimension at all — only the token records it. Archived pilot
+one origin (9/10/11/12) where it used to be a constant 12. `-lc0`, which landed with `-w8h`, and
+`-lcar1` (2026-08-13), which reverses it, BOTH change no name and no dimension at all — only the
+token records them, and it takes a THREE-way test because the level's history is not monotone. Archived pilot
 chains: `dt_intermediate_nuts_pilot_pre_s0/` has 28 `z` rows, `dt_intermediate_nuts_pilot_diag/` has
 27 rows and NO `log_rho_gap`. Per-parameter tables are unreadable at this size, so almost everything
 here is reported BY GROUP.

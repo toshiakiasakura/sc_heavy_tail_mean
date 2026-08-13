@@ -531,23 +531,53 @@ degenerates to *white noise* of scale $\eta$, inverting the correct limit (field
 carrying everything).
 
 **The overall weekly level** carries its own amplitude $\sigma_c$ **decoupled** from $\eta$, is
-**conditioned to sum to zero over the $T_n$ window weeks**, and is **not temporally smoothed at
-all**:
+**conditioned to sum to zero over the $T_n$ window weeks**, and — since `-lcar1` (2026-08-13) —
+**shares the field's AR(1), through a SCALED projection of the same kernel**:
 
 $$
-c_t = c + \sigma_c\,(Q_t\, z_c)_t,
+c_t = c + \sigma_c\,(Q_t\, L_c\, z_c)_t,
 \qquad Q_t = \texttt{\_sum\_zero\_basis}(T_n),
 \qquad z_c \sim \mathcal N(0,1)^{T_n-1},
 $$
 $$
-\operatorname{Cov}(\sigma_c\,\text{dev}) = \sigma_c^2\, Q_t Q_t^{\!\top} = \sigma_c^2 M_t,
-\qquad M_t = I - \tfrac{1}{T_n}\mathbf 1\mathbf 1^{\!\top},
+P_r = Q_t^{\!\top} K_t\, Q_t,
+\qquad
+L_c = \operatorname{chol}\!\Big(\tfrac{P_r}{\operatorname{tr}(P_r)/(T_n-1)} + 10^{-4} I\Big),
+\qquad
+\operatorname{Cov}(\sigma_c\,\text{dev}) = \sigma_c^2\, Q_t L_c L_c^{\!\top} Q_t^{\!\top}.
 $$
 
-i.e. iid weekly deviations *conditioned* on summing to zero — exact, not a soft penalty. The week-$t$
-log-rate field is $r_{p,t} = c_t + R_{p,t}$. The per-week marginal SD is
-$\sigma_c\sqrt{1-1/T_n} = 0.943$–$0.958\,\sigma_c$ over $T_n = 9..12$, so `gp_level_scale_prior`
-needs no rescaling.
+i.e. an AR(1) weekly deviation *conditioned* on summing to zero — exact, not a soft penalty — with
+the projected kernel **rescaled to unit mean eigenvalue before the jitter**. The week-$t$ log-rate
+field is $r_{p,t} = c_t + R_{p,t}$. The per-week marginal SD is $0.921$–$0.958\,\sigma_c$ over
+$T_n = 9..12$ **at every $\phi$** (against $\sigma_c\sqrt{1-1/T_n} = 0.943$–$0.958\,\sigma_c$ for the
+`-lc0` iid level it replaces), so `gp_level_scale_prior` needs no rescaling.
+
+⚠ **The rescaling is the design, not a detail.** Without it — the pre-`-lc0` form — the level's
+*amplitude* collapses as $\phi\to1$, because $Q_t^{\!\top} J Q_t = 0$ **exactly**, so $P_r\to0$
+however well conditioned $K_t$ is and $L_c\to\operatorname{chol}(10^{-4}I)$. Measured at $T_n=12$,
+mean per-week SD per unit $\sigma_c$:
+
+| $\phi$ | 0 | 0.75 | 0.95 | 0.99 | 0.9999 |
+|---|---|---|---|---|---|
+| raw $L_c$ | 0.958 | 0.757 | 0.412 | 0.193 | **0.022** |
+| scaled $L_c$ | 0.958 | 0.953 | 0.941 | 0.936 | 0.935 |
+
+That is a difference **at the posterior mode**, not only in the tail: the one NUTS read under
+$\mathrm{Beta}(3,3)$ (§11) puts hurdle-Weibull at $\phi\approx0.990$–$0.994$. Scaled, the projected
+kernel keeps min eigenvalue $\ge 0.117$ and $\operatorname{cond}(L_c)\le 7.6$ over
+$T_n = 9..12 \times \phi\in[0,1)$, and the $\phi\to1$ limit is a proper **Brownian bridge**
+($M_t K_t M_t \propto -M_t D M_t$ with $D_{st} = |s-t|$; lag-1 correlation $\to 0.69$).
+
+⚠ **Scale BEFORE the jitter — the order is load-bearing**, and it is exactly what separates this
+from the $A_p$ renormalisation forbidden above. That one degenerates because the jitter is added
+first: once $\operatorname{tr}(A_p)$ falls below it the normalised matrix is essentially
+$\text{jitter}\cdot I$, so the field becomes white noise and the correct limit is inverted. Scaling
+first leaves the mean eigenvalue at exactly 1, so $10^{-4}$ is always negligible and no such
+inversion is possible.
+
+⚠ It does **not** rescue the field-side arm ($L_{\text{time}}$'s first column still absorbs the
+field as $\phi\to1$), which `ar1_phi_prior` restrains alone.
 
 The sum-to-zero projection identifies $c$ against the time-mean of the deviation, which would
 otherwise be two parameterisations of one quantity. ⚠ **It applies to the LEVEL only** — the
@@ -709,7 +739,7 @@ asserts no temporal pooling; it only makes the boundary progressively expensive 
 $0.0100$ under Uniform). ⚠ **$\mathrm{Beta}(3,3)$ has never been fitted at scale** — re-run the
 divergence census (§11) before trusting the weighted path.
 
-The derived quantities are the level $c_t = c + \sigma_c (Q_t z_c)_t$, the structure field
+The derived quantities are the level $c_t = c + \sigma_c (Q_t L_c z_c)_t$, the structure field
 $R = \eta\,(Q\, L_A\, z\, L_{\text{time}}^{\!\top})$ with temporal factor
 $K^{\text{time}}_{st} = \phi^{|s-t|}$, the week-$t$ log-rate $r_{p,t} = c_t + R_{p,t}$ (§5), the
 contact-degree log-likelihood of §4 injected via `Turing.@addlogprob!`, and
@@ -1032,9 +1062,12 @@ plus **block-linear per-week dispersion** (a $4\times T_n$ array of block means,
 weighted path (§4.2), and **per-week temporally-smoothed contact estimation** (one separable
 spatio-temporal age-pair GP across `[t₀−n_fit+1 … t₀+h]`).
 
-**Cache token.** `contacts_label(cfg)` is the short **`"temporal-w8h-lc0"`**, plus `-nuts` when
+**Cache token.** `contacts_label(cfg)` is the short **`"temporal-w8h-lcar1"`**, plus `-nuts` when
 `stage1_use_nuts` is set. It names only the *current* generation's distinguishing changes — `-w8h`
-the origin-anchored $n_{\text{fit}}+h$ contact window (§2.2) and `-lc0` the iid weekly level (§5).
+the origin-anchored $n_{\text{fit}}+h$ contact window (§2.2) and `-lcar1` the AR(1)-smoothed,
+scaled weekly level (§5). ⚠ `-lcar1` changes **no parameter name and no dimension** — it reverses
+`-lc0`, whose tokens are themselves current-style — so `reconstruct_mu_draws` forks on the token
+**three ways**: `-lc0` ⇒ iid, else legacy ⇒ raw $L_c$, else ⇒ scaled $L_c$.
 Every **retained** generation on disk is named by a literal in `framework.jl`, because no `cfg`
 reproduces it:
 
@@ -1141,8 +1174,10 @@ interpretation of the fitted transmission parameters.**
   it silently. Re-run that census after any refit before trusting the weighted path.
 - **Contact temporal structure.** *Implemented* — the age-pair structure field is smoothed across
   weeks by the temporal factor of a separable spatio-temporal GP (§5), with one shared **AR(1)
-  coefficient $\phi$**; the **weekly level does not share it** ($c_t$ is iid across weeks,
-  sum-to-zero), so $\phi$ describes the individual age-pair trajectories and nothing else.
+  coefficient $\phi$**; since `-lcar1` the **weekly level shares it too** (through a scaled
+  projection of the same kernel — §5), so $\phi$ describes both the age-pair trajectories and the
+  overall level. It did **not** share it from `-lc0` to `-lcar1` ($c_t$ was iid across weeks,
+  sum-to-zero, so $\phi$ then described the individual age-pair trajectories and nothing else).
   *Remaining seams*: a non-separable space–time kernel; and the field-side $\phi\to1$ limit, where
   $L_{\text{time}}$'s first column absorbs the field and most of $z$ stops reaching the likelihood.
   $\phi$'s prior is the only restraint on that (§5, §6).

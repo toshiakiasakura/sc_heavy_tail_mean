@@ -2538,3 +2538,95 @@ the stack in the only order that works — supervisor first (or it relaunches th
 missing), then watcher, then wrapper, then the driver with SIGTERM → verify → SIGKILL — and prints
 the artefact count before and after, because files landing *during* a stop are exactly the ones a
 model or init change makes stale.
+
+## 2026-08-13 — `-lcar1`: re-smoothing the level, and why the straight revert was the wrong revert
+
+**User request:** *"extend the AR(1) to smooth not only residual part but also the level part (i.e.
+ct part)."* This reverses `-lc0` (2026-08-09), whose own justification was the user request "AR(1)
+per age pair and nothing else" — restated on 2026-08-10 with `-m32t`. Both are legitimate; the
+lesson is not about which is right but about what a revert of a revert has to check.
+
+**The obvious implementation is a `git revert` of two lines, and it is wrong.** `-lc0` deleted
+`Lc = chol(Qtᵀ·Kt·Qt + 1e-4·I)` and changed `(Qt·(Lc·z_c))` to `(Qt·z_c)`. Putting them back
+restores not only the AR(1) but also the degeneracy the project has a whole prior tightening
+(`ar1_phi_prior` Beta(1,1)→(2,2)→(3,3)) and a whole init guard (`stage1_phi_pf_max`) written about:
+`Qtᵀ·J·Qt = 0` **exactly**, so as φ→1 the projected kernel goes to zero and the level's *amplitude*
+dies into the jitter. Measured (Helmert basis, Tn = 12, mean per-week marginal SD per unit σ_c):
+
+| φ | 0 | 0.75 | 0.95 | 0.99 | 0.9999 |
+|---|---|---|---|---|---|
+| raw `Lc` | 0.958 | 0.757 | 0.412 | 0.193 | **0.022** |
+| scaled `Lc` | 0.958 | 0.953 | 0.941 | 0.936 | 0.935 |
+
+**What made this decidable was checking where the posterior actually sits, not where the failure
+is worst.** The φ→1 story is always told at φ = 0.9999, which reads as a tail problem worth a prior
+rather than a reparameterisation. But the one NUTS read under Beta(3,3) puts hurdle-Weibull at
+φ ≈ 0.990–0.994 and NegBin at ≈ 0.84 — so a straight revert would have shrunk the weekly level
+**3.7× and 1.6× at the mode**, silently, with no name or dimension changing and `gp_level_scale_prior`
+still centred as if nothing had happened. *Transferable:* when a known degeneracy is described by
+its limit, evaluate it at the posterior's location before deciding it is a tail concern.
+
+**The fix is the scaled-ICAR/BYM2 device**: divide the projected kernel by `tr(Pr)/(Tn−1)` so its
+mean eigenvalue is 1, and only then add the jitter. σ_c keeps its marginal meaning at every φ
+(0.921–0.958·σ_c over Tn = 9..12 × φ ∈ [0,1), against √(1−1/Tn) = 0.943–0.958 for the iid level it
+replaces), so **the prior needed no recalibration** — which is the test that the scaling is doing
+what it claims. Min eigenvalue ≥ 0.117 and cond(Lc) ≤ 7.6 across the same grid.
+
+**⚠ The identical operation is FORBIDDEN one axis over, and the difference is one line of ordering.**
+`inst/3` §5 says in bold: do not renormalise `Ap` by `tr(Ap)/P`, because "as ρ→∞ that ratio is
+dominated by the jitter and the field degenerates to white noise, inverting the correct limit."
+That is true — *when the jitter is added first*. Once `tr(Ap)` falls below the jitter, `Ap + εI`
+normalised is essentially `I`. Scaling **before** the jitter cannot reach that state: the mean
+eigenvalue is exactly 1 by construction, so ε is always negligible. And the limit here is not white
+noise but a **Brownian bridge** — as φ→1, `Mt·Kt·Mt ∝ −Mt·D·Mt` with `D[s,t] = |s−t|`, which is PSD
+(classical MDS in 1-D); measured lag-1 correlation → 0.69, not 1.0 and not 0. *Transferable, and the
+part worth stealing:* a standing prohibition on an operation is usually a prohibition on **one
+implementation** of it. Before invoking it or violating it, find the mechanism, then check which
+step of your version corresponds to the step that breaks.
+
+**Token: the level's history is not monotone, and that breaks the house guard pattern.** The
+prescribed shape is `is_legacy_token(c) ? occursin("-marker", c) : true` — current tokens carry no
+positive marker. That works for a property that was acquired once. The level has now been whitened
+(`-t0-ar1`) → iid (`-lc0`) → whitened-and-scaled (`-lcar1`), i.e. **three** states, and worse, the
+middle generation's tokens are *current-style* (`is_legacy_token("temporal-w8h-lc0")` is `false`).
+`reconstruct_mu_draws` therefore tests the OLDER generation's positive marker FIRST:
+
+```julia
+level_mode = occursin("-lc0", contacts) ? :iid :
+             is_legacy_token(contacts)  ? :whitened_raw :
+                                          :whitened_scaled
+```
+
+which still honours the rule — the *current* token stays bare — and is an exact partition of the
+tokens on disk. *Transferable:* when a property oscillates rather than accumulating, mark the
+generations that are **not** current and leave the current one unmarked.
+
+**The token had to move even though nothing observable did.** `-lcar1` changes no parameter name,
+no dimension (still 5 + 32·Tn / 5 + 81·Tn) and no prior — exactly the `-lc0` hazard class. The new
+token was chosen to contain none of `-gsar-cut`, `-m32`, `-lc0` or `-ar1`, and to be neither prefix
+nor superstring of any token on disk, so no existing `occursin` guard misfires; that was checked by
+enumerating every retained token through every guard rather than by reading them.
+
+**What was verified before claiming it works** (all four, because three of them can pass while the
+model is wrong):
+1. Static kernel sweep, Tn = 9..12 × 10 values of φ: SD within 2.4% of the iid reference,
+   min eigenvalue ≥ 0.117, cond ≤ 7.6, `Prn` PD *before* the jitter.
+2. **Mirror round-trip**: fit one Pathfinder cell, then compare `reconstruct_mu_draws` against the
+   model's own μ via `generated_quantities` on the same chain — **max rel diff 3.7e-15**. This is
+   the only check that catches a mirror that drifted from the model, whose failure mode is a
+   plausible-but-wrong μ with no error. Reading the same chain through the wrong branch differs by
+   5.5% (iid) and 1.4% (raw `Lc`) *at this cell's φ = 0.37* — small enough to look like noise on a
+   figure, which is the point.
+3. **Legacy replay regression**: the same four archived generations (`-t0-ar1`, `-w8-lc0`,
+   `-w8h-lc0-nuts`, `-w8h-lc0-m32t`) reconstructed under the old and new `10j_viz_utils.jl` and
+   compared — **bit-identical, max|old−new| = 0.0** on all four. A three-way fork that quietly
+   changes an existing branch is the easy mistake here.
+4. `DynamicPPL.TestUtils.AD.run_ad` against the ForwardDiff reference for ReverseDiff and Mooncake,
+   both degree models — `Lc` is now on the AD tape, so this is not a formality.
+
+**Open, and the reason to look at the refit rather than predict it:** until now φ was informed only
+by the age-pair residual field, which on the hurdle-Weibull path is nearly flat in time (p⁰ ≈ 0.95)
+— the standing explanation for why that path runs to the boundary under every parameterisation
+tried. The level is a second and much better-identified channel, so φ may come off 0.99. That is a
+hypothesis the grid can now test; it is not a claim, and it does not retire
+`constant_contacts = true` as the indicated action for the weighted path.
