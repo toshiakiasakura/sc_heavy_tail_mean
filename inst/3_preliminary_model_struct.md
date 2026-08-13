@@ -237,19 +237,6 @@ a variance is pinned at $0$; the tight $s$ is the only lever that reaches it.
 
 At the prior mean the PMF is $w \approx (0.799,\ 0.158,\ 0.033,\ 0.010)$.
 
-> **Deliberate override of the docx.** The analysis plan discretises the serial interval as
-> $w(s) = \big(F(s+1) - F(s-1)\big)\big/\big(F(S_{\max}+1) + F(S_{\max})\big)$ (citing Park 2024). We
-> use Munday's Eq 2 instead: it is what the implementation was asked to follow, it is what
-> `gen_interval_pmf` already computes, and its denominator is *exactly* the numerator sum — whereas the
-> docx's is not, since $\sum_{s=1}^{S}\!\big(F(s{+}1)-F(s{-}1)\big) = F(S{+}1)+F(S)-F(1)$. Taken
-> literally the docx weights therefore sum to $\approx 0.60$, not $1$, at the 5 d / 5 d centre (a
-> constant factor that would simply be absorbed into $\gamma_{\mathrm{SAR}}$, but it is not a PMF).
-> Once renormalised the two forms are in fact numerically close here —
-> $(0.795, 0.159, 0.036, 0.011)$ for the docx against $(0.799, 0.158, 0.033, 0.010)$ for Eq 2 — because
-> the docx numerator is just a two-lag moving sum of Eq 2's and the PMF decays sharply. So this
-> override of the usual "docx wins" rule is about correctness of form, not about materially different
-> weights.
-
 $w$ is a **per-draw** quantity: each Stage-2 posterior draw carries its own $(w_\mu,w_\sigma)$
 and hence its own $w$, which the forecast (§8) and the fit-window diagnostic must both use.
 
@@ -268,22 +255,18 @@ $N_{rr}=\text{susc}_r\cdot\text{inf}_r=\gamma_{\mathrm{SAR}}$, $r=\texttt{cfg.re
 comparable across origins — $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
 and $\text{inf}_b$ the **relative** infectivity of group $b$, both normalised so the reference bin
 $r = 4$ ("25-34") is $1$ ($\text{susc}_r=\text{inf}_r=1$; the other $A-1$ bins estimated), and
-$F \in (0,1)$ a **leaky** antibody-protection factor scaling susceptibility by the group's antibody
+$F$ a **leaky** antibody-protection factor scaling susceptibility by the group's antibody
 prevalence $A_a(t)$ (at $F=1$ antibodies confer no protection; smaller $F$ gives stronger
 protection). $C^\ast_{ab}$ is the per-capita effective contact matrix produced by the NGM builder
 (§5.1).
 
-> **⚠ THE ANTIBODY TERM IS CURRENTLY DISABLED.** `model_transmission` **pins $F \equiv 1$** instead
-> of sampling it, so $\text{full\_susceptibility}_a(t)=\text{susc}_a$ exactly and $A_a(t)$ drops out
-> of the NGM entirely. This is a deliberately **temporary** hard-code (the `F ~ Beta(5,1)` line sits
-> commented out immediately beside it in `joint_model.jl`) — everything else in this section
-> describes the model as it stands when the term is re-enabled. $F$ is dropped from the Stage-2
-> parameter space rather than left as an unused latent, but is still *returned* as the constant $1.0$
-> so every downstream consumer keeps working. `ngm.jl` is untouched: `build_ngm`/`full_susceptibility`
-> stay general and are simply called with $F=1$, so the $(F-1)$ multiplier is exactly $0$ — which is
-> NaN-safe only because `weekly_antibody` zero-fills rather than NaN-fills unmatched weeks (§2.3).
-> $F$ is Stage-2-only, so Stage-1 chains are unaffected and `contacts_label` was **not** bumped (it is
-> shared with Stage 1); cached `8j_s2_*` and the derived `9j_*` caches must be deleted by hand.
+**$F$ is pinned to $1$**, so $\text{full\_susceptibility}_a(t)=\text{susc}_a$ exactly, the $(F-1)$
+multiplier is $0$ and $A_a(t)$ does not enter the NGM. It is not a Stage-2 latent — dropping it from
+the parameter space rather than leaving it unused keeps it out of the Pathfinder approximation — but
+it is still *returned* as the constant $1.0$, so every downstream consumer takes the same shape.
+`ngm.jl` is deliberately left general: `build_ngm`/`full_susceptibility` take $F$ and are simply
+called with $1$. That is NaN-safe only because `weekly_antibody` zero-fills unmatched weeks rather
+than NaN-filling them (§2.3).
 
 **Antibody at the target week.** Inside the Stage-2 *fit* loop $A_a(t)$ is the week-$t$ antibody of
 the $t_0$-anchored infection window. In the **forecast** (§8) the frozen NGM instead uses
@@ -390,13 +373,6 @@ $C^\ast$ inherits its uncertainty. And a cell where the roster exists but no con
 $\langle k\rangle > 0$ and the $k_1 > 0$ guard in `base_contact` (§5.1) does not fire in that common
 case — the guard is still required for $n = 0$ rows, where $p^0$ can reach $1$.
 
-> **Deliberate override of the docx.** The analysis plan states: *"We do not estimate the parameter
-> $p_{0,xy}^{t}$ and use the empirical value from each survey for this parameter."* Fitting it
-> propagates the zero-probability uncertainty into $\langle k\rangle$, $\langle k^2\rangle$ and $g$,
-> which the empirical plug-in discards. This overrides the usual "docx wins" rule and is recorded as
-> such. The unweighted NegBin path (§4.1) is untouched — it is not a hurdle, and models its zeros
-> directly.
-
 ### 4.3 Dispersion / shape parameterisation (block-linear × week)
 
 The dispersion (NegBin $\log\phi$) or shape (Weibull $\log\kappa$) is a **per-child/adult-block**
@@ -427,16 +403,6 @@ The block mean is the **whole** term: there is no per-cell random effect and no 
 cells. With 49 ordered cells per week, many of them empty, per-cell dispersion is not identified by
 the data. The standing verification is that the **within-block SD of $\log d$ is identically $0$**
 (11j `plot_within_block_sd`).
-
-> **This departs from the analysis plan, deliberately.** The plan specifies a per-cell hierarchical
-> variance, $\log k^{t}_{xy} \sim \mathcal N\big(\mu^{t}_{k,XY},\ (\sigma^{t}_{k,XY})^2\big)$
-> (`inst/analysis_plan_heavy_tail_mean.md`; the hand-drawn `inst/media/image4.png`, *"variance is
-> hierarchical"*), with $\mu_{k,XY} \sim \mathrm{Gamma}(2,1/4)$ and
-> $\sigma_{k,XY} \sim \mathrm{Gamma}(2,1/2)$. Two departures: **(i)** the Gamma on the mean would
-> force the block **mean of $\log k$** above zero, i.e. $k > 1$, against the fitted values
-> ($\phi \approx 0.28$, $\kappa \approx 0.9$–$1.0$), so the block means keep Normal priors;
-> **(ii)** there is no per-block SD at all, because the per-cell variation it would govern is not
-> identified at these cell counts.
 
 #### Soft-clamping the composed value
 
@@ -487,9 +453,8 @@ N_i\,\mu_{i\to j} = N_j\,\mu_{j\to i},
 $$
 
 so the total number of $i\!\to\! j$ contacts equals that of $j\!\to\! i$ contacts. In code the offset
-is taken **relative to bin 1** (`logpop = log.(pop ./ pop[1])`): only relative population matters for
-reciprocity and the constant shift $\log N_1$ cancels in $N_i\mu_{i\to j}=N_j\mu_{j\to i}$, but it
-keeps the latent level $c$ at $O(1)$ rather than forcing $c\approx-15.6$ against its clamp.
+is taken **relative to bin 1** (`logpop = log.(pop ./ pop[1])`), which leaves reciprocity exact — the
+constant shift $\log N_1$ cancels — and keeps the latent level $c$ at $O(1)$.
 
 **Spatial kernel over the age-pair grid.** The 28 log-rates are smoothed by a non-centred GP over
 the age-pair coordinates, and the kernel smooths **both** directions of the age-pair plane. The age
@@ -511,15 +476,11 @@ $$
 
 So the kernel is **separable and anisotropic**: $\rho_{\text{diag}}$ smooths along total age and
 $\rho_{\text{gap}}$ across the age gap (assortativity), each a 1-D Matérn 3/2. It is unit-diagonal by
-construction ($m_{3/2}(0) = 1$ in both factors) and PSD as a product of PSD kernels. Because a
-product of two 1-D Matérns is a *separable process* rather than a 2-D Matérn,
-$\rho_{\text{diag}} = \rho_{\text{gap}}$ does **not** recover an isotropic Matérn. The $\sqrt 2$
+construction ($m_{3/2}(0) = 1$ in both factors) and PSD as a product of PSD kernels. Being a product
+of two 1-D Matérns it is a *separable process*, not a 2-D Matérn, so
+$\rho_{\text{diag}} = \rho_{\text{gap}}$ does **not** recover an isotropic kernel. The $\sqrt 2$
 normalisation keeps both $\rho$, `RHO_BOUNDS` and `gp_len_prior` on the age-year scale — so
 $\rho = 20$ is an effective age-difference length-scale of $20/\sqrt2 = 14.1$ yr.
-
-⚠ Do not "remove a direction" from this separable kernel by sending $\rho_{\text{gap}} \to \infty$:
-that correlates cells by equal **total age**, drops the projected kernel's rank 27→21, and makes
-`2-10|16-24` identically equal to `11-15|11-15`.
 
 **Separable spatio-temporal GP over age-pairs × weeks.** Over the $T_n$ contact weeks the field is
 *not* drawn independently each week. Each age-pair carries its own temporally-correlated log-rate,
@@ -532,26 +493,13 @@ K^{\text{time}}_{st} = \phi^{\,|s-t|}, \qquad \phi \in (0,1),
 \qquad L_{\text{time}} = \mathrm{chol}(K^{\text{time}} + 10^{-4} I).
 $$
 
-An AR(1) correlation matrix *is* the exponential (Matérn 1/2) kernel, so this is a choice of kernel
-*family* within the separable construction, not a change of structure: the matrix-normal gives every
-age pair its own temporal trajectory under one shared amplitude $\eta$, and the pairs stay correlated
-across age through $L_A$. The larger $10^{-4}$ jitter (against $10^{-6}$ spatially) keeps
-$L_{\text{time}}$ positive-definite in the near-pooled limit $\phi\to1$; do not reduce it — the
-Pathfinder call is not `try`/`catch`ed, so a `PosDefException` aborts the whole fit.
-
-*Why AR(1).* Measured at *matched effective rank* (equal temporal pooling, so the comparison is not
-confounded by how much smoothing each kernel applies), AR(1) gives $K^{\text{time}}$ minimum
-eigenvalue $2.7\times10^{-5} \to 5.1\times10^{-3}$ and $L_{\text{time}}$ column-scale spread
-$94.2 \to 23.1$ against Matérn 3/2 at effective rank $1.08$ — that column spread being the quantity
-that stalls NUTS ($\approx2.4$ in healthy chains, $228$–$274$ in chains that will not mix). The
-mechanism is that AR(1) is **Markov** — tridiagonal precision, polynomially-decaying eigenvalues — so
-it keeps spectral mass in the non-constant directions even at $\phi = 0.995$, exactly where Matérn
-3/2's spectrum has collapsed and $L_{\text{time}}$'s first column absorbs the whole field. It is a
-wash in the NegBin regime and helps the hurdle-Weibull path, whose likelihood wants near-constant
-contacts. ⚠ This is a *modelling* choice as well as a numerical one, and it has a real cost: AR(1)
-sample paths are non-differentiable, and memory is **longer** at long lag — at a matched lag-1
-correlation of $0.785$, lag-4 is $0.380$ against Matérn 3/2's $0.140$. That cost is accepted for the
-conditioning.
+An AR(1) correlation matrix *is* the exponential (Matérn 1/2) kernel; being Markov, it stays well
+conditioned in the near-pooled limit $\phi\to1$, at the cost of non-differentiable sample paths and
+a longer memory at long lag. The matrix-normal below gives every age pair its own temporal
+trajectory under one shared amplitude $\eta$, with the pairs correlated across age through $L_A$.
+The larger $10^{-4}$ jitter (against $10^{-6}$ spatially) keeps $L_{\text{time}}$ positive-definite
+as $\phi\to1$; ⚠ do not reduce it — the Pathfinder call is not `try`/`catch`ed, so a
+`PosDefException` aborts the whole fit.
 
 **The $P\times T_n$ structure field is drawn matrix-normal, non-centred, and constrained to sum to
 zero over the $P$ age pairs within each week.** Writing $Q\in\mathbb R^{P\times(P-1)}$ for the
@@ -570,26 +518,17 @@ $$
 
 so fixing a week gives the spatial kernel conditioned on $\sum_p R_{p,t}=0$, and fixing an age-pair
 gives a temporal GP with shared AR(1) coefficient $\phi$. This is the same GP **conditioned**, not
-approximated — verified to $6.7\times10^{-16}$ against $M K^{\text{age}} M + \text{jitter}\cdot M$ at
-the range corners, with $\max_t|\overline{R_{\cdot,t}}| \le 7.4\times10^{-16}$.
+approximated. The constraint is what separates $\eta$ from $\sigma_c$: without it the field's
+per-week mean over the pairs is a second copy of the level $c_t$ below, and the two amplitudes are
+confounded. $Z$ loses a row.
 
-*Why the constraint.* Nothing otherwise fixes the field's per-week mean over the pairs, and that mean
-is exactly what $c_t$ below already parameterises — so $\eta$ and $\sigma_c$ would be confounded, and
-increasingly so as the length-scales grow ($K^{\text{age}} \to J$, rank 1, in that limit). It is what
-makes the "decoupled amplitude" claim below true rather than aspirational. $Z$ loses a row; the
-dimension saving is incidental, identifiability is the point.
-
-*Consequence for $\eta$.* $K^{\text{age}}$ has unit diagonal but $M K^{\text{age}} M$ does not, so
-**$\eta$ is not exactly the marginal SD** — the field's SD is
-$\eta\sqrt{\operatorname{diag}(M K^{\text{age}} M)}$, measured at $\times0.709$–$\times1.076$ (mean
-$\times0.860$) at the `gp_len_prior` mode $\rho=20$, $\times0.861$–$\times1.018$ at $-2\sigma$ and
-$\times0.490$–$\times1.093$ at $+2\sigma$. The factor *exceeds* 1 for some cells: Matérn's slower
-off-diagonal decay leaves cells anti-correlated with the pair-mean, and projecting that mean out
-inflates them. The whole range sits inside a prior spanning $\times0.61$–$\times1.65$ at $\pm1\sigma$,
-so `gp_scale_prior` is unchanged — but this is a measured tolerance, not a negligible correction.
-⚠ Do **not** renormalise $A_p$ by $\operatorname{tr}(A_p)/P$ to "restore" the unit diagonal: as
-$\rho\to\infty$ that ratio is dominated by the jitter and the field degenerates to *white noise* of
-scale $\eta$, inverting the correct limit (field $\to 0$, $c_t$ carrying everything).
+$K^{\text{age}}$ has unit diagonal but $M K^{\text{age}} M$ does not, so **$\eta$ is not exactly the
+marginal SD** — the field's SD is $\eta\sqrt{\operatorname{diag}(M K^{\text{age}} M)}$, a factor of
+$\times0.71$–$\times1.08$ at the `gp_len_prior` mode. That sits well inside `gp_scale_prior`, which
+is therefore left as it is. ⚠ Do **not** renormalise $A_p$ by $\operatorname{tr}(A_p)/P$ to
+"restore" the unit diagonal: as $\rho\to\infty$ that ratio is dominated by the jitter and the field
+degenerates to *white noise* of scale $\eta$, inverting the correct limit (field $\to 0$, $c_t$
+carrying everything).
 
 **The overall weekly level** carries its own amplitude $\sigma_c$ **decoupled** from $\eta$, is
 **conditioned to sum to zero over the $T_n$ window weeks**, and is **not temporally smoothed at
@@ -610,24 +549,16 @@ log-rate field is $r_{p,t} = c_t + R_{p,t}$. The per-week marginal SD is
 $\sigma_c\sqrt{1-1/T_n} = 0.943$–$0.958\,\sigma_c$ over $T_n = 9..12$, so `gp_level_scale_prior`
 needs no rescaling.
 
-*Why sum-to-zero.* Without it, $c$ and the time-mean of the deviation are two parameterisations of
-one quantity: measured at correlation $-1.000$ exactly, with
-$\mathrm{SD}(c)\approx \mathrm{SD}(\text{dev})\approx 0.38$–$0.73$ but $\mathrm{SD}$ of their sum
-$=0.007$. ⚠ **The constraint applies to the LEVEL only** — the structure field's per-pair mean over
-weeks duplicates nothing, so constraining it would force every pair's structure to average to zero
-across the window: a model restriction rather than a reparameterisation. The field keeps the full
-$L_{\text{time}}$.
+The sum-to-zero projection identifies $c$ against the time-mean of the deviation, which would
+otherwise be two parameterisations of one quantity. ⚠ **It applies to the LEVEL only** — the
+structure field's per-pair mean over weeks duplicates nothing, so constraining that too would force
+every pair's structure to average to zero across the window: a model restriction rather than a
+reparameterisation. The field keeps the full $L_{\text{time}}$.
 
-*Why the level is iid in time.* The requirement is that the temporal kernel describe the individual
-age-pair trajectories and nothing else, so **$\phi$ reaches the likelihood only through
-$L_{\text{time}}$**. A second, structural benefit falls out: while the level was whitened through
-$\mathrm{chol}(Q_t^{\!\top} K^{\text{time}} Q_t + 10^{-4} I)$, the pooled limit annihilated it —
-$Q_t^{\!\top} J\, Q_t = 0$ *exactly*, so as $\phi\to1$ the projected kernel vanished however well
-conditioned $K^{\text{time}}$ was and the level died into the jitter. That cannot happen now. ⚠ It
-does **not** rescue the FIELD side: as $\phi\to1$, $L_{\text{time}}$'s first column still grows while
-its last shrinks until most of $Z$ stops reaching the likelihood, and that flat subspace is what an
-optimiser walks into. Restraining $\phi$ is the prior's job (below), and it is why removing the
-level's kernel did **not** make the kernel *family* irrelevant.
+The level carries no temporal kernel, so **$\phi$ reaches the likelihood only through
+$L_{\text{time}}$**, i.e. only as the per-age-pair temporal correlation. ⚠ As $\phi\to1$,
+$L_{\text{time}}$'s first column grows while its last shrinks until most of $Z$ stops reaching the
+likelihood; that flat subspace is restrained by $\phi$'s prior alone (below).
 
 The intercept is anchored at the grand mean
 $c_0 = \overline{\log(\text{emp mean})_{ij} - \log N_j}$ (so $c \sim \mathcal N(c_0,3^2)$).
@@ -642,9 +573,7 @@ stay interior so reciprocity is not distorted.
 ⚠ **$\phi$ carries no clamp at all** — it is $\mathrm{Beta}$-distributed on $(0,1)$ by construction
 and $\phi^k$ cannot overflow, so `RHO_TIME_BOUNDS` and the temporal soft-clamp are dead on this path
 (the constant is retained only so the read-only mirrors can replay archived Matérn-temporal chains).
-That absence is load-bearing in the wrong direction: **on this path the PRIOR is the entire
-restraint**, and under a Uniform prior the unconstrained logit-$\phi$ diverged towards the boundary
-in 58 % of hurdle-Weibull fits with nothing to stop it (§11).
+**On this path the prior is the entire restraint on $\phi$** (§6, §11).
 
 The kernels $L_A, L_{\text{time}}$, the sum-to-zero bases $Q, Q_t$, the spatial length-scales
 $\rho_{\text{diag}}, \rho_{\text{gap}}$, the AR(1) coefficient $\phi$ and the scales $\eta, \sigma_c$
