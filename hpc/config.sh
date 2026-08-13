@@ -14,7 +14,7 @@ PROJECT_DIR="${PROJECT_DIR:-/home/${HPC_USER}/prj_sc_heavy_tail_mean}"
 # The Singularity image, as produced by hpc/build_image.ps1 and uploaded by WinSCP.
 # ⚠ Set this to the actual file name docker2singularity printed — it embeds the build date, and a
 # grid is only comparable within one image.
-IMAGE_NAME="${IMAGE_NAME:-sc-heavy-tail-hpc-20260812.simg}"
+IMAGE_NAME="${IMAGE_NAME:-sc-heavy-tail-hpc_20260812.simg}"
 IMAGE="${IMAGE:-${PROJECT_DIR}/${IMAGE_NAME}}"
 
 # Where each array task's private, writable Julia depot is created. The bind-mounted project dir is
