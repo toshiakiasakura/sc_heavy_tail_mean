@@ -24,7 +24,6 @@ include("8j_viz_utils.jl")
 
 const REF_MODEL = "unweighted-negbin|mean-diagonal"  # relative-skill ref = the no-interaction model
 const WIS_SCALE = "log"                       # headline scale for WIS / coverage frames
-const LOGS_SCALE = "natural"                  # headline scale for the log score (see report_logscore)
 
 # ── Pandemic periods (Munday 2023, Table 2 / Gimma et al.) ────────────────────────────
 # Named UK COVID phases used to aggregate forecast skill over the epidemic timeline.
@@ -136,12 +135,11 @@ end
 # ── Forecast assembly + on-disk cache ─────────────────────────────────────────────────
 """
     assemble_or_load_forecasts(wins, combos, cfg; grid, raw, save_dir,
-                               cache_path, rebuild) -> (; qall, fc_store, truth_store, crps, skipped)
+                               cache_path, rebuild) -> (; qall, fc_store, crps, skipped)
 
 Reload the cached 8j chains for every `origin × combo` and assemble the forecast products
 used downstream: `qall` (long quantile table for WIS scoring), `fc_store`
-(`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `truth_store`
-(`origin → A×H` realized infections, so `score_logs` needn't re-read inc2prev per origin), `crps`
+(`(origin,label) → A×H×D` forecast fans for the forecast-vs-observed panels), `crps`
 (per-origin native CRPS cross-check) and `skipped` (origin×combo pairs whose reload threw).
 
 This loop (`two_stage_forecast` → `fit_or_load_stage2` → pooled draws, per origin × combo) is the
@@ -161,26 +159,24 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     origins = [w.origin for w in wins]
     if !rebuild && isfile(cache_path)
         c = load(cache_path)
-        # `truth_store` was added with the log score (2026-07-30); a cache written before that is
-        # missing the key, so treat it as stale rather than KeyError-ing downstream.
-        if c["origins"] == origins && c["labels"] == labels && haskey(c, "truth_store")
+        # Caches written 2026-07-30..2026-08-13 also carry a `truth_store` key (it existed only for
+        # the since-removed log score); `load` returns it and nothing reads it, so they stay valid.
+        if c["origins"] == origins && c["labels"] == labels
             println("assembly: loaded cache ", cache_path, " (", size(c["qall"], 1), " quantile rows)")
-            return (; qall = c["qall"], fc_store = c["fc_store"], truth_store = c["truth_store"],
+            return (; qall = c["qall"], fc_store = c["fc_store"],
                       crps = c["crps"], skipped = c["skipped"])
         end
-        @warn "assembly cache stale (origins/labels changed, or pre-truth_store) — rebuilding" cache_path
+        @warn "assembly cache stale (origins/labels changed) — rebuilding" cache_path
     end
 
     qtabs       = DataFrame[]
     fc_store    = Dict{Tuple{Date,String},Array{Float64,3}}()
-    truth_store = Dict{Date,Matrix{Float64}}()
     crps_rows   = NamedTuple[]
     skipped     = Tuple{Date,String}[]
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o    = load_window_data(win_o; grid = grid)
         truth_o = load_forecast_truth(win_o; grid = grid)
-        truth_store[win_o.origin] = Float64.(truth_o)
         # this origin's 4 contact/degree windows (reuse the single raw read); discarded after.
         apd_o = [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
                                      grid = grid, setting = :all,
@@ -209,9 +205,9 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     crps = DataFrame(crps_rows)
     println("quantile rows: ", size(qall), "   (", length(wins), " origins × ", length(combos),
             " combos; skipped ", length(skipped), ")")
-    jldsave(cache_path; qall, fc_store, truth_store, crps, skipped, origins, labels)
+    jldsave(cache_path; qall, fc_store, crps, skipped, origins, labels)
     println("assembly: wrote cache ", cache_path)
-    return (; qall, fc_store, truth_store, crps, skipped)
+    return (; qall, fc_store, crps, skipped)
 end
 
 # ── Scoring report ────────────────────────────────────────────────────────────────────
@@ -240,110 +236,6 @@ function report_forecast_scores(scores, wins, crps)
     CSV.write("../res/8j_scores_by_model_date.csv", scores.by_model_dt)           # both scales × origin
     CSV.write("../res/8j_scores_by_model_date_horizon.csv", scores.by_model_dt_h) # both scales × origin × horizon
     return by_mh_log
-end
-
-"""
-    report_logscore(logs, wins; scale = LOGS_SCALE) -> by_mh
-
-Print the headline log score (by model, and by model × horizon), restate the sanitisation tallies,
-and write the four `res/8j_logscore_*.csv` frames (both scales). Returns the by-model × horizon
-frame on `scale`, used by the log-score figure builders.
-
-The headline scale is **natural**, not log: unlike WIS — whose natural-scale values are dominated by
-the neighbourhood NGM's blow-ups — the log score is already a density-based quantity, and its
-log-scale variant additionally depends on the `pmax(·,0)+1` censoring applied in `score_logs`. Both
-scales are written to CSV.
-"""
-function report_logscore(logs, wins; scale::AbstractString = LOGS_SCALE)
-    by_mh = sort(@subset(logs.by_model_h, :scale .== scale), [:model, :horizon])
-    by_m  = sort(@subset(logs.by_model,   :scale .== scale), :log_score)
-
-    println("\n===== $(scale)-scale LOG SCORE by model (aggregated over horizons & ",
-            length(wins), " origins; lower = better) =====")
-    show(by_m, allcols = true); println()
-    println("\n===== $(scale)-scale log score by model × horizon (aggregated over origins) =====")
-    show(by_mh, allcols = true); println()
-    println("\nsanitisation: dropped ", logs.dropped.n, "/", logs.dropped.total,
-            " non-finite draws (", round(100 * logs.dropped.frac; digits = 3), "%); censored ",
-            logs.floored.n, "/", logs.floored.total, " negative draws at 0 for the log scale (",
-            round(100 * logs.floored.frac; digits = 3), "%); ",
-            logs.n_nonfinite_logscore, " non-finite unit scores")
-
-    CSV.write("../res/8j_logscore_by_model.csv", logs.by_model)
-    CSV.write("../res/8j_logscore_by_model_horizon.csv", logs.by_model_h)
-    CSV.write("../res/8j_logscore_by_model_date.csv", logs.by_model_dt)
-    CSV.write("../res/8j_logscore_by_model_date_horizon.csv", logs.by_model_dt_h)
-    return by_mh
-end
-
-# ── Log-score figures (siblings of the WIS ones) ──────────────────────────────────────
-"""`plot_logscore_by_horizon(logs, wins, cfg; scale)` — mean log score vs horizon, one line per
-model (sibling of `plot_wis_by_horizon`; lower = better)."""
-function plot_logscore_by_horizon(logs, wins, cfg; scale::AbstractString = LOGS_SCALE)
-    bmh = sort(@subset(logs.by_model_h, :scale .== scale), [:model, :horizon])
-    fig = plot(; xlabel = "horizon (weeks)", ylabel = "mean log score (lower = better)",
-               title = "8j — $(scale)-scale log score by horizon ($(length(wins)) origins)",
-               size = (760, 420), legend = :topleft, xticks = 1:length(cfg.horizons))
-    for m in unique(bmh.model)
-        sub = sort(@subset(bmh, :model .== m), :horizon)
-        plot!(fig, sub.horizon, sub.log_score; marker = :circle, lw = 2, label = m)
-    end
-    return fig
-end
-
-"""`plot_logscore_by_model_horizon(logs, labels, cfg; scale)` — grouped bars, model × horizon
-(sibling of `plot_wis_by_model_horizon`)."""
-function plot_logscore_by_model_horizon(logs, labels, cfg; scale::AbstractString = LOGS_SCALE)
-    bmh = @subset(logs.by_model_h, :scale .== scale)
-    Hn  = length(cfg.horizons)
-    M   = [only(@subset(bmh, :model .== m, :horizon .== h).log_score) for m in labels, h in 1:Hn]
-    return groupedbar(M; bar_position = :dodge,
-                      xticks = (1:length(labels), labels), xrotation = 20,
-                      label = reshape(["h=$h" for h in 1:Hn], 1, :),
-                      ylabel = "mean log score (lower = better)", legend = :topleft,
-                      title = "8j — $(scale)-scale log score by model × horizon",
-                      size = (950, 480), bottom_margin = 14Plots.mm, left_margin = 6Plots.mm)
-end
-
-"""`plot_logscore_over_time(logs; scale)` — mean log score per forecast origin, one line per model
-(sibling of `plot_wis_over_time`)."""
-function plot_logscore_over_time(logs; scale::AbstractString = LOGS_SCALE)
-    by_dt = sort(@subset(logs.by_model_dt, :scale .== scale), [:model, :forecast_date])
-    fig = plot(; xlabel = "forecast origin", ylabel = "mean log score (lower = better)",
-               title = "8j — $(scale)-scale log score over the available period",
-               size = (900, 420), legend = :topleft)
-    for m in unique(by_dt.model)
-        sub = @subset(by_dt, :model .== m)
-        plot!(fig, sub.forecast_date, sub.log_score; lw = 2, marker = :circle, ms = 2, label = m)
-    end
-    return fig
-end
-
-"""
-    plot_rel_logscore_by_horizon(logs, labels, model_cols, cfg; ref, scale) -> Plot
-
-Log score **relative to `ref`**, by horizon — the log-score analogue of panel A of
-`plot_rwis_bias_by_horizon`. Reported as a **difference** (`logs_m − logs_ref`), not a ratio: a log
-score is not sign-stable (it turns negative wherever the predictive density exceeds 1), so a ratio
-is uninterpretable. Below the zero line = better than the reference.
-"""
-function plot_rel_logscore_by_horizon(logs, labels, model_cols, cfg;
-                                      ref::AbstractString = REF_MODEL,
-                                      scale::AbstractString = LOGS_SCALE)
-    bmh   = @subset(logs.by_model_h, :scale .== scale)
-    ref_h = Dict(r.horizon => r.log_score for r in eachrow(@subset(bmh, :model .== ref)))
-    fig = plot(; xlabel = "horizon (weeks)", ylabel = "Δ log score (vs $(ref))",
-               title = "9j — log score relative to $(ref) ($(scale) scale; lower = better)",
-               titlefontsize = 10, legend = :topleft, legendfontsize = 6,
-               size = (860, 440), xticks = 1:length(cfg.horizons))
-    hline!(fig, [0.0]; color = :gray, ls = :dash, label = "")
-    for (ci, m) in enumerate(labels)
-        s = sort(@subset(bmh, :model .== m), :horizon)
-        isempty(s) && continue
-        d = s.log_score .- [get(ref_h, h, NaN) for h in s.horizon]
-        plot!(fig, s.horizon, d; color = model_cols[ci], lw = 2, marker = :circle, ms = 3, label = m)
-    end
-    return fig
 end
 
 # ── Fig 3 analog: relative WIS + bias (A,B) and age-stratified relative WIS (C) ────────

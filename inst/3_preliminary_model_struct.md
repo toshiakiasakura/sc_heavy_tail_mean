@@ -871,7 +871,7 @@ For one $(dm, nb, \text{origin}, h)$:
 that single Stage-2 fit instead of $D$ from each of $M$. $M=1$ is deliberate: the null model has no
 contact-degree uncertainty to propagate, so repeating $100$ identical Pathfinder fits would inject
 only fit-to-fit approximation noise, at $100\times$ the cost. The pooled draw count — and hence
-comparability of WIS/log score — is preserved. `prefit_stage1!` drops such degree models up front,
+comparability of WIS — is preserved. `prefit_stage1!` drops such degree models up front,
 so **no `8j_s1_no-contact_*` file is ever written**.
 
 **Seeding and concurrency.** `cfg.seed = 1236`. Each Stage-1 fit is handed a fresh
@@ -1001,33 +1001,8 @@ The primary metric is the **weighted interval score (WIS)** computed by the R pa
   unusable forecast for N% of its units" is a more important result than the WIS of the remainder.
 - A native sample **CRPS** (energy form) provides a cheap cross-check.
 
-### 9.1 Log score
-
-Reported **alongside** WIS. Note the naming trap: the "log-scale WIS" above is WIS computed after a
-log *transform* of forecasts and observations; the **log score** is the logarithmic *scoring rule*
-$-\log f(y)$ of the predictive density. `scoringutils` defines it only for the **sample** forecast
-class (`as_forecast_sample` ⟹ `scoringRules::logs_sample`, a Gaussian-KDE estimate) — it is *not*
-available for the quantile class the WIS path uses — so `scoring.jl` carries a second R path:
-
-- `to_sample_long` emits one row per (age × horizon × retained draw), and `score_logs` scores
-  **one origin at a time**. `score()` returns one row per forecast unit, so the accumulated per-unit
-  table stays small while the per-origin sample table handed to R is $\sim10^5$ rows; a single global
-  table would be $\sim10^8$.
-- Two sanitisations, both **counted and reported** rather than silently applied: (i) non-finite
-  draws are dropped — `two_stage_forecast` deliberately keeps $\pm\infty$ draws, which the KDE
-  cannot consume, and dropping them narrows the retained fan; (ii) draws are thinned to
-  `n_sample` (default $1000$) per cell on a deterministic even grid.
-- Scored on both scales, mirroring `score_wis`'s output frames (`res/8j_logscore_*.csv`). The
-  log-scale copy is built **explicitly** (`log(pmax(\cdot,0)+1)`) rather than with
-  `transform_forecasts(log_shift)`, because individual sample draws can be negative
-  ($\text{draw}=\hat I + \sigma\varepsilon$) and `log_shift` would return `NaN`;
-  $\mathrm{pmax}(\cdot,0)$ censors at the model's support. The **headline scale is natural**, since
-  the log-scale variant additionally depends on that censoring.
-- Relative log score is reported as a **difference** vs the reference model, never a ratio: a log
-  score is not sign-stable (it goes negative wherever the predictive density exceeds 1).
-
-The relative-skill reference (`REF_MODEL`, for both relative WIS and relative log score) is the
-**no-interaction** model `unweighted-negbin|mean-diagonal`.
+The relative-skill reference (`REF_MODEL`) for relative WIS is the **no-interaction** model
+`unweighted-negbin|mean-diagonal`.
 
 ---
 
@@ -1093,7 +1068,7 @@ the null needs none) and Stage-2 pooled files (24 = 6 combos × 4 horizons) are 
 assembled, and the degree data discarded. The two baselines therefore cost one extra model's worth of
 Stage-2 fits plus 4 cheap fits per origin.
 
-**Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`), log scores (`res/8j_logscore_*.csv`)
+**Outputs.** Quantile scores (`res/8j_scores_by_model*.csv`)
 and diagnostic figures: WIS by horizon, four-ways WIS bars, WIS over the forecast period,
 forecast-vs-observed fans by origin, and fitted transmission structure — susceptibility/infectivity
 ratios to the reference group, and the two spatial GP length-scales

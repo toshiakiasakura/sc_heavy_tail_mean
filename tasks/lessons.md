@@ -734,7 +734,7 @@ hierarchy; 2026-08-02 `-rhs` regularised horseshoe). The current model is block-
   problem. Use the `view(τ, :, t)` function form everywhere in an argument list — the rule is not
   specific to `_cell_moments!` where it was first documented.
 
-## Null + no-interaction baselines and the log score 2026-07-30 (`inst/6_null_interaction_model.md`)
+## Null + no-interaction baselines 2026-07-30 (`inst/6_null_interaction_model.md`)
 
 - **Read the existing forecast path before "adding" future contacts.** The spec asks that the
   no-interaction model "be allowed to use the future mean contacts". It already is: for horizon `h`,
@@ -762,19 +762,11 @@ hierarchy; 2026-08-02 `-rhs` regularised horseshoe). The current model is block-
   the log-normal prior's pull, not error) and median R unchanged to 0.3%. Corollary: use **M = 1**
   dummy moment draw with `n_draw = 100×100`, not 100 identical draws — there is no contact
   uncertainty to propagate, so 100 refits would add only fit-to-fit noise at 100× the cost.
-- **`scoringutils` computes `log_score` ONLY for the sample forecast class** (`as_forecast_sample`
-  → `scoringRules::logs_sample`, KDE) — never for quantile forecasts, so it cannot be a flag on the
-  existing `score_wis`. It needs a second R path over the raw draws. Two traps there: the KDE cannot
-  consume the `±Inf` draws `two_stage_forecast` deliberately keeps, and `log_shift` returns `NaN` on
-  the negative draws a Gaussian fan contains (the quantile path rarely hits this because the 5%
-  quantile is usually positive). Build the log-scale copy explicitly with `log(pmax(·,0)+1)`, and
-  **count and print** every dropped/censored draw. Score **one origin at a time**: `score()` returns
-  one row per forecast unit, so the accumulated table stays small while a single global sample table
-  would be ~10⁸ rows.
-- **Relative log score must be a DIFFERENCE, not a ratio** — a log score is not sign-stable (it goes
-  negative wherever the predictive density exceeds 1), unlike WIS.
-- **Naming trap**: "log-scale WIS" (`transform_forecasts(log_shift)`) is WIS after a log *transform*
-  and is **not** a log score. The repo had the former since 2026-07-12 and none of the latter.
+- **Naming trap, still live**: "log-scale WIS" (`transform_forecasts(log_shift)`) is WIS after a log
+  *transform*, and is the headline metric. It is **not** a log score. A genuine log score (the
+  logarithmic scoring rule via `scoringutils`' sample class) was added here on 2026-07-30 and
+  **removed on 2026-08-13** at user request; the two are still easy to confuse by name, so read
+  `WIS_SCALE`/`scale == "log"` as the *transform*, never as a scoring rule.
 - Per-model panel figures (`plot_ratio`, `plot_ratio_bins`, `plot_lengthscales`) were hard-coded
   `layout = (2, 2)` from when there were exactly four models — they silently lose panels at six.
   Fixed with `panel_grid(np)`; this is the 2026-07-15 "derive the layout" lesson biting again.
@@ -1873,8 +1865,8 @@ flatter the worst model. The log scale cannot represent it at all. So:
   append = FALSE))` where `dt_pos` truncates `predicted` at 0;
 - `rbind` the two and **re-attach `attr(sc, "metrics")`** — `rbind` on a `scores` object drops it and
   `summarise_scores()` then fails with "Input needs an attribute `metrics`";
-- the truncation is **counted, returned (`n_negative`, `negative_by_model`) and `@warn`ed**, matching
-  the rule `to_sample_long` already follows for its own sanitisations.
+- the truncation is **counted, returned (`n_negative`, `negative_by_model`) and `@warn`ed**, never
+  silently applied.
 
 **Verified two ways**: identical to `transform_forecasts(append = TRUE)` to 1e-12 on synthetic clean
 data, and an **exact no-op** (max |Δwis| = 0.000e+00) on the five real models that have no negative

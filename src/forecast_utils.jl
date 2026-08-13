@@ -22,8 +22,7 @@
 #     fit_stage1, stage2_inputs, fit_stage2_pooled, two_stage_forecast, build_degree_stats,
 #     null_contact_level / null_moment_draws,
 #     prefit_stage1! / prefit_stage2! / prefit_two_stage!               (joint_model.jl)
-#   to_quantile_long, score_wis, to_sample_long, score_logs,
-#     crps_sample, mean_crps                                           (scoring.jl)
+#   to_quantile_long, score_wis, crps_sample, mean_crps                (scoring.jl)
 #
 # Run scripts/notebooks from `src/` — relative data paths assume `cwd == src/`.
 # `score_wis` additionally requires the R `scoringutils` package (install once with
