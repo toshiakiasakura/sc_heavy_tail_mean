@@ -5,6 +5,7 @@ WORKDIR /workdir
 EXPOSE 8888
 
 RUN JULIA_PROJECT=/workdir
+ENV JULIA_DEPOT_PATH=":/opt/julia"
 ENV DEVCONTAINER=TRUE
 
 # TODO: Activate checkpoint and install packages.

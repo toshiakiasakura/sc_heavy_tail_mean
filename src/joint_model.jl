@@ -834,6 +834,36 @@ stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
     joinpath(save_dir, "8j_s2_$(degree_label(dm))_$(ngm_label(nb))_$(contacts)_$(origin)_h$(h).jld2")
 
 """
+    _atomic_jldsave(path; kwargs...)
+
+`jldsave` to a sibling temporary file, then `mv` onto `path`. Use this for EVERY grid artefact.
+
+A plain `jldsave(path; …)` writes in place, so a process killed mid-write leaves a TRUNCATED
+`.jld2` — and every skip-check in this codebase (`fit_or_load_stage1`, `prefit_stage1!`/
+`prefit_stage2!`, `8j_run_grid.jl`'s `s1_missing`/`s2_missing`, 11j's up-front assert) tests
+`isfile`, so a truncated file counts as COMPLETE. The grid then reports itself finished and fails
+later at read time, one cell at a time. Rare on a workstation, routine under Slurm: the time limit
+arrives as SIGTERM→SIGKILL at an arbitrary instant, and NUTS artefacts are ~28/72 MB, i.e. a wide
+window to be interrupted in. `mv` within one filesystem is a rename and therefore atomic — the
+target either is the old file or the complete new one.
+
+The temp name carries pid and thread id because `prefit_*!` fan out over threads, and lives beside
+the target so the rename cannot cross a filesystem. `.tmp.*` does not match the `8j_s1_*`/`8j_s2_*`
+globs the audit and readers use.
+"""
+function _atomic_jldsave(path::AbstractString; kwargs...)
+    tmp = string(path, ".tmp.", getpid(), ".", Threads.threadid())
+    try
+        jldsave(tmp; kwargs...)
+        mv(tmp, path; force = true)
+    catch
+        isfile(tmp) && rm(tmp; force = true)
+        rethrow()
+    end
+    return path
+end
+
+"""
     _stage1_init(model, z_scale, rng, cfg)
 
 Explicit starting point for the Stage-1 LBFGS path, as an **unconstrained** vector.
@@ -1125,8 +1155,9 @@ end
     fit_or_load_stage1(path, dm, ds, pop, cfg; adtype, rng) -> (; chn)
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
-(`jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts, nuts_draws,
-phi_init_scale)`). Idempotent skip ⇒ resumable prefit.
+(`_atomic_jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts,
+nuts_draws, phi_init_scale)` — temp file then rename, so a killed process cannot leave a truncated
+artefact that the `isfile` skip counts as done). Idempotent skip ⇒ resumable prefit.
 
 `sampler` (`:pathfinder`/`:nuts`), `diag` (`_nuts_diagnostics`), `ad_backend` (`cfg.ad_backend`),
 `target_accept` (`cfg.stage1_nuts_target_accept`, raised 0.9→0.95 on 2026-08-06), the NUTS
@@ -1170,12 +1201,12 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
     # NOTHING visible records: same token, same dimensions, same key set. That is strictly worse than
     # the `ad_backend` case, where at least the draws differ chaotically rather than systematically.
     # Applies on BOTH paths — Pathfinder consumes it directly, NUTS inherits it through `_pf_mean_init`.
-    jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
-                  ad_backend = res.ad_backend,
-                  target_accept = cfg.stage1_nuts_target_accept,
-                  nuts_adapts = cfg.stage1_nuts_adapts,
-                  nuts_draws  = cfg.stage1_nuts_draws,
-                  phi_init_scale = cfg.stage1_phi_init_scale)
+    _atomic_jldsave(path; result = res.chn, sampler = res.sampler, diag = res.diag,
+                          ad_backend = res.ad_backend,
+                          target_accept = cfg.stage1_nuts_target_accept,
+                          nuts_adapts = cfg.stage1_nuts_adapts,
+                          nuts_draws  = cfg.stage1_nuts_draws,
+                          phi_init_scale = cfg.stage1_phi_init_scale)
     return (; chn = res.chn)
 end
 
@@ -1356,12 +1387,100 @@ function _darwin_available_gib()
 end
 
 """
-Available RAM (GiB), per platform: Linux `/proc/meminfo` `MemAvailable` (counts reclaimable
-cache); macOS `vm_stat` free+inactive+speculative (see `_darwin_available_gib` — the old
-`/proc/meminfo`-then-`Sys.free_memory` fallback under-reported by ~7× on darwin and forced
-`fit_concurrency` to 1); anything else `Sys.free_memory`.
+Memory headroom (GiB) inside a Slurm allocation, or `nothing` when not under Slurm / not
+determinable.
+
+`/proc/meminfo` is the WRONG source on a compute node: it reports the whole machine (LSHTM's new
+nodes are 96 cores / 768 GB), not the cgroup the job is confined to. Under that reading
+`fit_concurrency`'s memory cap never binds and `8j_run_grid.jl`'s `MEM_FLOOR_GIB` early-exit — the
+guard that exists *because* the 63-origin run was OOM-killed twice — can never fire. The job is then
+killed by the cgroup OOM killer with SIGKILL, which leaves nothing in the log at all.
+
+Limit, in order of preference: cgroup v2 `memory.max` (resolved through `/proc/self/cgroup`, which
+is what makes this work inside a Singularity container sharing the host's cgroup hierarchy) →
+cgroup v1 `memory.limit_in_bytes` → Slurm's own `SLURM_MEM_PER_NODE` / `SLURM_MEM_PER_CPU ×
+SLURM_CPUS_PER_TASK` (MB). Usage is **current** `VmRSS` from `/proc/self/status`, never
+`Sys.maxrss()` — that is a high-water mark and monotone by construction, so it cannot say how much
+has since been freed.
+
+A cgroup with no limit reads `"max"` (v2) or a sentinel near `typemax` (v1); both are rejected so
+the caller falls through to the ordinary reading.
+"""
+function _slurm_mem_available_gib()
+    haskey(ENV, "SLURM_JOB_ID") || return nothing
+    limit_bytes = nothing
+    try
+        # cgroup v2: /proc/self/cgroup is "0::<path>" and the controller file lives at
+        # /sys/fs/cgroup<path>/memory.max. Walk up: the limit may be set on an ancestor.
+        for line in eachline("/proc/self/cgroup")
+            parts = split(line, ':'; limit = 3)
+            length(parts) == 3 && parts[1] == "0" || continue
+            dir = joinpath("/sys/fs/cgroup", lstrip(parts[3], '/'))
+            while true
+                f = joinpath(dir, "memory.max")
+                if isfile(f)
+                    v = strip(read(f, String))
+                    if v != "max"                  # "max" = no limit here; an ancestor may set one
+                        limit_bytes = parse(Int, v)
+                        break
+                    end
+                end
+                d = dirname(dir)
+                (d == dir || !startswith(d, "/sys/fs/cgroup")) && break
+                dir = d
+            end
+            break                                  # v2 has exactly one "0::" line
+        end
+    catch
+    end
+    if limit_bytes === nothing                                    # cgroup v1
+        try
+            f = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+            if isfile(f)
+                v = parse(Int, strip(read(f, String)))
+                v < (Int(1) << 60) && (limit_bytes = v)           # unlimited reads ~typemax
+            end
+        catch
+        end
+    end
+    if limit_bytes === nothing                                    # Slurm's own accounting, MB
+        try
+            mb = if haskey(ENV, "SLURM_MEM_PER_NODE")
+                parse(Float64, ENV["SLURM_MEM_PER_NODE"])
+            elseif haskey(ENV, "SLURM_MEM_PER_CPU")
+                parse(Float64, ENV["SLURM_MEM_PER_CPU"]) *
+                    parse(Float64, get(ENV, "SLURM_CPUS_PER_TASK", "1"))
+            else
+                0.0
+            end
+            mb > 0 && (limit_bytes = round(Int, mb * 2^20))
+        catch
+        end
+    end
+    limit_bytes === nothing && return nothing
+    rss_bytes = 0
+    try
+        for line in eachline("/proc/self/status")
+            startswith(line, "VmRSS:") && (rss_bytes = parse(Int, split(line)[2]) * 1024; break)
+        end
+    catch
+        return nothing
+    end
+    return max(0.0, (limit_bytes - rss_bytes) / 2^30)
+end
+
+"""
+Available RAM (GiB), per platform: **inside a Slurm allocation** the cgroup headroom
+(`_slurm_mem_available_gib` — `/proc/meminfo` would report the whole compute node); Linux
+`/proc/meminfo` `MemAvailable` (counts reclaimable cache); macOS `vm_stat`
+free+inactive+speculative (see `_darwin_available_gib` — the old `/proc/meminfo`-then-
+`Sys.free_memory` fallback under-reported by ~7× on darwin and forced `fit_concurrency` to 1);
+anything else `Sys.free_memory`.
 """
 function _mem_available_gib()
+    let slurm = _slurm_mem_available_gib()      # `nothing` unless SLURM_JOB_ID is set
+        slurm === nothing || return slurm
+    end
     if Sys.islinux()
         try
             for line in eachline("/proc/meminfo")
@@ -1559,7 +1678,7 @@ function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                 # deliberately NOT in the filename, so the file is the only evidence of how the
                 # draws were produced. Pathfinder's LBFGS path is chaotic, so a grid half-fitted
                 # under each backend is not bit-comparable even though the gradients agree.
-                jldsave(s.path; pooled, ad_backend = cfg.stage2_ad_backend)
+                _atomic_jldsave(s.path; pooled, ad_backend = cfg.stage2_ad_backend)
                 fitted += 1
             catch err
                 failed += 1
@@ -1614,7 +1733,7 @@ function fit_or_load_stage2(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
     inp = stage2_inputs(dm, apd_h, win0, wd0, cfg, s1p; adtype = adtype, rng = Random.Xoshiro(cfg.seed))
     pooled = fit_stage2_pooled(nb, inp.md, wd0, cfg; n_draw = inp.n_draw, adtype = s2_adtype,
                                base_seed = cfg.seed + 1000 * h)
-    jldsave(s2p; pooled, ad_backend = cfg.stage2_ad_backend)
+    _atomic_jldsave(s2p; pooled, ad_backend = cfg.stage2_ad_backend)
     return pooled
 end
 

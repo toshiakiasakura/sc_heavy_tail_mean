@@ -1,0 +1,59 @@
+# Dockerfile.hpc — the image that becomes the LSHTM HPC Singularity container.
+#
+# NOT the devcontainer. `.devcontainer/Dockerfile` is an interactive development image (Node.js,
+# Claude Code, RTK, VS Code plumbing) whose Julia depot is an empty named volume, so every Slurm job
+# built from it would re-download and re-precompile the whole Turing stack on a compute node that
+# has no network. This image exists to be run non-interactively by `singularity exec`, so it:
+#
+#   • drops everything interactive;
+#   • BAKES the instantiated + precompiled depot into /opt/julia (the whole point);
+#   • is world-readable, because Singularity runs the container as the HOST user (lsh…), not jovyan.
+#
+# Build + convert:  hpc/build_image.ps1        Runbook:  hpc/README.md
+#
+# ⚠ REBUILD WHENEVER Manifest.toml CHANGES. The mounted /workdir supplies Project.toml/Manifest.toml
+# at run time while the packages come from the image; if they disagree, Pkg wants to resolve, and a
+# compute node cannot. `hpc/README.md`'s preflight (`Pkg.status()`) is the check.
+
+FROM quay.io/jupyter/datascience-notebook:julia-1.12.4
+
+USER root
+WORKDIR /workdir
+
+# JULIA_PROJECT/JULIA_DEPOT_PATH must be real ENV, not `RUN VAR=…` (which is a shell assignment in a
+# throw-away layer — the devcontainer's line 7 has always been a no-op).
+#   At RUN TIME the Slurm scripts override JULIA_DEPOT_PATH with "<per-job depot>:/opt/julia", giving
+# each job a private writable depot in front of this read-only one. See hpc/s1_array.slurm.
+ENV JULIA_PROJECT=/workdir
+ENV JULIA_DEPOT_PATH=/opt/julia
+
+# R packages. `scoringutils` (v2) is the one the devcontainer image never actually had despite
+# CLAUDE.md listing it; the rest mirror the devcontainer so the two environments do not diverge.
+# The fitting path itself never enters R — scoring.jl's library() calls are inside functions — but a
+# scoring job run from this image must not need a second image.
+RUN R -e "install.packages(c('socialmixr','jsonlite','here','tableone','broom','MGLM','scoringutils'), repos='https://cloud.r-project.org')" && \
+    R -e "stopifnot(all(c('socialmixr','MGLM','scoringutils') %in% rownames(installed.packages())))"
+
+# Pin the registry by clone rather than by Pkg's tarball (docx §2-1: "For reproducibility,
+# General.git should be fetched from the GitHub repository").
+RUN rm -rf /opt/julia/registries && \
+    mkdir -p /opt/julia/registries && \
+    git clone --depth 1 https://github.com/JuliaRegistries/General.git /opt/julia/registries/General
+
+# THE POINT OF THIS IMAGE: packages AND precompile caches baked into /opt/julia. Only the two
+# environment files are copied — the source tree arrives at run time on the bind mount, so editing
+# src/*.jl never invalidates the image, while changing Manifest.toml does.
+COPY Project.toml Manifest.toml /workdir/
+RUN julia --project=/workdir -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()' && \
+    julia --project=/workdir -e 'using Pkg; Pkg.status()'
+
+# Force the heavy load path into the depot's compile cache once, so a Slurm task pays seconds rather
+# than minutes at `include("forecast_utils.jl")`. (This is NOT a sysimage — deliberately: a sysimage
+# would not remove Mooncake's per-model `build_rrule` warm-up, which `prefit_stage1!` handles.)
+RUN julia --project=/workdir -e 'using Turing, Pathfinder, Mooncake, ReverseDiff, Plots, RCall, JLD2, Arrow; println("warm ok")'
+
+# Singularity runs as the invoking HOST user, whose uid matches neither root nor jovyan. Without
+# this the baked depot is unreadable and every job silently falls back to resolving from scratch.
+RUN chmod -R a+rX /opt/julia /workdir
+
+ENV GKSwstype=100
