@@ -780,9 +780,14 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
     # 5-day GI is shorter than a week, so meanlog = −0.683 < 0 is REQUIRED. Hence `abs(...)` on the
     # SD and no truncation on w_mu. Deliberate, documented departure from the printed table.
     #
-    # Soft-clamps are outer safety bounds (codebase idiom), far outside the prior's ±2 SD:
-    # w_mu ∈ [log(1/7), log 3] ⇒ GI mean ≈ 1 day .. 3 weeks; w_sigma ∈ [0.02, 4]. At either bound
-    # F(smax) ≥ 0.55, so gen_interval_pmf_log's division by F(smax) cannot blow up.
+    # Soft-clamps are outer safety bounds (codebase idiom): `W_MU_BOUNDS` = [log(1/28), log 3] ⇒ GI
+    # mean ≈ 0.25 day .. 3 weeks, `W_SIGMA_BOUNDS` = [0.002, 4], at the tighter width `W_GI_SOFT`
+    # = 0.05. At either bound F(smax) ≥ 0.5572, so gen_interval_pmf_log's division by F(smax) cannot
+    # blow up. ⚠ Read the `W_MU_BOUNDS` docstring (framework.jl) before touching these — the box was
+    # WIDENED on 2026-08-05 because the previous one ([log 1/7, log 3], [0.02, 4]) was NOT "far
+    # outside the prior's ±2 SD" as this comment used to claim: w_sigma is a log-VARIANCE whose prior
+    # mode sits 0.673 above its old floor, so the clamp displaced it by 2.8 prior SDs and the model
+    # ran a 6.91 d / 9.65 d GI at the intended 5/5 centre.
     #
     # ⚠ IDENTIFIABILITY: w and gamma_sar are confounded — both scale the renewal predictor, so
     # raising w₁ and lowering gamma_sar nearly compensate over an 8-week window. The 20% prior SD
@@ -899,7 +904,7 @@ fit is healthier too (`log_eta` closer to its prior mean, `max|z|` down). That m
 itself because `_pf_mean_init` hands the Pathfinder mean to NUTS as `initial_params` — a finite logit
 is a workable NUTS start, `logit(1.0)` is not.
 
-⚠ **It does not IDENTIFY φ.** The initialisation probe (`inst/3` §12.6) held everything fixed but φ₀
+⚠ **It does not IDENTIFY φ.** The initialisation probe (`tasks/lessons.md`; caveat restated in `inst/3` §11) held everything fixed but φ₀
 and found the final φ largely determined by the start on both degree models (hurdle-Weibull
 0.011→1.000 non-monotonically, NegBin 0.150→0.726). A defined, reproducible start replaces an
 arbitrary one; it does not make the data informative. Read φ from NUTS, not from Pathfinder.
@@ -1798,7 +1803,8 @@ the baseline `win0.origin` (t₀); for each horizon `h` the Stage-2 pooled draws
 `m = post_index[d]`) the NGM
 `N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd0.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
 takes one renewal step against the history (observed lags up to t₀ plus the intervening horizons'
-MEAN forecasts — per-draw coherence across horizons is undefined, mirroring the former
+predictions, plugged as the MEDIAN over finite draws — see `step_plug` below for why not the mean;
+per-draw coherence across horizons is undefined either way, mirroring the former
 `iterated_forecast`). `apd_by_h[hi]` (optional) is the pre-built horizon-window `AgePairData`.
 
 Two things changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
