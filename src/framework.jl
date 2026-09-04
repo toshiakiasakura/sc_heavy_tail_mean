@@ -649,13 +649,21 @@ Resolves to the per-week (`constant_contacts=false`) regime — the setting ever
 since `stage1_use_nuts` became the default on 2026-08-05, to the **NUTS** sampler generation, i.e. it
 now carries the `-nuts` suffix.
 
-⚠ **That is a live migration, not a no-op.** Since `-w8h-lc0` (2026-08-09) NOTHING has been fitted
-under this token at all: the only complete 504/1512-file grid on disk is the *Pathfinder* `-t0-ar1`
-generation, reached by `CONTACTS_TOKEN_AR1` below (and, two generations back, `CONTACTS_TOKEN_PF`).
-Until the `-w8h-lc0` grid has actually been fitted, the read-only viz helpers that default to this
-constant (`stage1_chain_path`, `reconstruct_p0_draws`, `reconstruct_tau_draws`, the 9j/10j/11j
-figures) will find **no files**. Point them at `CONTACTS_TOKEN_AR1` to read the existing generation,
-exactly as `plot_within_block_sd` already does with `CONTACTS_TOKEN_HD`.
+✅ **THE MIGRATION IS DONE (2026-09-04): this token now names the complete grid.** `dt_intermediate/`
+holds 504 `8j_s1_*` + 1512 `8j_s2_*` under `temporal-w8h-lc0-nuts` — both degree models × 63 origins
+(2020-10-18 … 2021-12-26) × h1–4 × the six combos — fitted on the HPC with NUTS/Mooncake. So the
+read-only helpers that default to this constant (`stage1_chain_path`, `reconstruct_p0_draws`,
+`reconstruct_tau_draws`, the 9j/10j/11j/12j figures) now hit the grid by default, and the hazard has
+INVERTED: what breaks is pointing a notebook AWAY from `-nuts`, which is why 9j/10j/13j had their
+`ENV["STAGE1_USE_NUTS"]` defaults corrected the same day. Audit with `audit_stage1_grid` (14j §0).
+
+⚠ **The grid predates the φ-boundary guard** (`stage1_phi_pf_max`, commit a5d611b 2026-08-11): it was
+fitted from the `hpc` branch tip, so all 504 files lack the `phi_pf_max`/`phi_pf_override` keys. That
+is a NUTS *starting value* setting, absent UNIFORMLY, and diffing the fitting source against HEAD the
+φ init is the only functional change — `model_degree`, every prior, `n_fit`, `horizons`, `ref_bin` and
+`contacts_label` are identical. So the chains are one interchangeable generation drawn from the same
+posterior. But a single cell refitted under current code WOULD carry those keys and make the grid
+mixed, which `audit_stage1_grid` then fails. Do not refit piecemeal; regenerate wholesale or not at all.
 
 It is a load-time constant built from the **default** `FrameworkConfig`. The token no longer encodes
 any dispersion prior (it did while the horseshoe's τ₀ was being tuned), so it is stable again — but
@@ -677,26 +685,27 @@ string, because the config that produced it no longer exists. Its Stage 1 has th
 `z` (28×12 = 336 coordinates, 402/990 total), which is why `reconstruct_mu_draws` must branch on the
 field construction rather than assume the current one.
 
-This is a live constant, not a historical note — it is how the 9j/10j/11j viz reaches the existing
-grid while the current generation is being fitted, and how the two are read side by side afterwards.
-Unlike `CONTACTS_TOKEN_HD` it needs NO separate directory: both live in `dt_intermediate/`,
-distinguished by the suffix alone."""
+⚠ **NOTHING ON DISK CARRIES THIS TOKEN ANY MORE (verified 2026-09-04).** The only two generations
+in the tree are `temporal-w8h-lc0-nuts` (`dt_intermediate/`) and `temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1`
+(`dt_intermediate_ar1/`). It was once true that this token needed no separate directory because its
+chains sat in `dt_intermediate/` alongside the current ones; they have since been cleared out. Keep
+the constant — `is_legacy_token` and the `reconstruct_*` guards are written against the whole family
+of retained tokens, and a `-pf` archive may reappear — but do not expect it to resolve to files."""
 const CONTACTS_TOKEN_PF = "temporal-gsar-cut-sc-p0-gi"
 
 """The `-t0-ar1` generation's token — the 12-week contact window with an AR(1)-smoothed level, i.e.
 everything up to but not including `-w8h-lc0` (2026-08-09).
 
-⚠ **THIS IS THE ONLY COMPLETE GRID ON DISK** (504 `8j_s1_*` / 1512 `8j_s2_*`, fitted with
-PATHFINDER — the `-ar1-nuts` run was killed at 1 of 504). 9j/10j/11j default
-`ENV["STAGE1_USE_NUTS"]` to `"false"` precisely so they read a generation that exists, so until the
-`-w8h-lc0` grid has actually been fitted this constant is what the read-only viz must be pointed at.
-Omit it and every lookup misses — and 9j/10j do not fail: `two_stage_forecast` → `fit_or_load_stage2`
-FITS on miss, serially, while 10j renders blank panels with a warning (see CLAUDE.md's first Gotcha).
+⚠ **NO LONGER THE ONLY COMPLETE GRID, AND NO LONGER WHAT THE NOTEBOOKS READ** (504 `8j_s1_*` /
+1512 `8j_s2_*`, fitted with PATHFINDER — the `-ar1-nuts` run was killed at 1 of 504). As of
+2026-09-04 the current `-w8h-lc0-nuts` grid is complete in `dt_intermediate/`, so 9j/10j/11j/13j all
+default `ENV["STAGE1_USE_NUTS"]` to `"true"` and read THAT. This generation is retained for
+side-by-side comparison only, and reaching it is now an explicit, deliberate act.
 
 ⚠ **It needs `CONTACTS_SAVE_DIR_AR1` too** — the grid was moved out of `dt_intermediate/` into
 `dt_intermediate_ar1/` when `-w8h-lc0` landed, so this is the `CONTACTS_TOKEN_HD` situation and not
-the `CONTACTS_TOKEN_PF` one: passing the token alone against the default `save_dir` finds **nothing**.
-`dt_intermediate/` currently holds no chains at all, only `df_dds*.csv`.
+the `CONTACTS_TOKEN_PF` one: passing the token alone against the default `save_dir` finds **nothing** —
+`dt_intermediate/` holds the current `-nuts` generation and nothing under this token.
 
 A LITERAL for the usual reason (cf. `CONTACTS_TOKEN_PF`/`_HD`): no `cfg` can reproduce it now that
 the window length and the level construction have both moved. Its Stage 1 has Tn = 12 (389/977
@@ -711,11 +720,15 @@ matching the rest of the framework's `cwd == src/` convention."""
 const CONTACTS_SAVE_DIR_AR1 = joinpath(@__DIR__, "..", "dt_intermediate_ar1")
 
 """The PREVIOUS generation's token (`-hd`, 2026-07-30 → 2026-08-02): flat hierarchical dispersion
-with a per-week half-Normal τ_t (and, briefly after it, the `-rhs` horseshoe). Those chains are still
-on disk and are read side by side with `CONTACTS_TOKEN` by `plot_within_block_sd`, which is now the
-"did the RE actually go away" check — the current model's within-block SD of log-dispersion must be
-identically 0 against a non-zero `-hd` line. So this is a live constant, not a historical note. Only
-the dispersion mirrors understand it — `stage1_moment_draws` does NOT (see `_read_disp_chain`)."""
+with a per-week half-Normal τ_t (and, briefly after it, the `-rhs` horseshoe). `plot_within_block_sd`
+reads it side by side with `CONTACTS_TOKEN` as the "did the RE actually go away" check — the current
+model's within-block SD of log-dispersion must be identically 0 against a non-zero `-hd` line. Only
+the dispersion mirrors understand it — `stage1_moment_draws` does NOT (see `_read_disp_chain`).
+
+⚠ **`CONTACTS_SAVE_DIR_HD` NO LONGER EXISTS (verified 2026-09-04)**, so that comparison currently
+renders the current line alone: every `-hd` reader is `isfile || return nothing`, which is why this
+degrades to a missing panel rather than an error. Check the DIRECTORY as well as the token before
+concluding anything from a blank `-hd` series."""
 const CONTACTS_TOKEN_HD = "temporal-gsar-cut-sc-hd-p0-gi"
 
 """Where the `-hd` generation's chains live. They were moved out of `dt_intermediate/` into

@@ -1268,17 +1268,58 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
 end
 
 """
+    _rehash_varname_info(chn) -> chn
+
+Return `chn` with `info.varname_to_symbol` REBUILT if — and only if — its hash index is stale.
+
+⚠ **A RELOADED CHAIN CAN HAVE AN UNUSABLE `varname_to_symbol` WHILE BEING OTHERWISE PERFECT.** JLD2
+serialises an `OrderedDict` *including its internal hash index*, and `hash(::VarName)` is not stable
+across AbstractPPL/Julia versions. So a chain reloaded from `dt_intermediate/` can have every entry
+present under `pairs`/`keys` and yet reachable by NONE of them: measured on the 2026-09-04 grid,
+`vn = first(keys(v2s))` gives `haskey(v2s, vn) == false` and `v2s[vn]` throws.
+
+That matters because `DynamicPPL.returned` (which `generated_quantities` now forwards to) looks up
+EVERY parameter through this dict — `to_samples` → `getindex_varname` → `info.varname_to_symbol[vn]`
+— so it dies with `KeyError: key log_rho_diag not found` on a completely healthy chain. The column
+data is untouched, which is why the `reconstruct_*` mirrors in `10j_viz_utils.jl` (they index the
+chain BY NAME and never touch this dict) read the same files without complaint, and why the failure
+looks nothing like a stale-generation error.
+
+Re-inserting every pair rebuilds the index. This is a CONTAINER REPAIR, not a data change — no draw
+is read, written or reordered. The staleness probe means a healthy chain is returned untouched, so
+in-process chains (Pathfinder's `draws_transformed`) and freshly fitted ones cost one `haskey`.
+"""
+function _rehash_varname_info(chn)
+    info = chn.info
+    (info isa NamedTuple && haskey(info, :varname_to_symbol)) || return chn
+    v2s = info.varname_to_symbol
+    isempty(v2s) && return chn
+    # A key taken FROM the dict that the dict cannot find ⇒ the serialised hash index is stale.
+    haskey(v2s, first(keys(v2s))) && return chn
+    fresh = empty(v2s)
+    for (k, v) in pairs(v2s)
+        fresh[k] = v
+    end
+    @debug "rebuilt a stale varname_to_symbol hash index on a reloaded chain" n = length(fresh)
+    return MCMCChains.setinfo(chn, merge(info, (; varname_to_symbol = fresh)))
+end
+
+"""
     stage1_moment_draws(dm, ds, pop, cfg, s1_chn; n_post=cfg.n_stage1_post) -> Vector
 
 Subsample `n_post` Stage-1 posterior draws and return their per-week raw moments via
 `generated_quantities(model_degree(dm, ds, pop, cfg), s1_chn)`. Each element is a
 `(; K1, K2, G)` of length-`Tn` `Vector{Matrix}` — NGM-independent, ready for
 `contact_star(nb, …)` downstream. Draws are subsampled on an even grid (deterministic).
+
+`s1_chn` goes through `_rehash_varname_info` first: this is the ONLY code path in the repo that
+replays a stored chain through the model (everything else reads columns by name), so it is the only
+one exposed to JLD2's stale `varname_to_symbol` index. See that function for why.
 """
 function stage1_moment_draws(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig, s1_chn;
                              n_post::Int = cfg.n_stage1_post)
     model = model_degree(dm, ds, pop, cfg)
-    gq = vec(generated_quantities(model, s1_chn))
+    gq = vec(generated_quantities(model, _rehash_varname_info(s1_chn)))
     gq = [q for q in gq if q !== nothing]
     isempty(gq) && error("stage1_moment_draws: no usable Stage-1 draws")
     keep = min(n_post, length(gq))
