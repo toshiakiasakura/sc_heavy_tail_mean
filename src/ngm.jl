@@ -1,8 +1,14 @@
 # ngm.jl — build the next-generation matrix from the age-pair contact-degree
 # distribution. The NGM *builder* is the second swap axis (deterministic dispatch).
 #
-#   N_ab(t) = full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
+#   N_ab(t) = γ_SAR · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
 #   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
+# γ_SAR is the per-contact secondary attack rate; susc/inf are RELATIVE, normalised to the reference
+# bin `cfg.ref_bin` (default 4 = "25-34"; formerly 1 = "2-10") = 1. C* is NOT normalised (the -gnorm
+# `C* → C*/S̄` decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so C* feeds the NGM at its raw
+# (mean/neighbourhood-degree) level and γ_SAR reproduces the reference cell N_{ref,ref} = γ_SAR
+# directly. See joint_model.jl
+# and tasks/lessons.md.
 #
 # C*_ab = per-capita effective contacts from bin a to bin b (mean or excess degree).
 # There is NO post-hoc reciprocity symmetrisation: reciprocity is carried entirely by
@@ -26,6 +32,11 @@ base_contact(::MeanNGM, k1, k2, g)                = k1
 # week) give ⟨k⟩=⟨k²⟩=0, so the raw `k2/k1` is 0/0=NaN. Such a cell contributes no
 # transmission, so return 0. (NegBin keeps k1=μ>0, so it always takes the first branch.)
 base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = k1 > 0 ? (k2 / k1) * g : zero(k1)   # size-biased × zero factor
+# NULL builder (inst/6): C* is a fixed uniform constant. The constant is carried IN `K1` by
+# `null_moment_draws` (joint_model.jl) — no contact fit exists to take a mean of — so the
+# functional is the identity, exactly like `MeanNGM`. Keeping it a distinct builder is what makes
+# the model label (`no-contact|null`) and its cache files self-documenting.
+base_contact(::NullNGM, k1, k2, g)                = k1
 
 """`full_susceptibility(susc, F, A_col)` — leaky antibody susceptibility vector
 `susc .* (1 .+ (F-1).*A_col)` for one week's antibody prevalence `A_col`."""
@@ -47,20 +58,34 @@ function contact_star(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatri
 end
 
 """
-    build_ngm(Cstar, susc, inf, F, A_col)
+    contact_star(::DiagonalMeanNGM, K1, K2, G)
+
+NO-INTERACTION model (inst/6): the mean-degree C* with every off-diagonal cell zeroed, so each age
+group's epidemic evolves independently (`I_a(t)` depends only on `I_a(t−s)`). This is a
+MATRIX-level functional — the generic method broadcasts `base_contact` elementwise, which cannot
+see `(i,j)` — hence its own `contact_star` method. Returns a DENSE `Matrix` (not a `Diagonal`):
+`fit_stage2_pooled` stores C* into a `Vector{Matrix{Float64}}` slot.
+"""
+contact_star(::DiagonalMeanNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::AbstractMatrix) =
+    diagm(diag(K1))
+
+"""
+    build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)
 
 7×7 next-generation matrix for one week from a precomputed `C*`:
-`N_ab = full_susceptibility_a · C*_ab · inf_b`.
+`N_ab = γ_SAR · full_susceptibility_a · C*_ab · inf_b`. `gamma_sar` is the per-contact secondary
+attack rate (susc/inf relative to the reference bin `cfg.ref_bin`, default 4 = "25-34"); `gamma_sar=1`
+recovers the pre-reparam form.
 """
 function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
     fs = full_susceptibility(susc, F, A_col)
-    return (fs .* Cstar) .* inf'
+    return gamma_sar .* ((fs .* Cstar) .* inf')
 end
 
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
                    G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector)
-    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col)
+                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
+    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col; gamma_sar = gamma_sar)
 end

@@ -1,0 +1,10 @@
+# Keep the HPC scripts LF even when the repo is checked out on Windows.
+#
+# `core.autocrlf=true` is set here, so without this the next Windows checkout would rewrite these
+# files with CRLF — and WinSCP transfers the WORKING TREE, so the HPC would receive scripts whose
+# every line ends in a CR. Linux `/bin/sh` and `bash` then fail with `$'\r': command not found`,
+# which is an obscure way to lose an array job. Julia and R sources are unaffected (both read CRLF
+# fine) and are deliberately left alone.
+*.sh    text eol=lf
+*.slurm text eol=lf
+Dockerfile*  text eol=lf

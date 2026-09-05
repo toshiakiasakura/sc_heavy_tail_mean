@@ -6,4 +6,12 @@ sysimage.dll
 .memsearch
 
 dt_comix_no_public
+dt_comix_no_public_temporal
 dt_surveys_
+
+# HPC run artefacts, created inside the project directory on the cluster (see hpc/README.md):
+# the uploaded Singularity image, each array task's private Julia depot, and the Slurm logs.
+*.simg
+julia_depot_*/
+.julia_preflight/
+logs/

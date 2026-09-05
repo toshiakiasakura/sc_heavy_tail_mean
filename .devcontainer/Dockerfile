@@ -1,10 +1,11 @@
-FROM quay.io/jupyter/datascience-notebook:julia-1.11.1
+FROM quay.io/jupyter/datascience-notebook:julia-1.12.4
 # julia-1.7.3 is required for Turing.jl
 
 WORKDIR /workdir
 EXPOSE 8888
 
 RUN JULIA_PROJECT=/workdir
+ENV JULIA_DEPOT_PATH=":/opt/julia"
 ENV DEVCONTAINER=TRUE
 
 # TODO: Activate checkpoint and install packages.

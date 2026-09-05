@@ -4,9 +4,30 @@ Base.length(p::PoissonMixture)=1
 Base.iterate(p::PoissonMixture) = (p, nothing)
 Base.iterate(p::PoissonMixture, nothing) = nothing
 
-Base.@kwdef struct NegBin <: PoissonMixture
-	m::Real
-	k::Real
+# PARAMETRIC, not `m::Real; k::Real` — this is load-bearing for AD PERFORMANCE, not tidying.
+# DO NOT revert it to abstract fields.
+#
+# `NegBin` is the Stage-1 unweighted contact likelihood (`joint_model.jl` `_cell_moments!` →
+# `calculate_loglikelihood`), so it is constructed 49×Tn times per gradient evaluation. Abstract
+# `::Real` fields make it type-unstable, which ReverseDiff shrugs off (it boxes into TrackedReal
+# regardless) but which **Mooncake cannot** — Mooncake is source-to-source and needs the primal to
+# infer. Measured 2026-08-05, Stage-1 model at origin 2021-05-09, 402 unconstrained dims:
+#
+#            abstract ::Real fields          parametric (this)
+#   negbin   2.7 grad/s  (ReverseDiff 41.8 — a 15× REGRESSION)   482 grad/s  (10.9× FASTER)
+#
+# For contrast the hurdle-Weibull path, which uses the concrete `Distributions.Weibull`, was
+# already 9× faster under Mooncake before this change — that asymmetry is what indicted the struct.
+# The log-density is unchanged to the last bit (-444771.5765202815), so this is purely a typing fix.
+#
+# The other legacy distributions here still use `::Real`. They are off the framework path and are
+# fitted with ForwardDiff, so they are deliberately left alone (minimal impact). `ZeroTruncNegBin`
+# (`zerotrunc.jl`) wraps a `NegBin` field and so is now abstractly-typed in that field — harmless,
+# as it too is legacy-only; revisit only if it ever joins an AD hot path.
+# Both fields stay independently parameterised so a promotion never silently widens the other.
+Base.@kwdef struct NegBin{Tm<:Real,Tk<:Real} <: PoissonMixture
+	m::Tm
+	k::Tk
 end
 
 Base.@kwdef struct PoissonLogNormal <: PoissonMixture

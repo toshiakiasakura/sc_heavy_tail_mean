@@ -1,26 +1,48 @@
-# 8j_viz_utils.jl — read-only visualisation helpers for the 8j preliminary forecast.
+# 8j_viz_utils.jl — read-only visualisation helpers for the 8j preliminary forecast (two-stage cut).
 #
-# Pulls fitted transmission parameters (susceptibility, infectivity, GP length-scale)
-# out of the cached joint-model chains WITHOUT rebuilding the model: susc/inf/ρ are
-# deterministic transforms of raw sampled columns (see `model_joint` in joint_model.jl),
-# so they are reconstructed directly from the chain. Included from the 8j notebook.
-#
-# Chains are saved by `iterated_forecast`/`prefit_chains!` as
-#   dt_intermediate/8j_chn_<degree>_<ngm>_<origin>_h<h>.jld2   (jldsave(path; result=chn))
-# where <degree> = degree_label(dm), <ngm> = ngm_label(nb) — the same tokens the model
-# label `lbl = "<degree>|<ngm>"` splits into.
+# Two artefact families per (origin, horizon):
+#   • Stage-1 GP chain  `8j_s1_<degree>_<contacts>_<origin>_h<h>.jld2` (key "result") — the
+#     contact-degree GP latents (NGM-independent ⇒ NO ngm token). μ / ρ / dispersion reconstruct
+#     from here (see `model_degree` in joint_model.jl §5/§6, and 10j_viz_utils.jl).
+#   • Stage-2 pooled    `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2` (key "pooled") — the
+#     100×100 pooled infection draws `(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end)`
+#     (see `fit_stage2_pooled`). susc/inf/γ_SAR/R read from here.
+# `lbl = "<degree>|<ngm>"` splits into the two tokens.
 
 """
-    chain_path(lbl, origin, h; save_dir)
+    _fmed(v) / _fq(v, q)
 
-Cached-chain filepath for model label `lbl` (`"<degree>|<ngm>"`), forecast `origin`
-and horizon `h`. `lbl` joins the two tokens with `|`; the filename joins them with `_`.
+Finite-robust median / quantile: reduce over the FINITE entries of `v` only, returning `NaN` when the
+whole vector is non-finite. The natural-scale pooled forecast is heavy-tailed — a few pathological
+draws can be ±Inf — so a plain `median`/`quantile` throws (`quantiles undefined in presence of NaNs`).
+These plot the well-behaved central line/band and leave a gap where a cell is wholly non-finite.
 """
-function chain_path(lbl::AbstractString, origin::Date, h::Integer;
-                    contacts::AbstractString = "weekly",
-                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+_fmed(v) = (f = filter(isfinite, v); isempty(f) ? NaN : median(f))
+_fq(v, q) = (f = filter(isfinite, v); isempty(f) ? NaN : quantile(f, q))
+
+"""
+    stage1_chain_path(lbl, origin, h; contacts, save_dir)
+
+Cached Stage-1 GP-chain filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horizon `h`. The
+ngm token is dropped (Stage 1 is NGM-independent), so both builders of a degree family share it.
+"""
+function stage1_chain_path(lbl::AbstractString, origin::Date, h::Integer;
+                           contacts::AbstractString = CONTACTS_TOKEN,
+                           save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    deg, _ = split(lbl, "|")
+    joinpath(save_dir, "8j_s1_$(deg)_$(contacts)_$(origin)_h$(h).jld2")
+end
+
+"""
+    stage2_pooled_path(lbl, origin, h; contacts, save_dir)
+
+Cached Stage-2 pooled-result filepath for `lbl` (`"<degree>|<ngm>"`), `origin`, horizon `h`.
+"""
+function stage2_pooled_path(lbl::AbstractString, origin::Date, h::Integer;
+                            contacts::AbstractString = CONTACTS_TOKEN,
+                            save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     deg, ngm = split(lbl, "|")
-    joinpath(save_dir, "8j_chn_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
+    joinpath(save_dir, "8j_s2_$(deg)_$(ngm)_$(contacts)_$(origin)_h$(h).jld2")
 end
 
 """
@@ -38,37 +60,135 @@ function _group_matrix(chn, sym::Symbol)
 end
 
 """
-    load_transmission_draws(lbl, origin, h; save_dir) -> (; susc, inf, rho) | nothing
+    load_transmission_draws(lbl, origin, h; contacts, save_dir) -> (; susc, inf, gamma_sar, rho…) | nothing
 
-Load the cached chain for `(lbl, origin, h)` and return per-draw transmission draws
-reconstructed from raw sampled columns:
-`susc[d,a] = exp(mu_s + sig_s·z_s[a])`, `inf[d,b] = exp(mu_i + sig_i·z_i[b])`
-(`ndraws × A` each), and the two GP length-scales `rho_diag`/`rho_gap[d] =
-exp(softclamp(log_rho_diag|log_rho_gap,…))` (`ndraws` each; diagonal/total-age and
-age-gap directions; mirrors model).
-Returns `nothing` when the file is missing or unreadable (skipped origin×combo),
-so callers can leave a gap.
+Load the two-stage artefacts for `(lbl, origin, h)` and return per-draw transmission structure.
+The infection block (susc / inf / `gamma_sar`) comes from the **Stage-2 pooled** file — susc/inf are
+the stored `N×A` pooled draws (relative to the reference bin `cfg.ref_bin`, default 4 = "25-34", = 1), `gamma_sar` the pooled per-contact
+secondary-attack-rate draws (N = 10_000). The GP length-scales come from the **Stage-1 chain**:
+`rho_diag`/`rho_gap[d] = exp(softclamp(log_rho_diag|log_rho_gap,…))` are the spatial GP
+length-scales in age-years (total-age and age-gap directions); `phi_time[d]` is the AR(1) temporal
+coefficient, read CONSTRAINED from the chain (dimensionless — NOT a length-scale in weeks, so it
+must not share an axis with the two spatial ρ; see `plot_lengthscales`). `phi_time` is `NaN` for
+pooled chains. Note susc/inf/gamma_sar (pooled, ~10_000 draws) and the ρ (Stage-1, ~200 draws) have
+different draw counts — they are consumed by separate figures.
+
+Also returns the per-draw **observation SD** `sigma_inf` (the infection-likelihood noise scale,
+`N⁺(0.05, 0.025²)` in `model_transmission`) — Stage-2, so present for the NULL model too.
+
+Also returns the per-draw **generation-interval** log-parameters `w_mu`/`w_sigma` from the pooled
+file (estimated since 2026-07-30, §3.1; stored POST-clamp, so
+`gen_interval_pmf_log(w_mu[d], w_sigma[d])` reproduces that draw's `w` exactly). Convert to natural
+scale with `gi_moments_days`. These come from Stage 2, so they are present for the NULL model too.
+
+Returns `nothing` when the **Stage-2** file is missing/unreadable (skipped origin×combo). A missing
+**Stage-1** chain is tolerated and yields all-`NaN` ρ: the NULL model (`no-contact|null`,
+inst/6) has no contact fit at all, but its infection block is still worth plotting.
 """
 function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
-                                 contacts::AbstractString = "weekly",
+                                 contacts::AbstractString = CONTACTS_TOKEN,
                                  save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
-    isfile(path) || return nothing
-    chn = try
-        load(path, "result")
+    s2p = stage2_pooled_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    s1p = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
+    isfile(s2p) || return nothing
+    pooled = try
+        load(s2p, "pooled")
     catch err
-        @warn "could not load chain" path err
+        @warn "could not load the Stage-2 pooled artefact" s2p err
         return nothing
     end
-    mu_s = vec(Array(chn[:mu_s])); sig_s = vec(Array(chn[:sig_s]))
-    z_s  = _group_matrix(chn, :z_s)                       # ndraws × A
-    mu_i = vec(Array(chn[:mu_i])); sig_i = vec(Array(chn[:sig_i]))
-    z_i  = _group_matrix(chn, :z_i)
-    susc = exp.(mu_s .+ sig_s .* z_s)                     # ndraws × A
-    inf  = exp.(mu_i .+ sig_i .* z_i)
-    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), log(3.0), log(45.0)))  # total-age dir, mirrors model
-    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  log(3.0), log(45.0)))  # age-gap dir
-    return (; susc, inf, rho_diag, rho_gap)
+    susc = pooled.susc; inf = pooled.inf; gamma_sar = pooled.gamma_sar   # Stage-2 pooled draws (N×A / N)
+    # `sigma_inf` is the infection-likelihood observation SD (`sigma_inf ~ N⁺(0.05, 0.025²)` in
+    # `model_transmission`). It has been written into every `8j_s2_*` since the cut landed
+    # (`fit_stage2_pooled` stores `q.sigma_inf`) but was dropped here, so no 9j figure could ever
+    # show it — the one fitted Stage-2 scalar with no visualisation. Surfaced 2026-08-09.
+    sigma_inf = pooled.sigma_inf
+    chn = isfile(s1p) ? (try load(s1p, "result") catch err
+                             @warn "could not load the Stage-1 chain; ρ set to NaN" s1p err
+                             nothing
+                         end) : nothing
+    if chn === nothing                                                   # NULL model: no contact fit
+        nan1 = fill(NaN, 1)
+        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+                  phi_time = nan1,
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F/σ_inf are Stage-2, always there
+    end
+    s1names = string.(names(chn, :parameters))
+    # `-diag` chains (2026-08-05, short-lived) LACK `log_rho_gap`: their spatial kernel smoothed the
+    # matrix diagonal only with a single length-scale, so `rho_diag` means something different there
+    # and reporting it beside current-token length-scales would silently mix generations. Same guard
+    # as `reconstruct_mu_draws` — and note it was INVERTED when `-m32` restored the second ρ.
+    # The token check catches the pre-`-diag` SQUARED-EXPONENTIAL generation, which is parametrically
+    # identical to the current one (same names, same shapes) and so invisible to any `s1names` sniff.
+    # ρ is on the same scale in both, but it means a different correlation function, so plotting the
+    # two together on one axis would silently mix kernel families. Same fork as `reconstruct_mu_draws`.
+    # The temporal parameter must be `phi_time`, the AR(1) coefficient. A chain carrying
+    # `log_rho_time` instead is either pre-`-ar1` or the one-day `-m32t` generation, and its
+    # weeks-valued length-scale must not be read as a correlation — ρ_time = 24 wk reported as
+    # φ = 24 is plausible-looking nonsense on a (0,1) axis. UNLIKE `reconstruct_mu_draws`, which
+    # FORKS on this name to keep both generations replayable, this function REFUSES: 9j draws one
+    # figure per generation and mixing units on it is worse than a NaN panel. Spatial guard
+    # (`log_rho_gap` + `-m32`) is unchanged.
+    # Token half of the guard: current-style tokens are `-m32` by construction, only a RETAINED
+    # legacy one must carry the marker (`is_legacy_token`, framework.jl). A bare
+    # `occursin("-m32", contacts)` here would reject every chain fitted after the accumulated token
+    # prefix was dropped on 2026-08-09.
+    if !("log_rho_gap" in s1names) || !("phi_time" in s1names) ||
+       (is_legacy_token(contacts) && !occursin("-m32", contacts))
+        @warn "Stage-1 chain is not the current generation (no `log_rho_gap`, no `phi_time` \
+               i.e. a Matérn-temporal chain, or a pre-`-m32` token); ρ set to NaN" s1p contacts
+        nan1 = fill(NaN, 1)
+        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+                  phi_time = nan1,
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)
+    end
+    # `RHO_BOUNDS`/`RHO_TIME_BOUNDS` (framework.jl), NOT literals — this MUST track `model_degree`
+    # or every reconstructed length-scale is silently wrong. See the constants' docstring.
+    rho_diag = exp.(_softclamp.(vec(Array(chn[:log_rho_diag])), RHO_BOUNDS...))  # total-age dir, mirrors model
+    rho_gap  = exp.(_softclamp.(vec(Array(chn[:log_rho_gap])),  RHO_BOUNDS...))  # age-gap dir, mirrors model
+    # `-ar1`: the temporal parameter is the AR(1) coefficient φ ∈ (0,1), NOT a length-scale in
+    # weeks — stored constrained, so read it directly (no exp/softclamp; `model_degree` has none
+    # either, and `RHO_TIME_BOUNDS` is dead code on this path).
+    # ⚠ It is returned as `phi_time`, not `rho_time`: the units differ from rho_diag/rho_gap
+    # (dimensionless correlation vs age-years), so it must NOT share their axis in 9j.
+    phi_time = vec(Array(chn[:phi_time]))
+    w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
+    return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag, rho_gap, phi_time,
+              w_mu, w_sigma)
+end
+
+"""
+    supergroup_split(grid, ref_bin; base) -> (; groups, names)
+
+Age super-groups for the ratio figures, with the **reference bin isolated as its own group**.
+Starts from `base` (default `((1,2),(3,4,5),(6,7))` = 2-15 / 16-49 / 50+) and splits whichever
+group contains `ref_bin` into up to three parts — the bins before it, `(ref_bin,)` alone, the bins
+after — dropping the empty ones. For the 7 CIS bins and the default `cfg.ref_bin = 4` this gives
+`((1,2),(3,),(4,),(5,),(6,7))` = 2-15 / 16-24 / **25-34** / 35-49 / 50+, so the group carrying the
+model's gauge is a single bin that is identically 1 (see `collect_transmission_structure`).
+`ref_bin = 1` ⇒ `((1,),(2,),(3,4,5),(6,7))`, and so on for any bin.
+
+`names` mirror the `LAB` construction in `cis_age_grid` — open-ended (`"50+"`) when the group runs
+to the last bin, else `"<LO[first]>-<HI[last]>"` — so a singleton group reproduces `grid.LAB[i]`
+exactly. `groups` comes back in the tuple-of-tuples shape `aggregate_supergroups` takes as its
+`groups` kwarg, ready to pass straight through.
+"""
+function supergroup_split(grid, ref_bin::Integer;
+                          base = ((1, 2), (3, 4, 5), (6, 7)))
+    groups = Tuple{Vararg{Int}}[]
+    for g in base
+        idx = collect(g)
+        if ref_bin in idx
+            for part in (filter(<(ref_bin), idx), [ref_bin], filter(>(ref_bin), idx))
+                isempty(part) || push!(groups, Tuple(part))
+            end
+        else
+            push!(groups, Tuple(idx))
+        end
+    end
+    names = [last(g) == grid.N ? "$(grid.LO[first(g)])+" :
+             "$(grid.LO[first(g)])-$(grid.HI[last(g)])" for g in groups]
+    return (; groups = Tuple(groups), names)
 end
 
 """
@@ -76,7 +196,8 @@ end
 
 Population-weighted aggregation of a per-draw per-bin matrix `V` (`ndraws × A`) to the
 super-groups in `groups` (default `((1,2),(3,4,5),(6,7))` = 2-15 / 16-49 / >50 for the
-7 CIS bins). `POP` is the per-bin population vector (`grid.POP`).
+7 CIS bins; the ratio figures pass `supergroup_split(…).groups` instead). `POP` is the per-bin
+population vector (`grid.POP`).
 """
 function aggregate_supergroups(V::AbstractMatrix, POP::AbstractVector;
                                groups = ((1, 2), (3, 4, 5), (6, 7)))
@@ -98,42 +219,71 @@ pick_origins(origins::AbstractVector{Date}; n::Int = 9) =
     origins[unique(round.(Int, range(1, length(origins); length = min(n, length(origins)))))]
 
 """
-    reproduction_draws(dm, nb, apd, wd, cfg, w; h=1, save_dir) -> Vector{Float64} | nothing
+    reproduction_draws(dm, nb, wd, cfg, win; h=1, save_dir) -> Vector{Float64} | nothing
 
-Per-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue
-of the **origin-week** next-generation matrix, exactly the NGM the forecast is frozen at
-(`posterior_forecast`/`iterated_forecast` use `q.Cstar[end]` with antibody held at the
-origin). `apd` is the raw age-pair `AgePairData` for the origin window (as returned by
-`prepare_degree_data`); it is turned into the model's degree stats with
-`build_degree_stats(dm, apd, cfg)` — mirroring `iterated_forecast`. Reloads the cached `h`
-chain via `fit_or_load_chain` (rebuilds the model so `generated_quantities` works), then
-for each posterior draw builds
-`N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:,end])` and takes
-`max real(eigvals(N))` (the NGM is nonnegative, so its Perron root is real & positive).
-
-`h=1` is the direct 1-week-ahead fit (contacts observed up to the origin). Returns
-`nothing` when the chain file is missing, so callers can leave a gap.
+Per-pooled-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue of
+the horizon-`h` next-generation matrix, exactly the NGM the forecast is frozen at (`Cstar_end` =
+contacts at origin+h, antibody at the TARGET week origin+h). Reloads the cached **Stage-2 pooled**
+file (NO re-fit); for each pooled draw `d` (from Stage-1 draw `m = post_index[d]`) builds
+`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
+and takes `max real(eigvals(N))` (the NGM is nonnegative ⇒ its Perron root is real & positive).
+The antibody column moved from the origin to origin+h on 2026-07-30 (§3.2) so this R describes the
+same NGM `two_stage_forecast` actually uses — keep the two in step.
+Returns `nothing` when the pooled file is missing/unreadable, so callers can leave a gap.
 """
-function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, apd, wd, cfg, win;
+function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win;
                             h::Integer = 1,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
-    path = chain_path(lbl, win.origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    path = stage2_pooled_path(lbl, win.origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
     isfile(path) || return nothing
-    ds = build_degree_stats(dm, apd, cfg)                                 # raw AgePairData → model stats
-    wpmf = gen_interval_pmf(cfg.gen_mean_days, cfg.gen_sd_days; smax = cfg.smax)  # model's 7th arg is the GI PMF
-    res = try
-        fit_or_load_chain(path, dm, nb, ds, wd, cfg, wpmf; use_nuts = false)  # reload chain, rebuild model
+    pooled = try
+        load(path, "pooled")
     catch err
-        @warn "could not load chain for reproduction number" path err
+        @warn "could not load pooled result for reproduction number" path err
         return nothing
     end
-    gq = vec(generated_quantities(res.model, res.chn))                     # per-draw (; susc, inf, F, Cstar)
-    R = Float64[]
-    for q in gq
-        q === nothing && continue
-        N = build_ngm(q.Cstar[end], q.susc, q.inf, q.F, wd.antibody[:, end])  # mirror posterior_forecast
-        push!(R, maximum(real(eigvals(N))))
+    Np = length(pooled.gamma_sar)
+    R = Vector{Float64}(undef, Np)
+    hi = findfirst(==(h), collect(cfg.horizons))          # antibody column for THIS horizon
+    ab_h = hi === nothing ? wd.antibody[:, end] : wd.antibody_fc[:, hi]
+    for d in 1:Np
+        m = pooled.post_index[d]
+        N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
+                      pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d])
+        R[d] = maximum(real(eigvals(N)))
     end
     return R
+end
+
+"""
+    contact_reproduction_draws(dm, nb, cfg, win; h=1, save_dir) -> Vector{Float64} | nothing
+
+Per-Stage-1-draw **contact-only** reproduction number: the dominant eigenvalue of the origin-week
+contact matrix `C*` ALONE — `ρ(C*) = max real(eigvals(Cstar_end[m]))` — dropping γ_SAR,
+susceptibility, infectivity and antibody entirely (unlike `reproduction_draws`, which diagonalises
+the full NGM). Reloads the cached **Stage-2 pooled** file read-only and uses its stored `Cstar_end`
+(the same origin-week C* the forecast NGM is frozen at), so **no Stage-1 refit/reload** is needed.
+`C*` is nonnegative ⇒ its Perron root is real & positive. Returns the `n_post` distinct Stage-1 C*
+spectral radii (contact structure depends only on Stage 1), or `nothing` if the file is missing.
+Feed to `relative_contact_reproduction_over_time` to normalise against a reference origin.
+"""
+function contact_reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, cfg, win;
+                                    h::Integer = 1,
+                                    save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
+    lbl  = string(degree_label(dm), "|", ngm_label(nb))
+    path = stage2_pooled_path(lbl, win.origin, h; contacts = contacts_label(cfg), save_dir = save_dir)
+    isfile(path) || return nothing
+    pooled = try
+        load(path, "pooled")
+    catch err
+        @warn "could not load pooled result for contact reproduction number" path err
+        return nothing
+    end
+    M = pooled.n_post
+    ρ = Vector{Float64}(undef, M)
+    for m in 1:M
+        ρ[m] = maximum(real(eigvals(pooled.Cstar_end[m])))   # Perron root of the bare C*
+    end
+    return ρ
 end
