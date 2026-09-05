@@ -95,10 +95,31 @@ src/
                                last reusing 10j's `_stage1_gp_generation` rather than restating its three gates;
                                `structural = :sample|:all|:none`); `marginal_degree_data` (per-participant-day degree
                                in three weightings — count, duration-weighted with group contacts, and with group
-                               weights set to 0 — split child/adult by `block_of`); `model_NegBinDegree` /
+                               weights set to 0 — at TWO resolutions: the child/adult MARGINALS (`:adult`, `:child`)
+                               and the four CONTACTOR→CONTACTEE blocks (`:child_child` … `:adult_adult`, 2026-09-04),
+                               both split by `block_of`, so the pairs ARE `model_degree`'s four dispersion blocks
+                               `bl = 2(block_of(i)−1)+block_of(j)`); `model_NegBinDegree` /
                                `model_HurdleWeibullDegree` (marginal likelihoods matching the FRAMEWORK, not 6j:
                                plain NegBin, and a hurdle-Weibull parameterised by the positive-part MEAN with
                                `λ = μ/Γ(1+1/κ)` as in `_cell_moments!`); `fit_marginal_models` + the figures.
+                               ⚠ `marginal_degree_data`'s `raw` kwarg is now `load_raw_contact_inputs()`'s `(; df_part, craw)` — the RAW
+                               arrow table — not `read_comix_uk_contact_raw()`'s joined frame, which does not select
+                               `cnt_age_est_min/max` and so cannot bin a contactee. The switch is safe *because it
+                               was measured*: `(part_wave_uid, date)` is unique in `part_uk.arrow` (276 482 of
+                               276 482), so the joined frame's inner join neither drops nor duplicates any of the
+                               1 325 891 contacts, and `duration_multi` comes from the same `_uk_duration_multi` on
+                               both paths. §1–§3 and §4 now share the notebook's single raw read.
+                               ⚠ **`assign_age_bin` CONSUMES `rng`** (see `degree_agepair.jl`): participants first,
+                               contactees second, from ONE `MersenneTwister(cfg.seed)`. Appending the contactee draws
+                               AFTER the participant ones is exactly why adding the pairs left the marginals
+                               bit-identical — verified against the pre-existing `res/14j_fit_summary.csv`.
+                               ⚠ **THE FOUR PAIRS DO NOT SUM TO THE MARGINALS, DELIBERATELY.** A pair needs the
+                               contactee's bin and `assign_age_bin` returns `nothing` below the grid's first bin;
+                               those contacts are dropped from the pairs and counted in the marginal's
+                               `n_contacts_unbinned`, so `marginal == Σ pairs + unbinned` holds exactly (14j §1
+                               asserts it per block per window). The marginals were NOT recomputed on binned contacts
+                               — the marginal IS the observed degree distribution, and discarding part of it for a
+                               tidier identity would change a published figure for bookkeeping.
                                ⚠ The repo carries TWO incompatible log-axis conventions — the discrete plotters and
                                `distributions/plot.jl` put `log10(y)` on a LINEAR axis, while `plot_ccdf_continuous!`
                                / `plot_pdf_hist!` use `yscale = :log10`. Overlaying the two families on one panel is
@@ -107,6 +128,28 @@ src/
                                `log10(y)` convention, and `_log_yrange` caps the axis at 7 decades below the maximum
                                (a NegBin evaluated to the observed max degree ~4000 returns ~1e-40 and would
                                otherwise flatten every real series into the top of the panel).
+                               §4's timeline figures are BOTH built from `_make_timeline_fig` over **`_TL_SPECS`**,
+                               a tuple of `(degree, quantity, ylabel, title, obs_clip_q)`. Append to it to add a
+                               panel: the layout, the figure height and which panel carries the phase labels are all
+                               DERIVED from `length(_TL_SPECS)` (never hard-coded — the `panel_grid` lesson). It has
+                               carried THREE entries since 2026-09-04: mean-NGM `C₀` for each degree model, then the
+                               hurdle-Weibull **excess (neighbourhood) degree**, so both NGM builders' inputs are
+                               shown from the SAME Stage-1 draws.
+                               ⚠ The excess panel re-derives NOTHING: `collect_origin_contact_means` reads κ with
+                               10j's `reconstruct_dispersion_draws` (already a `_cell_moments!` mirror) alongside μ
+                               and p⁰, then calls **`_weibull_moments`** (`joint_model.jl`) and **`base_contact`**
+                               (`ngm.jl`) in the order `_cell_moments!` calls them; `observed_contact_means` puts
+                               EMPIRICAL moments through the same `base_contact`. A hand-written `(1−p⁰)·μ·(1+CV²)`
+                               would be correct today and would silently stop tracking the builder. Verified against
+                               ground truth — mirrors vs `stage1_moment_draws`' own K1/K2/G replayed through
+                               `model_degree` — max relative error 4e-15 over 25 draws × 49 cells on K1, K2, g and C₀.
+                               ⚠ Both §4 frames now carry a **`quantity`** column (`"K1"` / `"excess"`), so every
+                               join and subset needs it: on `degree` alone the weighted model contributes two rows
+                               per origin × bin and a `leftjoin` silently duplicates the frame. `quantity` rather
+                               than a `"weighted-hweibull-excess"` pseudo-label keeps `degree` a real
+                               `degree_label` (see the "never sniff a model property out of a label" gotcha).
+                               ⚠ A chain whose κ is unreadable KEEPS its `K1` rows and loses only its `excess` ones,
+                               recorded in `excluded` — `K1 = (1−p⁰)·μ` needs no κ.
 
   <N>j_*.ipynb               Numbered notebook entry points:
                                1j data explore · 2j duration · 3j effective degree · 4j Danon [legacy] ·
@@ -125,12 +168,34 @@ src/
                                  renders it, but a one-point line chart is not the diagnostic). Restore the generator first.
                                14j PUBLICATION figures (2026-09-04) — the only notebook here that is NOT a diagnostic.
                                  §0 audits the Stage-1 grid (`audit_stage1_grid`); §1–§3 the observed and
-                                 duration-weighted degree distributions (pdf + ccdf, adults and children,
-                                 2021-07-01…12-31) with NegBin and hurdle-Weibull fits written to `res/14j_fit_*`;
-                                 §4 the fitted contact mean per AGE BLOCK over time (child/adult, population-weighted
-                                 within block, summarised PER DRAW so the band is the band of the aggregate rather
-                                 than a combination of per-bin bands), read at week column `cfg.n_fit` of each
-                                 origin's h=1 chain; the 7-bin detail goes to `14j_contact_mean_timeline_bins.csv`. Needs NO `ENV["STAGE1_USE_NUTS"]` (like 12j
+                                 duration-weighted degree distributions (pdf + ccdf) with NegBin and hurdle-Weibull
+                                 fits written to `res/14j_fit_*`, for SIX groups (2026-09-04): the adult and child
+                                 MARGINALS and the four CONTACTOR→CONTACTEE blocks, the latter as a 4×2 figure
+                                 `14j_degree_pairs_<from>_<to>.png` (one row per pair, pdf then ccdf);
+                                 §4 the fitted contact rate over time in TWO figures — per AGE BLOCK (child/adult,
+                                 population-weighted within block, summarised PER DRAW so the band is the band of
+                                 the aggregate rather than a combination of per-bin bands) and its per-CIS-bin twin
+                                 — each overlaying the RAW observed values as `×`, read at week column `cfg.n_fit`
+                                 of each origin's h=1 chain, in THREE panels: mean-NGM `C₀` for both degree models
+                                 and the hurdle-Weibull EXCESS (neighbourhood) degree, so both NGM builders' inputs
+                                 come from the same Stage-1 draws.
+                                 ⚠ The four §3 pairs do NOT sum to the marginals (contactee age unbinnable ⇒ dropped
+                                 from the pairs, counted in `n_contacts_unbinned`); §1 asserts the exact identity.
+                                 The off-diagonal pairs are mostly zeros BY CONSTRUCTION — a pair's zeros are its
+                                 block's participant-days with no contact INTO the other block — so §2's ≤5%
+                                 moment-reproduction assertion is kept on the MARGINALS only and the pairs are
+                                 warned above 10% instead: a tolerance measured on one shape must not gate another.
+                                 ⚠ §4 INCLUDES `9j_viz_utils.jl` (which itself includes `8j_viz_utils.jl`, so 8j
+                                 loads exactly once) purely to reuse **`PERIODS`/`shade_periods!`** — the Munday-2023
+                                 Table 2 phase bands `plot_wis_diff_over_time` draws. Reused, NOT restated: two
+                                 copies of the phase boundaries is exactly the duplication this file keeps warning
+                                 about. `shade_periods!` must be called AFTER the series (its docstring: a leading
+                                 numeric overlay collapses the Date axis). `PERIODS` spans 2020-11-05…2021-11-24, so
+                                 the grid's first ~3 and last ~5 origins are legitimately unshaded, as in 9j.
+                                 ⚠ The observed WEIGHTED comparator is `Σ_j (1−p⁰)·mean(positive weights)`, NOT
+                                 10j's `_observed_cell_mean(…; weighted=true)`, which returns the positive-part mean
+                                 alone — the right comparator for μ but not for the `K1 = (1−p⁰)·μ` §4 plots. Omit
+                                 the factor and the overlay sits ~4× high and reads as a badly under-fitting model. Needs NO `ENV["STAGE1_USE_NUTS"]` (like 12j
                                  it takes the framework default and asserts it), and TRIGGERS NO GRID FIT — every
                                  reader is `isfile || nothing` and it calls no `two_stage_forecast`/`fit_or_load_*`.
                                  ⚠ §4 tolerates a partial grid — it skips origins with no chain, lengthens by itself
@@ -139,6 +204,18 @@ src/
                                  the notebook prints the list: a dropped origin must never be silent.
                                  §1–§3 run over `WINDOWS` (2021-07-01…12-31 and 2021-10-01…12-31); append to that
                                  vector to add another — every downstream filename is keyed on the window.
+                                 ⚠ The per-bin figure caps its y-axis at the 99th percentile of the observed (never
+                                 below the fitted bands) because a single week — 2020-11-29, bin 11-15, 65
+                                 participant-days, one mass-contact report — gives an observed 33.8 against a median
+                                 of 4.2 and otherwise flattens every line. Points pushed off-scale are COUNTED IN
+                                 THE PANEL TITLE, never silently dropped. The EXCESS panel carries the same cap by
+                                 default in BOTH figures (`_TL_SPECS`): it is an empirical SECOND moment, so that
+                                 same report dominates it far harder after squaring.
+                                 ⚠ §4 asserts `excess ≥ K1` on every fitted and observed series. The ratio is
+                                 `1 + CV²` / `E[Z²]/E[Z]²`, both ≥ 1 per draw and per cell, so the relation survives
+                                 the row sum, the population weighting and (being monotone) the median across draws
+                                 — a cheap exact tripwire for a wrong `g`, a swapped K1/K2 or κ draws out of step
+                                 with μ.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 

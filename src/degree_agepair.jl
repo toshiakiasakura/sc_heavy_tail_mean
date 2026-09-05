@@ -37,6 +37,34 @@ contacts_uk.arrow (values \"mass\"/\"individual\"). Missing → not group."
 _is_group_contact(v) = !ismissing(v) && (String(v) == "mass")
 
 """
+    assign_age_bin(a, b, grid, rng) -> Int | nothing
+
+Assign a reported age interval `[a,b]` to one of `grid`'s CIS bins. An interval overlapping
+several bins is resolved by a **single population-weighted draw** from `rng`; one lying entirely
+below the grid's first bin returns `nothing` (the caller drops it), and one overlapping none but
+sitting above the grid falls back to bin 1.
+
+⚠ **This is the ONLY place the rule is written down, deliberately.** It was a closure inside
+`prepare_degree_data` until 14j needed the same mapping to split participants into the model's
+child/adult blocks (`block_of`, joint_model.jl). A second copy would be exactly the failure this
+repo keeps hitting — a rule fixed in one mirror and missed in another — and it would be silent,
+because the only intervals whose bin is ambiguous are the ones straddling a boundary: CoMix's
+`12-17` participant group spans bin 2 (`11-15`) and bin 3 (`16-24`), i.e. precisely the 15/16
+child/adult cut.
+
+⚠ **`rng` IS CONSUMED, so CALL ORDER IS PART OF THE CONTRACT.** `prepare_degree_data` draws for
+participants first and contacts second from ONE `MersenneTwister(cfg.seed)`; reordering or adding
+a call changes every downstream bin assignment and hence every fitted chain's data.
+"""
+function assign_age_bin(a, b, grid, rng)
+    b < grid.LO[1] && return nothing
+    cand = [j for j in 1:grid.N if a <= grid.HI[j] && b >= grid.LO[j]]
+    isempty(cand)     && return 1
+    length(cand) == 1 && return cand[1]
+    return sample(rng, cand, Weights(grid.POP[cand]))
+end
+
+"""
     load_raw_contact_inputs(; arrow_path=_ARROW_PATH)
 
 Read the CoMix-UK participant roster and contact table **once** (the two full reads
@@ -155,15 +183,10 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
     dmin = minimum(weeks); dmax = maximum(weeks) + Day(6)
 
     rng = MersenneTwister(cfg.seed)
-    AGE_MIN = grid.LO[1]
-    overlapping(a, b) = [j for j in 1:A if a <= grid.HI[j] && b >= grid.LO[j]]
-    function assign_bin(a, b)
-        b < AGE_MIN && return nothing
-        cand = overlapping(a, b)
-        isempty(cand)     && return 1
-        length(cand) == 1 && return cand[1]
-        return sample(rng, cand, Weights(grid.POP[cand]))
-    end
+    # `assign_age_bin` (above) is the shared rule; this closure only pins `grid`/`rng`. The two
+    # call sites below (participants, then contacts) draw from this ONE stream in that order —
+    # do not reorder them, or every ambiguous age's bin changes.
+    assign_bin(a, b) = assign_age_bin(a, b, grid, rng)
 
     # participant-day roster with a drawn participant bin (reuse cached read if given)
     df_part = df_part_raw === nothing ? read_comix_uk_contact_raw()[2] : df_part_raw
