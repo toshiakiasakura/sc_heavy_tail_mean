@@ -1385,7 +1385,7 @@ Mooncake costs 10.64 s vs ReverseDiff's 0.30 s per fit while parallelising 1.09�
 Returns a NamedTuple
 `(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post, n_draw)` where the first
 five are the pooled per-draw infection parameters (`susc`/`inf` are `N×A`), `post_index[d]` is the
-Stage-1 draw `d` came from, and `Cstar_end[m]` is Stage-1 draw `m`'s origin-week (`[end]`) `C*` — the
+Stage-1 draw `d` came from, and `Cstar_end[m]` is Stage-1 draw `m`'s **origin+h** (`[end]`) `C*` — the
 matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphore(max_concurrent)`
 (each with its own deterministic RNG `base_seed + m`), writing disjoint preallocated slots.
 """
@@ -1403,6 +1403,10 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         # the relation between the two.
         Tc = length(md.K1)
         Cstar_m = [Float64.(contact_star(nb, md.K1[t], md.K2[t], md.G[t])) for t in 1:Tc]
+        # ⚠ origin + h, NOT the origin week: `prepare_degree_data` spans [t₀−n_fit+1 … t₀+h] since
+        # `-w8h`, so `[end]` is t₀+h. Three docstrings in this repo called it "origin-week" until
+        # 2026-09-10; anything comparing this against a Stage-1 chain read at week column `cfg.n_fit`
+        # (= t₀) is comparing two different weeks.
         Cstar_end[m] = Cstar_m[end]                    # last contact week = origin + h
         # GI is sampled INSIDE the model (no `w` arg); `nb` only selects `fix_infectivity`
         model = model_transmission(Cstar_m, wd, cfg, nb)

@@ -370,22 +370,29 @@ end
 
 # ── Reproduction number over time: dominant NGM eigenvalue ────────────────────────────
 """
-    reproduction_over_time(combos, labels4, wins, cfg; grid, raw, h, save_dir, verbose)
+    reproduction_over_time(combos, labels4, wins, cfg; grid, raw, h, save_dir, inf, verbose)
         -> Dict(label => (; med, lo, hi))
 
 For each forecast origin and model, the median and 90% band of the reproduction number
-(`reproduction_draws`, dominant eigenvalue of the frozen origin-week NGM at horizon `h`).
+(`reproduction_draws`, dominant eigenvalue of the frozen origin+h NGM at horizon `h`).
 Reloads window/degree data + cached chains per origin — read-only, no re-fit.
+
+Pass `inf = load_raw_infection_inputs()` to use `load_window_data`'s CACHED `(win, df, tmap)` form
+instead of its CSV-reading one-argument form. Without it this loop re-reads and re-parses the whole
+inc2prev estimates CSV **once per origin** — 63 full parses, this collector's dominant cost and the
+reason its `_or_load` cache exists. `infection_data.jl` documents the two forms as byte-identical
+(14j §7 asserts it against this function's own cached store), so `inf` changes only the wall-clock.
 """
 function reproduction_over_time(combos, labels4, wins, cfg;
                                 grid = cis_age_grid(), raw,
                                 h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
-                                verbose::Bool = true)
+                                inf = nothing, verbose::Bool = true)
     nO = length(wins)
     store = Dict(l => (med = fill(NaN, nO), lo = fill(NaN, nO), hi = fill(NaN, nO)) for l in labels4)
     t0 = time()
     for (oi, win_o) in enumerate(wins)
-        wd_o  = load_window_data(win_o; grid = grid)
+        wd_o  = inf === nothing ? load_window_data(win_o; grid = grid) :
+                                  load_window_data(win_o, inf.df, inf.tmap; grid = grid)
         # R reads the Stage-2 pooled file directly (Cstar_end = contacts at origin+h, antibody at
         # origin) — no degree-data rebuild needed under the two-stage cut.
         for ((dm, nb), lbl) in zip(combos, labels4)
@@ -411,11 +418,18 @@ the cached chain per origin × combo (slow), but is deterministic given the cach
 its `store` is cached to `dt_intermediate/9j_rt_<contacts>_h<h>.jld2` with the same
 validate-or-rebuild pattern as `assemble_or_load_forecasts`. The cache self-invalidates when
 `origins`/`labels` change; `rebuild=true` forces a fresh compute.
+
+⚠ **THE FILENAME KEYS ON `(contacts, h)` ONLY — THE MODEL SET LIVES IN THE PAYLOAD.** A caller
+passing a different `labels4` (e.g. 14j §7's three combos) fails the `labels` check, warns, recomputes
+and then `jldsave`s ITS store over this one; the next 6-model run then finds the cache stale and
+clobbers it back — a rebuild ping-pong, silent apart from the warnings. Give such a caller its own
+`cache_path`, or have it call the uncached `reproduction_over_time` (14j does the latter, so that it
+writes nothing outside `res/`). The same applies to `relative_contact_reproduction_over_time_or_load`.
 """
 function reproduction_over_time_or_load(combos, labels4, wins, cfg;
         grid = cis_age_grid(), raw, h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
         cache_path::AbstractString = joinpath(save_dir, "9j_rt_$(contacts_label(cfg))_h$(h).jld2"),
-        rebuild::Bool = false, verbose::Bool = true)
+        rebuild::Bool = false, inf = nothing, verbose::Bool = true)
     origins = [w.origin for w in wins]
     if !rebuild && isfile(cache_path)
         c = load(cache_path)
@@ -426,7 +440,8 @@ function reproduction_over_time_or_load(combos, labels4, wins, cfg;
         @warn "R(t) cache stale (origins/labels changed) — rebuilding" cache_path
     end
     store = reproduction_over_time(combos, labels4, wins, cfg;
-                                   grid = grid, raw = raw, h = h, save_dir = save_dir, verbose = verbose)
+                                   grid = grid, raw = raw, h = h, save_dir = save_dir,
+                                   inf = inf, verbose = verbose)
     jldsave(cache_path; store, origins, labels = labels4, h)
     return store
 end
@@ -508,7 +523,7 @@ end
         -> Dict(label => (; med, lo, hi))
 
 For each forecast origin and model, the median and 90% band of the **relative contact reproduction
-number** `ρ(C*_origin) / ρ(C*_ref)`, where `ρ(C*)` is the dominant eigenvalue of the origin-week
+number** `ρ(C*_origin) / ρ(C*_ref)`, where `ρ(C*)` is the dominant eigenvalue of the origin+h
 contact matrix alone (`contact_reproduction_draws` — no γ_SAR/susc/inf/antibody) and the reference is
 the **first forecast origin** (`wins[1]`). Each origin's per-draw ρ is divided by the reference
 origin's *median* ρ (the reference window is the fixed anchor), so every model's curve passes through

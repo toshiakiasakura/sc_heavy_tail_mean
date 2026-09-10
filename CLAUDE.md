@@ -90,7 +90,7 @@ src/
                                ⚠ The three shared generation checks (`-diag` refusal · `phi_time`-vs-`log_rho_time` FORK · pre-`-m32` token refusal) now live in ONE helper, **`_stage1_gp_generation`**, used by both GP readers — extraction verified bit-identical on `reconstruct_mu_draws`. 8j's `load_transmission_draws` keeps its own copy on purpose: it REFUSES where 10j FORKS (see the Gotcha below), so keep the two in step BY HAND.
   11j_viz_utils.jl           Weekly identifiability (mean vs neighbourhood moment timelines) + `plot_within_block_sd` (current vs legacy `-hd`; the current line must be identically 0)
   12j_viz_utils.jl           Stage-1 NUTS chain convergence: `load_nuts_chain`, `convergence_table`/`_summary` (per-block worst ESS + split-R̂), `hmc_health` (adds E-BFMI and `frac_at_cap`), 7 figures, `convergence_verdict`
-  14j_viz_utils.jl           PUBLICATION figures (2026-09-04). Four blocks: `audit_stage1_grid` (the REPLACEMENT for
+  14j_viz_utils.jl           PUBLICATION figures (2026-09-04; §5/§6 added 2026-09-10). Blocks: `audit_stage1_grid` (the REPLACEMENT for
                                the vanished `tmp/check_grid.jl` — coverage · provenance-uniformity · structure, the
                                last reusing 10j's `_stage1_gp_generation` rather than restating its three gates;
                                `structural = :sample|:all|:none`); `marginal_degree_data` (per-participant-day degree
@@ -150,6 +150,113 @@ src/
                                `degree_label` (see the "never sniff a model property out of a label" gotcha).
                                ⚠ A chain whose κ is unreadable KEEPS its `K1` rows and loses only its `excess` ones,
                                recorded in `excluded` — `K1 = (1−p⁰)·μ` needs no κ.
+                               ROUND 5 (2026-09-10) added three things, all in ONE more pass over the SAME chains:
+                               • **`_origin_quantities`** — the chain-reading half of `collect_origin_contact_means`,
+                                 lifted out so §6 could reuse the pre-`rowsum` `ndraws×A×A` matrices. ⚠ Its contract is
+                                 **`isempty(quantities)` ⟺ the old bare `continue`**, and the caller must drain
+                                 `excluded` BEFORE that test. ⚠ It WARNS, so it must keep exactly ONE call site —
+                                 which is why §6 is the kwarg `with_eigen` on the existing collector and NOT a second
+                                 collector (the chain read — a 2000-draw JLD2 load plus 2000 Choleskys per origin per
+                                 model — is the entire cost; the 7×7 eigendecompositions are seconds). Verified
+                                 bit-identical: `med`/`lo`/`hi` reproduce to 0.0e0 on both frames.
+                                 `collect_origin_contact_means` now returns `(; bins, blocks, eigen, excluded,
+                                 eigen_excluded)`; `eigen_excluded` is a SEPARATE frame because `DataFrame(excluded)`
+                                 needs one schema and §4's cell prints `excluded` as its own all-clear.
+                               • **`_perron_share`** (+ `_push_eigen_rows!`) — §6's dominant right (Perron) eigenvector
+                                 of `C*`, normalised to sum 1. ⚠ **NEVER `abs.(v)`**: for a strictly positive `C` it is a
+                                 no-op, and where the vector is not single-signed it converts a failed decomposition
+                                 into a plausible probability vector that plots beautifully. Sign is fixed from
+                                 `sum(real(v))`, then positivity, then a `‖Cv−λv‖∞/(λ‖v‖∞) ≤ 1e-8` residual; it REFUSES
+                                 on a non-finite/non-positive entry (a single-draw p⁰=1 gives `k1=0` ⇒ `base_contact`'s
+                                 zero branch ⇒ a reducible `C`, which `_p0_draws_valid` cannot see — it only catches
+                                 coordinates dead across EVERY draw), a complex eigenpair, or a bad residual. Failing
+                                 draws are DROPPED and the rest kept; the median and its 5/95 band are rescaled by ONE
+                                 scalar `1/sum(med)` so the band keeps bracketing the line. Verified: rank-1 `a·bᵀ` ⇒
+                                 `a/sum(a)` to 1.4e-16, `ones(7,7)` ⇒ uniform exactly, and power iteration (no LAPACK)
+                                 agrees to 1e-15 on 50 real fitted draws.
+                                 ⚠ **§6 is NOT the model's predicted case age-distribution** — `C*` alone drops γ_SAR,
+                                 susceptibility, infectivity, `F` and antibody, every one of them age-varying. It is the
+                                 contact-only analogue of `contact_reproduction_draws`' `ρ(C*)`.
+                               • **`contact_duration_shares`** (§5) and **`incidence_age_shares`** (§6's observed
+                                 comparator) — see the 14j notebook entry below for both.
+                               • **`_period_cols()` / `_period_group(d)`** — phase→colour, sized from `PERIOD_ORDER`.
+                                 ⚠ **FUNCTIONS, NOT `const`s.** `PERIODS` lives in `9j_viz_utils.jl`, which this file's
+                                 header does NOT list as a dependency — every other 9j reference here sits inside a
+                                 function body, so the file still loads standalone. A top-level `const` built from
+                                 `PERIODS` would evaluate at include time and break that. `PERIODS` spans
+                                 2020-11-05…2021-11-24 vs origins 2020-10-18…2021-12-26, so **8 origins fall outside**
+                                 (3 before, 5 after) and get ONE grey, DASHED `"outside phases"` bucket — do NOT reuse
+                                 9j's `period_summary` label `"(pre-Lockdown 2)"`, which mislabels five of the eight.
+                               • `observed_contact_means` now also returns **`apd`**, purely so §5 can assert its own
+                                 roster against `apd.n[t,i,1]` without a second `prepare_degree_data` call.
+                               ROUND 6 (2026-09-10) — §4 zero baselines, §6 per-phase + NGM:
+                               • **§4's y-axes now start at 0**, set in ONE place: `_timeline_panel!`.
+                                 All three §4 figures route through it, so do NOT add per-figure `ylims`.
+                                 Every series there is a rate per participant-day and every `lo` is a
+                                 5th percentile of a positive quantity, so nothing is clipped — the auto
+                                 lower limit was starting the child panel near 2 and exaggerating every
+                                 wiggle.
+                               • **`_push_eigen_rows!` now takes a `key::NamedTuple`** prepended to every
+                                 row (`(; degree, quantity)` for the C* frame, `(; degree, ngm)` for the
+                                 NGM one) instead of two positional strings. The NGM frame's second axis
+                                 IS the builder; writing it into `quantity` would overload that column
+                                 the way a pseudo-`degree_label` overloads `degree`. Schema and column
+                                 order are unchanged for the C* caller (regression-checked).
+                               • **`collect_ngm_age_eigen` + `ngm_antibody_columns`** — §6's NGM twin:
+                                 the Perron vector of the FULL `N = γ_SAR·susc·(1+(F−1)A)·C*·inf`.
+                                 ⚠ **γ_SAR CANNOT CHANGE THE EIGENVECTOR** — it is a scalar applied
+                                 outermost, so `N v = λ v ⟺ (γN) v = (γλ) v`. That is exactly what the
+                                 NGM figures add over the C* ones: `susc`, `inf`, `F` and antibody, and
+                                 NOTHING else. Verified 5.6e-16 on 50 real draws; the notebook asserts it.
+                                 ⚠ **`Cstar_end` is indexed by the Stage-1 draw `m ∈ 1:n_post`;
+                                 `susc`/`inf`/`F`/`gamma_sar` by the pooled draw `d ∈ 1:Np`** — bridge with
+                                 `m = post_index[d]`. Mixing them silently pairs one draw's contacts with
+                                 another's transmission parameters.
+                                 ⚠ **NEVER subsample the pooled draws BY POSITION.** `post_index` is
+                                 block-constant (100 blocks × 100 draws) and `Cstar_end` varies only
+                                 across blocks, so a contiguous prefix `1:1000` carries just 10 of the 100
+                                 contact matrices while looking like a 1000-draw sample.
+                                 `_stratified_draws` takes `n_per_block` from each block and the collector
+                                 ASSERTS full block coverage. (`1:100:10_000` happens to be fine — an
+                                 accident of `n_draw == n_post`, not a property to rely on.)
+                                 ⚠ **`ngm_antibody_columns` is ONE `weekly_antibody` call for all 63
+                                 origins** (13 ms), verified BYTE-IDENTICAL (max|Δ| = 0.0) to each
+                                 origin's `load_window_data(...).antibody_fc[:, h]`, which costs ~2 s and
+                                 fires the unmatched-week `@warn` at 126 sites instead of one.
+                               • **`make_age_distribution_by_phase_fig`** — §6 transposed: panel per
+                                 phase (layout from `panel_grid`, phases from `_periods_present`), one
+                                 line per source, line = phase median and ribbon = IQR across that phase's
+                                 weeks. ⚠ **COLOUR MEANS SOURCE HERE AND PHASE IN THE OTHER §6 FIGURE** —
+                                 say it in every caption. `make_age_distribution_fig` gained
+                                 `specs`/`seriescol`/`fname`/`ptitle` so ONE pair of functions draws both
+                                 the C* and the NGM frames (`seriescol = :quantity` vs `:ngm`).
+                                 ⚠ A local named `cols` inside either figure SHADOWS DataFramesMeta's
+                                 `cols()`, which `@subset(…, cols(seriescol) .== key)` needs — the
+                                 shadowing is silent and surfaces as a MethodError inside macro expansion.
+                               ROUND 7 (2026-09-10) — §7, the reproduction number:
+                               • **`make_reproduction_fig`** stacks 9j's `plot_reproduction` and
+                                 `plot_relative_contact_reproduction` **VERBATIM** (only the titles are
+                                 overridden) into one 2-panel figure over §6's three combos: the full NGM
+                                 `R = ρ(N)` above the contacts-only `ρ(C*)/ρ(C*_ref)`. Those two plotters
+                                 carry earned detail — `:steppost` held forward from each origin, the 90%
+                                 ribbons, the "plot Date-bearing series BEFORE `hline!` or the date ticks
+                                 mangle" ordering, the rotated-y-label length limit — and hand-copying any
+                                 of it is how it drifts out of step with 9j.
+                                 ⚠ **THE BOTTOM PANEL MIXES UNITS ON PURPOSE** (user's choice, 9j's
+                                 default): dimensionless ratio steps and an ABSOLUTE national R share one
+                                 axis, and the single 1.0 line is the baseline week for one and the
+                                 epidemic threshold for the other at once. Read SHAPES, never the vertical
+                                 gap. The caveat is carried in the panel title, the legend and §7's
+                                 markdown — reproducing 9j faithfully means reproducing its warning too.
+                               • **`observed_contact_rel_or_read`** returns 9j's model-free
+                                 `ρ(Ê)/ρ(Ê_ref)` by READING `9j_obsrt_*` when its `origins` match and
+                                 recomputing otherwise — **never writing**. It exists only to keep the
+                                 invariant that 14j writes to `res/` and nowhere else.
+                               • **`_model_cols(n)`** — `palette(:Dark2_8, …)` in ONE place, so the same
+                                 model carries the same colour in §4's transposed figure, §6's per-phase
+                                 figures and §7. `reproduction_frame` builds the CSV behind §7 (9j writes
+                                 none): `panel ∈ {ngm_R, contact_rel_R}`, per label × origin, plus the
+                                 observed series and the weekly-averaged national R.
 
   <N>j_*.ipynb               Numbered notebook entry points:
                                1j data explore · 2j duration · 3j effective degree · 4j Danon [legacy] ·
@@ -166,7 +273,7 @@ src/
                                  is NO LONGER IN THE TREE, so the generator cannot be re-run. Do NOT hand-port §7 — at
                                  `horizons = 1:1` its §7a horizons figure degenerates to a single x-point (the helper
                                  renders it, but a one-point line chart is not the diagnostic). Restore the generator first.
-                               14j PUBLICATION figures (2026-09-04) — the only notebook here that is NOT a diagnostic.
+                               14j PUBLICATION figures (2026-09-04; §5/§6 added 2026-09-10) — the only notebook here that is NOT a diagnostic.
                                  §0 audits the Stage-1 grid (`audit_stage1_grid`); §1–§3 the observed and
                                  duration-weighted degree distributions (pdf + ccdf) with NegBin and hurdle-Weibull
                                  fits written to `res/14j_fit_*`, for SIX groups (2026-09-04): the adult and child
@@ -179,6 +286,102 @@ src/
                                  of each origin's h=1 chain, in THREE panels: mean-NGM `C₀` for both degree models
                                  and the hurdle-Weibull EXCESS (neighbourhood) degree, so both NGM builders' inputs
                                  come from the same Stage-1 draws.
+                                 §4 also carries a THIRD figure (2026-09-10), the same `blocks` frame TRANSPOSED:
+                                 one panel per age BLOCK with all three quantities overlaid, so the two NGM builders'
+                                 inputs are compared INSIDE a block. FITTED ONLY — `_timeline_panel!`'s `obs_clip_q`
+                                 is a panel-wide quantile and is meaningless once a panel mixes three scales, and
+                                 fitted-vs-observed is what the other two figures answer. Raw values on ONE linear
+                                 axis: measured over 63 origins the child panel spans 2.65–15.07 and the adult panel
+                                 0.89–7.65 across all three series, so nothing needs a log scale — and indexing to a
+                                 base week would erase the point, that the weighted mean sits ~3× below the count
+                                 mean. ⚠ Its series key is `(degree, quantity)`, synthesised as a TRANSIENT `:series`
+                                 column inside the figure function and never stored: `degree` stays a real
+                                 `degree_label`.
+                                 §5 (2026-09-10) — the share of reported contact DURATION at home vs away, weekly,
+                                 per age block, from RAW data only (`contact_duration_shares`). Duration is
+                                 `duration_weight(duration_multi, cfg.d_max)·cfg.d_max` minutes with group contacts at
+                                 `cfg.w_dur_group·cfg.d_max` = 2.5 min — the SAME quantity `prepare_degree_data`
+                                 weights by, not a near-relative. Measured: home is **29% of contacts but 72% of
+                                 duration** (pooled 0.7192 over 2020-10-18…2021-12-26), running 74.1 → 81.8
+                                 (Lockdown 3) → 64.2 (Q2 reopening) → 71.9% by quarter.
+                                 ⚠ ALL 674 908 group ("mass") contacts are NON-HOME and ALL have missing duration, so
+                                 the group-weight lever moves only the away side — measured 1.2–1.4 pp. Reported in
+                                 the CSV (`n_group`), not drawn.
+                                 ⚠ `duration_weight(d, d_max::Real = 300)` DEFAULTS TO 300 while `cfg.d_max` is 240;
+                                 omitting the argument rescales level 4 from 0.625 to 0.5 with no error at all.
+                                 ⚠ `standardise_cnt_home_values!` MUTATES its argument and `raw.craw` carries
+                                 `cnt_home` as raw Int64 0/1, shared with §1–§4/§6 — call it on the `@select`ed copy
+                                 only, and ASSERT the value set is exactly {"true","false"} (a schema change would
+                                 otherwise report a silent 0% home share).
+                                 ⚠ Blocks are POPULATION-WEIGHTED as §4's are, else "children" would mean two
+                                 different populations in adjacent sections; the pooled variant is `share_pooled`, and
+                                 bins with an empty roster are dropped with the weights RE-NORMALISED over the bins
+                                 present (`n_bins_present`). `n_dur_na` counts the ~4 250 individually-reported
+                                 contacts with no duration, which `duration_weight` maps to <5 min — indistinguishable
+                                 from a group contact unless counted.
+                                 ⚠ §5's TRIPWIRE is `n_pd == apd.n[t,i,1]` (from `observed_contact_means`' returned
+                                 `apd`): §5 draws participant bins from its OWN `MersenneTwister(cfg.seed)`, so the two
+                                 agreeing PROVES `assign_age_bin` resolved every ambiguous age (CoMix's `12-17`, the
+                                 only group straddling the child/adult cut) identically in both sections.
+                                 §6 (2026-09-10) — the EXPECTED AGE DISTRIBUTION: the dominant right (Perron)
+                                 eigenvector of each week's fitted 7×7 `C*`, normalised to sum 1, in FOUR panels —
+                                 the three `_TL_SPECS` quantities, then the OBSERVED age distribution of incidence
+                                 from inc2prev (`incidence_age_shares`). One thin line per week coloured by pandemic
+                                 phase plus a thick per-phase median, with `grid.PROP` dashed as the no-age-structure
+                                 null. Panel count is DERIVED (`length(_TL_SPECS)` + the incidence panel).
+                                 ⚠ NO `shade_periods!` in §6 — the x-axis is a numeric age bin, not a Date; it
+                                 `vspan!`s with Dates and reads `Plots.ylims`, so it would throw or corrupt the panel.
+                                 The phase lives in the LINE COLOUR, which is what `_period_cols` exists for.
+                                 ⚠ The incidence panel is ENGLAND (inc2prev) beside UK (CoMix) contact panels.
+                                 ⚠ `incidence_age_shares` is 14j's ONLY use of the infection series, and nothing in
+                                 the repo normalised infections into an age proportion before. It reuses
+                                 `weekly_infections` untouched — unlike `load_window_data` that takes an ARBITRARY
+                                 `Vector{Date}`, so all 63 origins are ONE call over ONE CSV read. Its `weeks` MUST be
+                                 SUNDAY-aligned (`haskey(wkset, week_start(d))`; a `week_mid` vector matches nothing
+                                 and returns all zeros SILENTLY) and it ZERO-FILLS weeks outside the estimates, which
+                                 normalise to 0/0 — hence the `all(>(0), tot)` assertion. Point estimate from `mean`
+                                 only: `I_sd` is an independence approximation and the CSV's quantiles are DAILY
+                                 per-capita ones, so summing them is not the quantile of the weekly sum.
+                                 §6 also writes a per-(quantity, origin) TOTAL-VARIATION DISTANCE between the fitted
+                                 eigenvector and that week's observed incidence share — 63 overlaid lines can only
+                                 suggest agreement, this measures it. ⚠ Read the gap as the part of the age pattern
+                                 contact behaviour does NOT explain (susceptibility/infectivity/antibody are all
+                                 dropped), not as a fit failure; whether it forecasts better is 9j's question, by WIS.
+                                 §6 gained THREE more figures on 2026-09-10: the per-phase transpose of
+                                 the C* figure, and NGM versions of BOTH layouts (user's choice). The NGM
+                                 combos map 1:1 onto `_TL_SPECS` — `unweighted-negbin|mean`,
+                                 `weighted-hweibull|mean`, `weighted-hweibull|neighbourhood` — so every
+                                 NGM panel has an exact C* twin.
+                                 ⚠ **14j IS NOW A STAGE-2 READER.** It was Stage-1-only until this round.
+                                 It still CANNOT REFIT — every read is `stage2_pooled_path` → `isfile` →
+                                 `load`, exactly `contact_reproduction_draws`' pattern, and nothing calls
+                                 `fit_or_load_stage2`/`two_stage_forecast` — but the dependency is new, so
+                                 a missing `8j_s2_*` now renders a gap in §6 where before nothing in 14j
+                                 would have noticed. All 63 h=1 files exist for all six combos.
+                                 ⚠ **The NGM panels are ONE WEEK LATER than the C* panels**: `Cstar_end`
+                                 is the t₀+h contact matrix (and the antibody column is t₀+h too), while
+                                 the C* panels read the chain at week column `cfg.n_fit` = t₀. Same origin
+                                 label, matrices a week apart, and 100 pooled blocks vs 2000 chain draws.
+                                 ⚠ **The pooled file cannot be re-guarded by `_p0_draws_valid`** — its
+                                 `Cstar_end` already absorbed whatever `p0f` the chain held — so the
+                                 notebook asserts every NGM origin also passed §6's C* guard, the same
+                                 chain. Measured: the NGM eigenvectors are markedly FLATTER than the C*
+                                 ones, because susceptibility and the leaky antibody factor pull mass from
+                                 the child bins toward the adults as `A_a → 1` in the older bins.
+                                 §7 (2026-09-10) — the REPRODUCTION NUMBER, 9j's two figures restricted
+                                 to the same three combos and stacked into one: `14j_reproduction_number.png`
+                                 (+ `.csv`). Top = the full NGM R over the inc2prev national R (England)
+                                 and R = 1; bottom = contacts-only `ρ(C*)/ρ(C*_ref)` with 9j's model-free
+                                 raw-contact line. h=1. Outputs moved to §8.
+                                 ⚠ 14j calls the **UNCACHED** `reproduction_over_time` /
+                                 `relative_contact_reproduction_over_time` — see the Gotcha below; the
+                                 `_or_load` wrappers would clobber 9j's six-combo caches.
+                                 ⚠ §7 ASSERTS its `med`/`lo`/`hi` reproduce 9j's cached `9j_rt_*` /
+                                 `9j_relrt_*` stores EXACTLY (`isequal`, NaNs included) for all three
+                                 shared labels × 63 origins. Those numbers were produced independently by
+                                 a different notebook, so this is the strongest check available — and it
+                                 doubles as proof that `reproduction_over_time`'s new `inf` kwarg takes a
+                                 byte-identical path (9j built the caches via the CSV-reading form).
                                  ⚠ The four §3 pairs do NOT sum to the marginals (contactee age unbinnable ⇒ dropped
                                  from the pairs, counted in `n_contacts_unbinned`); §1 asserts the exact identity.
                                  The off-diagonal pairs are mostly zeros BY CONSTRUCTION — a pair's zeros are its
@@ -374,13 +577,17 @@ Why iid (`-lc0`, user request): the level was whitened through `Lc = chol(Qtᵀ�
 
 ## Known Gotchas
 
-- **8j–13j all pick their generation from `ENV["STAGE1_USE_NUTS"]`, and SINCE 2026-09-04 THEY ALL DEFAULT TO `"true"` — one unset variable now reads one generation everywhere.** The role-split convention is unchanged (*fitting* → the generation it is about to produce; *read-only* → the generation that exists); what changed is that those coincide, because the complete grid on disk is now the NUTS `temporal-w8h-lc0-nuts` one (504 s1 + 1512 s2) and **nothing** exists under `temporal-w8h-lc0`. Previously 9j/10j/11j defaulted to `"false"`, which pointed them at an empty token. **10j additionally had an INVERTED COMPARISON** — `get(ENV, "STAGE1_USE_NUTS", "true") == "false"` — so `STAGE1_USE_NUTS=true` selected *Pathfinder* and the NUTS grid was reachable only by the nonsensical `=false`; no value made 10j agree with 8j/11j. All four are now `get(ENV, "STAGE1_USE_NUTS", "true") == "true"`. **A mismatch still does not error — it REFITS.** Each notebook builds its own `cfg`, and `cfg.stage1_use_nuts` is what appends `-nuts` to the cache token. Point 9j at a generation that was never fitted and every lookup misses; `two_stage_forecast` → `fit_or_load_stage2` → `fit_or_load_stage1` then *fits on miss*, serially (`fit_or_load_stage2` passes no `max_concurrent`, so its 100 per-draw Pathfinder fits run one at a time, ~9× slower than `prefit_stage2!`), and 9j has no per-cell `try/catch` to even log it, so it grinds rather than failing. **Every notebook that can refit now stops you up front** (2026-09-04): 10j cell 4 and **13j cell 4** (added — it was byte-for-byte 10j's minus the assert, and worse, since at `horizons = 1:1` a miss seeds h=1 artefacts a later full run would then `isfile`-SKIP) assert every required `8j_s1_*` **and** `8j_s2_*` for their origin; **9j cell 4** (added) asserts the same over its whole `wins × combos × horizons` grid, before `assemble_or_load_forecasts`, whose own `isfile` covers only its assembly cache; **11j** asserts in cell 2 (Stage 1, h1 only — it needs no Stage 2 and calls nothing that fits). The asserts ARE the guard, do not delete them. Note the second hazard a silent refit carries: it *writes* into `../dt_intermediate` under the live token, so it races any concurrent grid run — and, on this grid, a refitted cell would carry `phi_pf_max`/`phi_pf_override` that the existing 504 lack, mixing the provenance that `audit_stage1_grid` then fails. **12j and 14j need no flag**: both take the framework default `stage1_use_nuts = true`, assert it, and read Stage-1 chains only — 14j additionally calls no `two_stage_forecast`/`fit_or_load_*` anywhere, so it cannot refit even on a total miss. Always audit the grid between 8j and the diagnostics — it lists what is missing for the active token and catches mixed provenance across `sampler`/`ad_backend`/`target_accept`/`nuts_adapts`/`nuts_draws`/`phi_init_scale`/`phi_pf_max`. ⚠ **`tmp/check_grid.jl` no longer exists** (the whole `tmp/` directory left the tree, taking `chain_health.jl`, `run_grid_batched.sh`, `run_diagnostics.sh`, `watch_grid.sh` and `build_13j_nb.py` with it). Its replacement is **`audit_stage1_grid(cfg; …)`** in `src/14j_viz_utils.jl`, run as 14j §0; it covers Stage 1 only, so there is currently no Stage-2 equivalent. 8j and 9j also read `ENV["FIT_END"]` (default `2021-12-31` ⇒ 63 origins) and `ENV["ORIGIN_MIN"]` (unset), which must match between them; `ORIGIN_MIN=2021-04-25 FIT_END=2021-05-09` gives a 3-origin smoke ending on the origin 10j/11j are hard-coded to. 12j and 13j take their single origin from `ENV["ORIGIN_12J"]`/`ENV["ORIGIN_13J"]` (both default `2021-05-09`).
+- **8j–13j all pick their generation from `ENV["STAGE1_USE_NUTS"]`, and SINCE 2026-09-04 THEY ALL DEFAULT TO `"true"` — one unset variable now reads one generation everywhere.** The role-split convention is unchanged (*fitting* → the generation it is about to produce; *read-only* → the generation that exists); what changed is that those coincide, because the complete grid on disk is now the NUTS `temporal-w8h-lc0-nuts` one (504 s1 + 1512 s2) and **nothing** exists under `temporal-w8h-lc0`. Previously 9j/10j/11j defaulted to `"false"`, which pointed them at an empty token. **10j additionally had an INVERTED COMPARISON** — `get(ENV, "STAGE1_USE_NUTS", "true") == "false"` — so `STAGE1_USE_NUTS=true` selected *Pathfinder* and the NUTS grid was reachable only by the nonsensical `=false`; no value made 10j agree with 8j/11j. All four are now `get(ENV, "STAGE1_USE_NUTS", "true") == "true"`. **A mismatch still does not error — it REFITS.** Each notebook builds its own `cfg`, and `cfg.stage1_use_nuts` is what appends `-nuts` to the cache token. Point 9j at a generation that was never fitted and every lookup misses; `two_stage_forecast` → `fit_or_load_stage2` → `fit_or_load_stage1` then *fits on miss*, serially (`fit_or_load_stage2` passes no `max_concurrent`, so its 100 per-draw Pathfinder fits run one at a time, ~9× slower than `prefit_stage2!`), and 9j has no per-cell `try/catch` to even log it, so it grinds rather than failing. **Every notebook that can refit now stops you up front** (2026-09-04): 10j cell 4 and **13j cell 4** (added — it was byte-for-byte 10j's minus the assert, and worse, since at `horizons = 1:1` a miss seeds h=1 artefacts a later full run would then `isfile`-SKIP) assert every required `8j_s1_*` **and** `8j_s2_*` for their origin; **9j cell 4** (added) asserts the same over its whole `wins × combos × horizons` grid, before `assemble_or_load_forecasts`, whose own `isfile` covers only its assembly cache; **11j** asserts in cell 2 (Stage 1, h1 only — it needs no Stage 2 and calls nothing that fits). The asserts ARE the guard, do not delete them. Note the second hazard a silent refit carries: it *writes* into `../dt_intermediate` under the live token, so it races any concurrent grid run — and, on this grid, a refitted cell would carry `phi_pf_max`/`phi_pf_override` that the existing 504 lack, mixing the provenance that `audit_stage1_grid` then fails. **12j and 14j need no flag**: both take the framework default `stage1_use_nuts = true` and assert it. 12j reads Stage-1 chains only; **14j has read Stage-2 pooled artefacts since 2026-09-10** (§6's NGM figures) — but it still calls no `two_stage_forecast`/`fit_or_load_*` anywhere, so it cannot refit even on a total miss: every Stage-2 read is `stage2_pooled_path` → `isfile` → `load`, `contact_reproduction_draws`' read-only pattern. Always audit the grid between 8j and the diagnostics — it lists what is missing for the active token and catches mixed provenance across `sampler`/`ad_backend`/`target_accept`/`nuts_adapts`/`nuts_draws`/`phi_init_scale`/`phi_pf_max`. ⚠ **`tmp/check_grid.jl` no longer exists** (the whole `tmp/` directory left the tree, taking `chain_health.jl`, `run_grid_batched.sh`, `run_diagnostics.sh`, `watch_grid.sh` and `build_13j_nb.py` with it). Its replacement is **`audit_stage1_grid(cfg; …)`** in `src/14j_viz_utils.jl`, run as 14j §0; it covers Stage 1 only, so there is currently no Stage-2 equivalent. 8j and 9j also read `ENV["FIT_END"]` (default `2021-12-31` ⇒ 63 origins) and `ENV["ORIGIN_MIN"]` (unset), which must match between them; `ORIGIN_MIN=2021-04-25 FIT_END=2021-05-09` gives a 3-origin smoke ending on the origin 10j/11j are hard-coded to. 12j and 13j take their single origin from `ENV["ORIGIN_12J"]`/`ENV["ORIGIN_13J"]` (both default `2021-05-09`).
 - **On the HPC the grid is split by ORIGIN, and three things that are silent on a workstation are not on a cluster** (2026-08-12, `hpc/`). (1) **`ORIGIN_STRIDE`/`ORIGIN_OFFSET`** (`8j_run_grid.jl`) give each Slurm array task a disjoint round-robin slice of the origins — *without* them every task takes `pending[1:MAX_ORIGINS]` from the same disk view, so N tasks fit the SAME chains and race each other's writes. The slice's origin LIST is printed in every task log; two logs sharing an origin is the bug. (`DRY_RUN=1` resolves and prints token/slice/batch then exits **10** — the login-node preflight; 10 rather than 0 so that a `DRY_RUN` left set inside a job stops `run_grid.sh` instead of spinning forever.) The array must start at **0** (both `.slurm` files refuse otherwise: a 1-based array leaves slice 0 unfitted and pushes the last task's offset out of range). (2) **`_mem_available_gib` now reads the cgroup under Slurm** (`_slurm_mem_available_gib`, `joint_model.jl`): `/proc/meminfo` reports the whole 768 GB node, so `MEM_FLOOR_GIB` and `fit_concurrency`'s memory cap were both inert and the job would die by cgroup OOM-kill with nothing in the log. Measured in a 2 GiB container: cgroup 1.73 GiB vs `/proc/meminfo` **23.0 GiB**. The branch is gated on `SLURM_JOB_ID`, so nothing changes locally. (3) **Grid artefacts are written by `_atomic_jldsave`** (temp + rename) — a time-limit SIGKILL mid-`jldsave` leaves a truncated `.jld2`, and EVERY skip-check in this codebase is `isfile`, so a truncated file counts as complete and the grid reports itself finished. ⚠ Two departures from the docx are deliberate and documented in `hpc/README.md`: the depot `rm -rf` must use the HOST path (the docx's "does not work" is because `/workdir/...` only exists inside the container), and `JULIA_DEPOT_PATH` takes ONE colon — the docx's `"…::/opt/julia"` has an empty entry that Julia expands to the shared `~/.julia`, which is the concurrency conflict behind its own `IOError -116`.
 - **The cache token no longer carries its history, so NEVER sniff a model property out of it with a bare `occursin`.** As of 2026-08-09 (user request) `contacts_label` returns the short `temporal-w8h-lc0` (+`-nuts`); the nine-suffix `temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1` form now belongs to the retained generations only (`CONTACTS_TOKEN_AR1`, `CONTACTS_TOKEN_PF`, `CONTACTS_TOKEN_HD` — all literals, because no `cfg` reproduces them). This matters because some model changes leave the chain's parameter names and shapes **completely unchanged**, so a stale chain is undetectable by inspection and the token is the only evidence: the squared-exponential → Matérn 3/2 swap (`-m32`) and the AR(1)-level → iid-level change (`-lc0`) are both like this. Two guards (`reconstruct_mu_draws` in 10j, `load_transmission_draws` in 8j) tested `occursin("-m32", contacts)` and would have **rejected every current chain** the moment the prefix went. Both now go through **`is_legacy_token(contacts)`** (`framework.jl`, tests for the `-gsar-cut` fragment — an exact partition of the tokens that exist, not a heuristic): current-style tokens have the property by construction, only a legacy token must prove it. Write any future guard as `is_legacy_token(c) ? occursin("-marker", c) : true`. ⚠ **The `-m32t` round trip (2026-08-10) is the exception that proves the rule, and it is worth knowing which kind of change you are looking at.** Swapping the temporal kernel RENAMES the parameter (`phi_time` ↔ `log_rho_time`), so for once the chain itself carries the evidence and a guard does not need the token at all. Where that is true, prefer a **fork** over a refusal: `reconstruct_mu_draws` branches on the name and so replays every temporal generation on disk — the archived `-ar1` grid in `dt_intermediate_ar1/` and the one-day `-m32t` smoke alike, both of which a token-based refusal would have locked out. That fork was written for `-m32t` and kept when `-m32t` was reverted; keeping it is what lets the `-m32t` chains still be read as the evidence for reverting them. Where it is not true — `-m32`, `-lc0`, and the level-whitening fork inside that same function — the token remains the only evidence and the guard must go through `is_legacy_token`. Both kinds now live side by side in `reconstruct_mu_draws`; read its docstring before adding a third. ⚠ **A third arrived on 2026-08-10 (`reconstruct_gp_hyper_draws`, 10j §7), and rather than hand-copying the guards the shared three moved into `_stage1_gp_generation`** (`10j_viz_utils.jl`, immediately above `reconstruct_mu_draws`): the `-diag` refusal, the temporal-kernel FORK, and the pre-`-m32` token refusal. Read THAT docstring now — it is where the "which evidence may this guard use" reasoning lives, and it names what deliberately did NOT move (the `-s0`/`-t0` sniffs, which need `P`/`Tn` from the caller). The 8j/10j **fork-vs-refusal asymmetry is unchanged and still deliberate**: `load_transmission_draws` refuses a `log_rho_time` chain because 9j draws one figure per generation, so it keeps its own copy of the three checks and must be kept in step by hand.
 - **A RELOADED CHAIN CAN BE PERFECT AND STILL BE UNUSABLE BY `generated_quantities` — JLD2 serialises the `varname_to_symbol` HASH INDEX, and `hash(::VarName)` is not stable across versions** (found 2026-09-04 on the complete `-w8h-lc0-nuts` grid). The symptom is `KeyError: key log_rho_diag not found` from `DynamicPPL.returned` (which `generated_quantities` now forwards to), on a chain whose columns, dimensions, names and provenance all audit clean. The proof it is the container and not the data: `vn = first(keys(v2s))` — a key taken OUT of the dict — gives `haskey(v2s, vn) == false`. `returned` looks up every parameter that way (`to_samples` → `getindex_varname` → `info.varname_to_symbol[vn]`), so it dies on the first one. **Re-inserting every pair rebuilds the index and the chain replays correctly** (verified: 2000 draws, `K1` 7×7). `_rehash_varname_info` (`joint_model.jl`, immediately above `stage1_moment_draws`) does exactly that, gated on a `haskey` probe so a healthy or in-process chain is returned untouched. ⚠ **`stage1_moment_draws` is the ONLY path in the repo that replays a stored chain through the model**, which is why the repair lives there and nowhere else — every other reader (`reconstruct_mu_draws`, `reconstruct_gp_hyper_draws`, `reconstruct_p0_draws`, `load_nuts_chain`, 12j/14j) indexes the chain BY NAME and never touches this dict, so they read the same files without complaint. That asymmetry is also what makes the bug so confusing: 10j §2/§7, 12j, 13j §2+ and 14j are all fine while 11j dies outright. ⚠ **AND IT DEGRADES SILENTLY WHERE IT DOES NOT CRASH.** `fit_window_infection_draws` (10j/13j cell 5) wraps the same call in a `try/catch` that only warns `could not load two-stage artefacts for fit-window fit`, so before the fix BOTH notebooks completed with exit 0 and eight swallowed `KeyError`s, rendering §5 from nothing. Blank-but-plausible again — grep an executed notebook for `could not load` before trusting that section. ⚠ Do NOT "fix" this by refitting: the chains are correct, and a refit would mix the grid on `phi_pf_max` (see below).
 - **`CONTACTS_TOKEN` is a compile-time constant of the NUTS token, and it is the DEFAULT `contacts` kwarg on most `*_viz_utils.jl` readers — so omitting `contacts` ignores your `cfg` entirely.** `framework.jl` defines it as `contacts_label(FrameworkConfig(constant_contacts = false))`, and `stage1_use_nuts::Bool = true` there is a plain literal (no ENV read), so `CONTACTS_TOKEN` always ends `-nuts` no matter what the notebook's `cfg` or `ENV["STAGE1_USE_NUTS"]` say. Five `reconstruct_mu_draws` call sites in `10j_viz_utils.jl` relied on that default and so read the `-nuts` grid throughout the Pathfinder generation: 48 `no chain for …` warnings, four figures silently all-NaN and the rest never written (fixed 2026-08-08 by passing `contacts = contacts_label(oc.cfg)` / `contacts_label(cfg)`). **`collect_transmission_structure` in `9j_viz_utils.jl` had the identical bug and was MISSED by that sweep** (fixed 2026-08-09): its single bare `load_transmission_draws(lbl, origin, h)` blanked *every* transmission figure in 9j — susc, inf, susc_bin, inf_bin, rho, gamma, gi, F — because a missing Stage-2 artefact is a legitimate "skipped origin×combo", so all 378 lookups returned `nothing` with no warning at all and the panels rendered containing nothing but their reference lines. **The tell is wall-clock**: the collector returns in ~0.4 s when it is reading nothing versus ~11 s when it is reading the grid. Blank-but-plausible panels are the failure mode to expect here, not an error. **Any new `stage1_chain_path`/`stage2_pooled_path`/`reconstruct_*` call must pass `contacts` explicitly** — `oc` carries `cfg`, and the `cfg`-taking wrappers (`plot_dispersion_cells`, `reconstruct_dispersion_draws`, `plot_within_block_sd`) already derive it correctly. Treat a bare call as a bug even when it happens to work.
 - **The AD backend is NOT in the cache token — the artefact records it instead.** `contacts_label` encodes the *sampler* (`-nuts`) but deliberately not `cfg.ad_backend`: the target density is the same function and AD only supplies its gradient, so encoding it would fork the 504/1512-file grids for no scientific difference. But draws are **not** bit-identical across backends (different accumulation order ⇒ chaotically different LBFGS/NUTS paths), so a partially-refitted grid is **mixed-provenance**. Every `8j_s1_*` written since 2026-08-05 carries an `ad_backend` key; audit with `countmap([jldopen(p) do f; haskey(f,"ad_backend") ? f["ad_backend"] : :legacy end for p in glob("8j_s1_*", "../dt_intermediate")])` and regenerate the whole grid under one backend before publishing.
 - **`stage1_phi_init_scale` is the SHARPER version of that hazard, and it is not the AD backend's kind of mixing.** It is also absent from the token (a starting value is not a model property) and also leaves parameter names and dimensions untouched — but where a different `ad_backend` gives a *chaotically* different draw from the *same* posterior, a different φ init can land Pathfinder in a **different mode**: measured 1.000000 vs 0.820 on weighted-hweibull @ 2021-05-02 h1, with `log_eta` −1.56 vs −0.48. Chains differing only in this are not interchangeable. `fit_or_load_stage1` records `phi_init_scale` (2026-08-10) and `audit_stage1_grid` tallies it alongside the backend; pre-2026-08-10 files read `:ABSENT`, which is the wanted signal rather than a gap. ⚠ **`prefit_stage1!` skips existing artefacts, so a changed init is not "overwritten on the next run" — the old chains are silently KEPT.** Move or delete the previous generation before refitting; this nearly cost 24 of 504 chains on 2026-08-10. **`stage1_phi_pf_max` (2026-08-11) is in the same class** and is recorded the same way, with one twist worth knowing: it ships alongside `phi_pf_override`, a **per-cell** key saying whether the guard actually fired. Audit `phi_pf_max` for uniformity; never audit `phi_pf_override`, which is *expected* to be `true` on ~3 of 504 and `false` on the rest. A large override count is not a provenance failure — it is the weighted path piling up at the temporal boundary, i.e. a modelling signal.
+- **The `9j_rt_*` / `9j_relrt_*` R(t) caches key their FILENAME on `(contacts, h)` but validate the MODEL SET from the payload — so a different-model caller silently overwrites them** (`src/9j_viz_utils.jl`). `reproduction_over_time_or_load` and `relative_contact_reproduction_over_time_or_load` check `c["labels"] == labels4`, `@warn` "cache stale", recompute, and then `jldsave` *their* store over the existing file. Call one with three combos (14j §7's set) and 9j's six-combo cache is gone; the next 9j run then finds *its* cache stale and clobbers it back — a rebuild ping-pong whose only symptom is a pair of warnings. Give a different-model caller its own `cache_path`, or call the uncached inner function (14j §7 does the latter, which also keeps its "writes only to `res/`" invariant). ⚠ `9j_obsrt_*` is NOT in this class — it is model-free and validates on `origins` alone, so it is a legitimate shared read.
+- **`reproduction_over_time` re-reads the whole inc2prev estimates CSV once per origin unless you pass `inf`** (`src/9j_viz_utils.jl`). The per-origin line is `load_window_data(win_o; grid)` — the one-argument CSV-reading form — inside the loop, i.e. 63 full parses, which is this collector's dominant cost and the entire reason its cache exists. Passing `inf = load_raw_infection_inputs()` (2026-09-10) switches it to the cached `(win, df, tmap)` form, documented and now asserted byte-identical. All `reproduction_draws` actually consumes from `wd` is the single column `wd.antibody_fc[:, hi]`.
+- **`duration_weight`'s own default `d_max` is 300; the framework's `cfg.d_max` is 240** (`src/degree_dist.jl`). `duration_weight(d, d_max::Real = 300)` — omit the second argument and every level-4 (1–4 h) contact is weighted 150/300 = 0.5 instead of 150/240 = 0.625, silently, with no error and a perfectly plausible result. Same class as leaving `contacts` to default to `CONTACTS_TOKEN`. Every call site in the tree passes `cfg.d_max` explicitly; keep it that way.
+- **`reconstruct_p0_draws` has NO `week_index` bounds guard, while both its siblings do** (`src/10j_viz_utils.jl`; found 2026-09-10, NOT yet fixed). It allocates `Array{Float64,3}(undef, D, A, A)` and fills only the rows matching `t == wk`, so an out-of-range week returns an **uninitialised array** — no error, no warning, garbage. Compare `reconstruct_mu_draws` (`@warn … refusing to reconstruct`) and `_read_disp_chain`, whose own comment describes exactly this failure. Every call site in play is in range (`cfg.n_fit = 8 ≤ Tn = 9`) and 14j §6's `_perron_share` would catch the result via `all(isfinite, C)`, but it is one typo from silent garbage.
 - **`NegBin`'s fields are parametric and must stay that way** (`src/distributions/poisson_mixture.jl`). With abstract `::Real` fields Mooncake ran the 402-dim Stage-1 model at **2.7 grad/s vs ReverseDiff's 41.8** — a 15× regression — while the concrete-typed hurdle-Weibull path was already 9× *faster*. Parameterising took it to 482 grad/s with the log-density unchanged to the last bit. The other legacy distributions here still use `::Real`; they are off the AD hot path (ForwardDiff-fitted) and are deliberately left alone.
 - **A sysimage does not remove Mooncake's per-model warm-up.** `:Mooncake` in `build_sysimage.jl` bakes in Mooncake's own inference/codegen, but `build_rrule` keys on the concrete `DynamicPPL.Model` type, which doesn't exist until `forecast_utils.jl` is included at runtime. `prefit_stage1!` warms one fit per *degree-model type* (a `Set{DataType}`, not the old single `Ref{Bool}` that only ever warmed `dms[1]`) before its `Threads.@spawn` fan-out — deriving inside the fan-out is correct but parks every other worker on Mooncake's global lock while it holds a semaphore slot.
 - `Lomax` struct is defined twice in `src/distributions/poisson_mixture.jl` — don't add a third.
