@@ -4,8 +4,14 @@
         "dockerfile": "Dockerfile",
         "context": ".."
     },
+    // Runs on the host before the container starts: a bind-mount source must already exist.
+    "initializeCommand": "mkdir -p ../${localWorkspaceFolderBasename}-worktrees",
     "mounts": [
         "source=${localWorkspaceFolder},target=/workdir,type=bind,consistency=cached",
+        // git worktrees live in a sibling host dir, mounted at /worktrees. Create them from inside
+        // the container (git worktree add /worktrees/<name> -b <branch>): git stores absolute paths,
+        // and both /workdir/.git and /worktrees/<name> resolve only in the container.
+        "source=${localWorkspaceFolder}/../${localWorkspaceFolderBasename}-worktrees,target=/worktrees,type=bind,consistency=cached",
         "source=sc-heavy-tail-mean,target=/home/jovyan/.claude,type=volume",
         "source=sc-heavy-tail-mean-julia-depot,target=/home/jovyan/.julia,type=volume"
     ],
