@@ -14,14 +14,13 @@
 #     random term) against the *mean* line (level only) isolates that term's contribution.
 #
 # (2) DISPERSION SPREAD. Since 2026-08-02 the dispersion is block-linear × week with NO per-cell
-#     term, `log d_{ij,t} = β[bl,t]` (§4.3). `plot_within_block_sd` compares that against the
-#     retained `-hd` chains, for BOTH degree families — the NegBin dispersion φ and the
+#     term, `log d_{ij,t} = β[bl,t]` (§4.3). `plot_within_block_sd` verifies that every cell of a
+#     block shares one value, for BOTH degree families — the NegBin dispersion φ and the
 #     hurdle-Weibull shape κ (κ is that path's overdispersion parameter: SMALLER κ = heavier tail =
 #     MORE dispersion, so the two families read in opposite directions).
 #
 # ⚠ `stage1_moment_draws` runs `generated_quantities` against the CURRENT `model_degree`, so it can
-# only read CURRENT-token chains. Anything comparing cache generations must go through the
-# `reconstruct_*` mirrors in 10j_viz_utils.jl, which carry an explicit legacy branch.
+# only read CURRENT-token chains.
 #
 # Companion to 11j_weekly_identifiability.ipynb. Requires 8j_viz_utils.jl (`stage1_chain_path`) and
 # 10j_viz_utils.jl (`reconstruct_dispersion_draws`) loaded first, and
@@ -174,73 +173,56 @@ diagnostic scatter.
 cell_npos(apd) = apd.n .* (1 .- apd.p0)
 
 """
-    plot_within_block_sd(dm, origin, cfg, grid; h=1, tokens, save_dirs, res_dir)
+    plot_within_block_sd(dm, origin, cfg, grid; h=1, contacts, save_dir, res_dir)
 
-**Old vs new.** Per week and per child/adult block, the SD of `log(dispersion)` ACROSS the cells of
-that block (posterior median + 90%), one line per cache generation — the flat `-hd` hierarchy versus
-the current no-random-effect model.
+Per week and per child/adult block, the SD of `log(dispersion)` ACROSS the cells of that block
+(posterior median + 90%), from the current-generation Stage-1 chain.
 
-**This is the verification that the per-cell RE is gone.** The current generation's line must be
-**identically 0** at every week in every block, because `log d_{ij,t} = β[bl,t]` gives every cell in
-a block the same value by construction; the `-hd` line shows the spread the RE used to produce.
-Anything non-zero on the current line means a per-cell term survived the 2026-08-02 revert.
+**This is the verification that the per-cell RE is gone.** The line must be **identically 0** at
+every week in every block, because `log d_{ij,t} = β[bl,t]` gives every cell in a block the same
+value by construction. Anything non-zero means a per-cell term survived the 2026-08-02 revert.
 
-It works with no refit because both generations sit on disk and `reconstruct_dispersion_draws` reads
-both — this is exactly why that function keeps its legacy branch. (It cannot be done through
-`stage1_moment_draws`, which runs `generated_quantities` against the current model only.)
+(Until 2026-10-16 it also drew the legacy `-hd` hierarchy alongside, as the spread the RE used to
+produce. Those chains' directory `dt_intermediate_hierarchical/` had left the tree, so that line was
+always missing and was removed together with `CONTACTS_TOKEN_HD`.)
 
-⚠ The two generations differ in **both** token and directory: the `-hd` chains live in
-`dt_intermediate_hierarchical/`. `save_dirs` is parallel to `tokens` for that reason — passing the
-old token against the current `save_dir` silently finds nothing. A missing generation degrades to a
-warning plus that line being omitted.
+The weeks walked are the chain's own `n_fit + h` (the `degree_window` length since `-w8h`), so no
+`week_index` falls outside it.
 
-⚠ The current-generation token comes from `contacts_label(cfg)`, NOT the `CONTACTS_TOKEN` const.
-Using the const here once silently dropped the current line from every panel while leaving the `-hd`
-line intact, so the figure still rendered with a legend and merely appeared to show no spread at all.
-Keep it as `contacts_label(cfg)`.
+⚠ The token comes from `contacts_label(cfg)`, NOT the `CONTACTS_TOKEN` const. Using the const here
+once silently pointed this at a different generation, and the figure still rendered — it merely
+appeared to show no spread at all. Keep it as `contacts_label(cfg)`.
 """
 function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::FrameworkConfig, grid;
                               h::Integer = 1,
-                              tokens = (CONTACTS_TOKEN_HD, contacts_label(cfg)),
-                              save_dirs = (CONTACTS_SAVE_DIR_HD,
-                                           joinpath(@__DIR__, "..", "dt_intermediate")),
+                              contacts::AbstractString = contacts_label(cfg),
+                              save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                               res_dir::AbstractString = "../res")
     lbl = string(degree_label(dm), "|", ngm_label(MeanNGM()))
     A = grid.N
-    # X-axis extent = the LONGEST window in play, 12 weeks. That is `smax + n_fit` for the legacy
-    # `-hd` generation and `n_fit + max(horizons)` for the current one (`-w8h`, 2026-08-09) — equal
-    # by coincidence, since smax == max(horizons) == 4. A chain fitted at h < 4 is SHORTER (n_fit+h),
-    # so its line simply stops early: the per-token loop below breaks when
-    # `reconstruct_dispersion_draws` returns `nothing`, which `_read_disp_chain`'s bounds guard now
-    # does for `week_index` past the chain's own Tn (it used to return uninitialised garbage).
-    Tn = cfg.smax + cfg.n_fit
-    cols = (:grey40, :steelblue)
-    nice = ("-hd (flat τ_t·z RE)", "current (block only)")
+    Tn = cfg.n_fit + h
     blab = ["child→child", "child→adult", "adult→child", "adult→adult"]
+    med = fill(NaN, Tn, 4); lo = fill(NaN, Tn, 4); hi = fill(NaN, Tn, 4)
+    cells = [[(i, j) for i in 1:A, j in 1:A if 2 * (block_of(i, cfg) - 1) + block_of(j, cfg) == bl]
+             for bl in 1:4]
+    for t in 1:Tn
+        dd = reconstruct_dispersion_draws(lbl, origin, h; weighted = is_weighted(dm),
+                                          cfg = cfg, grid = grid, week_index = t,
+                                          contacts = contacts, save_dir = save_dir)
+        dd === nothing && (@warn "plot_within_block_sd: no chain" lbl contacts dir=save_dir;
+                           return nothing)
+        for bl in 1:4
+            s = [std([log(dd[d, i, j]) for (i, j) in cells[bl]]) for d in 1:size(dd, 1)]
+            med[t, bl] = median(s); lo[t, bl] = quantile(s, 0.05); hi[t, bl] = quantile(s, 0.95)
+        end
+    end
     panels = Any[]
     for bl in 1:4
-        cells = [(i, j) for i in 1:A, j in 1:A if 2 * (block_of(i, cfg) - 1) + block_of(j, cfg) == bl]
         pnl = plot(; title = blab[bl], titlefontsize = 8, xlabel = "window week",
-                   ylabel = "SD of log dispersion within block",
-                   legend = (bl == 1 ? :best : false), legendfontsize = 5)
-        for (k, tok) in enumerate(tokens)
-            med = fill(NaN, Tn); lo = fill(NaN, Tn); hi = fill(NaN, Tn); got = false
-            for t in 1:Tn
-                dd = reconstruct_dispersion_draws(lbl, origin, h; weighted = is_weighted(dm),
-                                                  cfg = cfg, grid = grid, week_index = t,
-                                                  contacts = tok, save_dir = save_dirs[k])
-                dd === nothing && break
-                got = true
-                D = size(dd, 1)
-                s = [std([log(dd[d, i, j]) for (i, j) in cells]) for d in 1:D]
-                med[t] = median(s); lo[t] = quantile(s, 0.05); hi[t] = quantile(s, 0.95)
-            end
-            got || (@warn "plot_within_block_sd: no chain for this generation" lbl tok dir=save_dirs[k];
-                    continue)
-            plot!(pnl, 1:Tn, med; ribbon = (med .- lo, hi .- med), lw = 2, marker = :circle,
-                  ms = 2, markerstrokewidth = 0, color = cols[k], fillalpha = 0.12,
-                  label = nice[k])
-        end
+                   ylabel = "SD of log dispersion within block", legend = false)
+        plot!(pnl, 1:Tn, med[:, bl]; ribbon = (med[:, bl] .- lo[:, bl], hi[:, bl] .- med[:, bl]),
+              lw = 2, marker = :circle, ms = 2, markerstrokewidth = 0, color = :steelblue,
+              fillalpha = 0.12)
         push!(panels, pnl)
     end
     sym = is_weighted(dm) ? "κ" : "φ"
@@ -250,7 +232,7 @@ function plot_within_block_sd(dm::ContactDegreeModel, origin::Date, cfg::Framewo
     fig = plot(panels...; layout = (2, 2), size = (1100, 700),
                left_margin = 6Plots.mm, bottom_margin = 8Plots.mm,
                plot_title = "$(degree_label(dm)) — within-block spread of log $sym, " *
-                            "flat hierarchy vs no random effect (origin $origin, h=$h)",
+                            "must be identically 0 (origin $origin, h=$h)",
                plot_titlefontsize = 9)
     savefig(fig, joinpath(res_dir, "11j_within_block_sd_$(degree_label(dm))_$(origin).png"))
     return fig

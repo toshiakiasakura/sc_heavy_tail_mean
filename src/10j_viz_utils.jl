@@ -513,8 +513,7 @@ between the table and the two figures.
 at all, so pointing a figure at a retained generation (`CONTACTS_TOKEN_AR1` spans Uniform → Beta(2,2)
 → Beta(3,3) for φ, and a different `gp_len_prior` before `-m32`) would draw today's band against
 another generation's draws with nothing raised. Hence `label`, which every figure PRINTS, so a
-mismatch is at least visible. (`plot_tau_over_weeks` hard-codes its σ for the mirror-image reason:
-ITS chains are legacy, so `cfg` would be the wrong source.)
+mismatch is at least visible.
 """
 function _prior_hyper(cfg, par::Symbol; q = (0.05, 0.5, 0.95))
     # Push the Normal quantiles through the model's own clamp+exp, rather than using LogNormal's
@@ -913,7 +912,7 @@ end
 
 """
     _read_disp_chain(lbl, origin, h; weighted, week_index, contacts, save_dir, A)
-        -> (; β, Z, τ, wk, lo, hi, D, legacy)  |  nothing
+        -> (; β, wk, lo, hi, D)  |  nothing
 
 Chain reader behind `reconstruct_dispersion_draws`: pulls the dispersion latents out of a cached
 Stage-1 chain for ONE week, without composing them.
@@ -921,21 +920,14 @@ Stage-1 chain for ONE week, without composing them.
 Returns `β` (D×4 block-linear log-dispersion), the resolved week `wk` (`nothing` ⇒ pooled chain),
 the soft-clamp bounds `lo`/`hi` for this degree family, and `D` draws.
 
-**Reads BOTH cache generations**, told apart by whether the chain carries a per-cell random term:
+Reads the CURRENT generation only: dispersion is block-linear × week, `log_disp_{ij,t} = β[bl,t]`,
+with no per-cell term.
 
-- **current** (`legacy = false`): dispersion is block-linear × week only, `log_disp_{ij,t} = β[bl,t]`.
-  `Z` and `τ` come back `nothing`.
-- **legacy `-hd`** (`legacy = true`, `CONTACTS_TOKEN_HD` in `CONTACTS_SAVE_DIR_HD`): the flat
-  non-centred hierarchy, `log_disp_{ij,t} = β[bl,t] + τ_t·z_{ij,t}`. `Z` is D×A², `τ` is length-D.
-
-The legacy branch is kept ALIVE ON PURPOSE: it is what lets `plot_within_block_sd` compare "flat
-hierarchy" against "no hierarchy" without refitting the old chains. `stage1_moment_draws` cannot do
-this — it runs `generated_quantities` against the CURRENT `model_degree`, which has no `tau`/`z_k` to
-read, so it would either error or silently re-draw them from the prior. Cross-generation work must go
-through this mirror.
-
-A `-rhs` horseshoe chain (the 2026-08-02 generation, identified by `c2`) is rejected with a warning:
-that parameter space no longer exists in `model_degree`.
+A chain that DOES carry a per-cell term is rejected with a warning, because that parameter space no
+longer exists in `model_degree` and reading only its `β` would silently drop the term: the `-rhs`
+horseshoe (2026-08-02, identified by `c2`) and the flat `-hd` hierarchy (2026-07-30 → 08-02,
+identified by `z_k`/`z_kappa`). The `-hd` branch that used to replay those chains was removed on
+2026-10-16 — their directory, `dt_intermediate_hierarchical/`, had already left the tree.
 """
 function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
                           weighted::Bool, week_index::Union{Int,Nothing},
@@ -950,7 +942,6 @@ function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
     end
 
     bbase  = weighted ? "log_kappa" : "log_k"              # block-linear dispersion param
-    zbase  = weighted ? "z_kappa"   : "z_k"                # per-cell RE — legacy `-hd` chains only
     lo, hi = weighted ? (-4.3, 5.0) : (-4.0, 5.0)          # soft-clamp bounds MIRROR _cell_moments!
                                                            # (κ widened -3,3 → -4.3,5 on 2026-07-30
                                                            #  and RETAINED after the RE was removed;
@@ -974,8 +965,8 @@ function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
         # generation and the horizon (n_fit+h = 9..12 now, a flat 12 under `-t0-ar1`): with
         # `wk > Tn_chn` NO entry matches below, `β` is left as the
         # UNINITIALISED `Matrix{Float64}(undef, …)` it was allocated as, and the caller gets garbage
-        # dispersion values with no error and no warning. `plot_within_block_sd` walks t = 1:12 across
-        # both generations and relies on this returning `nothing` to stop at the shorter one.
+        # dispersion values with no error and no warning. A caller walking the weeks must take the
+        # chain's own length `n_fit + h`, as `plot_within_block_sd` does — never a flat 12.
         if !(1 <= wk <= Tn_chn)
             @warn "week_index $wk outside the chain's $Tn_chn weeks" path
             return nothing
@@ -990,41 +981,18 @@ function _read_disp_chain(lbl::AbstractString, origin::Date, h::Integer;
         end
     end
 
-    # A 2-D `name[p, t]` block for week `wk`, or the 1-D `name[p]` form in the pooled regime.
-    function _cellmat(base)
-        M = Matrix{Float64}(undef, D, A * A)
-        if wk === nothing
-            w1 = Regex("^" * base * raw"\[(\d+)\]$")
-            hit = false
-            for n in pnames
-                m = match(w1, n); m === nothing && continue
-                M[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])); hit = true
-            end
-            return hit ? M : nothing
-        end
-        w2 = Regex("^" * base * raw"\[(\d+)\s*,\s*(\d+)\]$")
-        hit = false
-        for n in pnames
-            m = match(w2, n); m === nothing && continue
-            parse(Int, m.captures[2]) == wk || continue
-            M[:, parse(Int, m.captures[1])] = vec(Array(chn[Symbol(n)])); hit = true
-        end
-        return hit ? M : nothing
-    end
-
     if any(n -> n == "c2", pnames)
         @warn "chain carries `c2` — this is a `-rhs` regularised-horseshoe chain, a parameter space \
                `model_degree` no longer has (removed 2026-08-02). Refit under the current token." path
         return nothing
     end
 
-    Z = _cellmat(zbase)
-    if Z === nothing                                       # current generation: no per-cell RE
-        return (; β, Z = nothing, τ = nothing, wk, lo, hi, D, legacy = false)
+    if any(n -> startswith(n, "z_k[") || startswith(n, "z_kappa["), pnames)
+        @warn "chain carries a per-cell dispersion RE (`z_k`/`z_kappa`) — this is a legacy `-hd` chain, \
+               a parameter space `model_degree` no longer has (removed 2026-08-02)." path
+        return nothing
     end
-    # legacy `-hd`: τ_t per week (`tau[wk]`), or a bare scalar in the legacy pooled regime.
-    τ = wk === nothing ? vec(Array(chn[:tau])) : vec(Array(chn[Symbol("tau[$wk]")]))
-    return (; β, Z, τ, wk, lo, hi, D, legacy = true)
+    return (; β, wk, lo, hi, D)
 end
 
 """
@@ -1049,11 +1017,9 @@ the standing rule for every viz mirror here:
 24) ordered cells of a child/adult block share one value. Flat quadrants in `plot_dispersion_cells`
 are now the CORRECT reading, not the clamp-compression failure signature they were while the per-cell
 random effect existed. The `ndraws × A × A` shape is kept (rather than reverting to `ndraws × 4`) so
-callers keep indexing `[:, i, j]`, and so a legacy chain can be read into the same container.
+callers keep indexing `[:, i, j]`.
 
-For a legacy `-hd` chain (`CONTACTS_TOKEN_HD` + `CONTACTS_SAVE_DIR_HD`) the per-cell term `τ_t·z_{ij}`
-IS applied, so those draws do vary within a block — that contrast is exactly what
-`plot_within_block_sd` measures. `week_index` defaults to the last window week (the origin week the
+`week_index` defaults to the last window week (the origin week the
 NGM is frozen at). Returns `nothing` when the chain file is missing.
 """
 function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Integer;
@@ -1067,11 +1033,9 @@ function reconstruct_dispersion_draws(lbl::AbstractString, origin::Date, h::Inte
     A = grid.N
     disp = Array{Float64,3}(undef, r.D, A, A)
     for i in 1:A, j in 1:A
-        bl    = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
-        pcode = (i - 1) * A + j
+        bl = 2 * (block_of(i, cfg) - 1) + block_of(j, cfg)
         for d in 1:r.D
-            δ = r.legacy ? r.τ[d] * r.Z[d, pcode] : 0.0    # current model has NO per-cell term
-            disp[d, i, j] = exp(_softclamp(r.β[d, bl] + δ, r.lo, r.hi))
+            disp[d, i, j] = exp(_softclamp(r.β[d, bl], r.lo, r.hi))
         end
     end
     return disp
@@ -1129,91 +1093,6 @@ function reconstruct_p0_draws(lbl::AbstractString, origin::Date, h::Integer; gri
 end
 
 """
-    reconstruct_tau_draws(lbl, origin, h; contacts, save_dir) -> ndraws × Tn  |  nothing
-
-The dispersion random-effect **global** scale τ. Half-Normal, so it is stored untransformed: no
-exp/softclamp mirror needed here, unlike `reconstruct_dispersion_draws`.
-
-⚠ **LEGACY READER.** The current model has no dispersion random effect at all (removed 2026-08-02),
-so there is no `tau` in a current chain and this returns `nothing` for one. It stays alive for the
-`-hd` chains in `CONTACTS_SAVE_DIR_HD`, which stored `tau[t]` per week — pass `CONTACTS_TOKEN_HD`
-**and** that `save_dir`. Returned as an `ndraws × Tn` matrix (`Tn = 1` for the legacy pooled regime),
-so callers need not branch. Returns `nothing` if the chain is missing or carries no `tau`.
-"""
-function reconstruct_tau_draws(lbl::AbstractString, origin::Date, h::Integer;
-                               contacts::AbstractString = CONTACTS_TOKEN,
-                               save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
-    path = stage1_chain_path(lbl, origin, h; contacts = contacts, save_dir = save_dir)
-    isfile(path) || return nothing
-    chn = try
-        load(path, "result")
-    catch err
-        @warn "could not load chain" path err
-        return nothing
-    end
-    pnames = string.(names(chn, :parameters))
-    ent = [(parse(Int, m.captures[1]), n)
-           for n in pnames for m in (match(r"^tau\[(\d+)\]$", n),) if m !== nothing]
-    isempty(ent) && return reshape(vec(Array(chn[:tau])), :, 1)     # pooled: scalar τ
-    Tn = maximum(first.(ent))
-    D  = size(chn, 1) * size(chn, 3)
-    out = Matrix{Float64}(undef, D, Tn)
-    for (t, name) in ent
-        out[:, t] = vec(Array(chn[Symbol(name)]))
-    end
-    return out
-end
-
-"""
-    plot_tau_over_weeks(lbl, origin, cfg, weeks; h=1, save_dir) -> Plots.Plot | nothing
-
-Posterior median + 90% band of the dispersion RE scale τ_t across the window weeks, against its
-`N⁺(0, 0.5)` prior band (grey) — the scale those `-hd` chains were actually fit under, hard-coded
-here rather than read from `cfg`, whose τ₀ has since moved twice and is now per-family.
-
-⚠ **LEGACY PANEL.** The current model has no dispersion random effect, so there is no τ to plot and
-this returns `nothing` for a current chain. It is kept because it still reads the `-hd` chains in
-`CONTACTS_SAVE_DIR_HD` (its defaults point there), and running it on those documents what was given
-up when the RE was removed on 2026-08-02: how large the per-cell scale actually was, week by week,
-and whether it varied at all.
-"""
-function plot_tau_over_weeks(lbl::AbstractString, origin::Date, cfg, weeks;
-                             h::Integer = 1,
-                             contacts::AbstractString = CONTACTS_TOKEN_HD,
-                             save_dir::AbstractString = CONTACTS_SAVE_DIR_HD)
-    τ = reconstruct_tau_draws(lbl, origin, h; contacts = contacts, save_dir = save_dir)
-    τ === nothing && (@warn "no Stage-1 chain for τ panel" lbl origin contacts; return nothing)
-    Tn = size(τ, 2)
-    if Tn == 1
-        @warn "plot_tau_over_weeks: τ is a scalar in this chain — no week axis to plot. This panel \
-               only applies to the legacy `-hd` chains (CONTACTS_TOKEN_HD/CONTACTS_SAVE_DIR_HD)." lbl contacts
-        return nothing
-    end
-    wks = length(weeks) == Tn ? collect(weeks) : collect(1:Tn)
-    # `view(...)` function form, NOT the space-form `@view`: in an argument list with further args
-    # the macro greedily swallows them (`quantile(@view τ[:, t], 0.05)` → "Invalid use of @view
-    # macro"). Same trap the model's `_cell_moments!` call site documents.
-    med = [median(view(τ, :, t)) for t in 1:Tn]
-    lo  = [quantile(view(τ, :, t), 0.05) for t in 1:Tn]
-    hi  = [quantile(view(τ, :, t), 0.95) for t in 1:Tn]
-    # half-Normal N⁺(0,σ) prior quantiles: q(p) = σ·Φ⁻¹((1+p)/2). The `-hd` chains were fit under
-    # the OLD prior scale 0.5, not the current cfg value — hard-code it so the band is honest.
-    σp  = 0.5
-    pri = (med = σp * 0.6744897501960817, lo = σp * 0.06270677794321385, hi = σp * 1.959963984540054)
-    p = plot(; title = "$lbl — LEGACY per-week dispersion RE scale τ_t (origin $origin, h=$h)",
-             titlefontsize = 9,
-             xlabel = "window week", ylabel = "τ_t  (log-scale SD of the per-cell RE)",
-             legend = :topright, legendfontsize = 6, xrotation = 45, ylims = (0, max(σp * 2.5, maximum(hi) * 1.1)))
-    # Date-valued series FIRST — a leading hline!/hspan! locks a numeric axis and mangles date ticks.
-    plot!(p, wks, med; lw = 2, marker = :circle, ms = 3, markerstrokewidth = 0,
-          ribbon = (med .- lo, hi .- med), fillalpha = 0.18, label = "posterior median & 90%")
-    plot!(p, wks, fill(pri.med, Tn); lw = 1.2, ls = :dot, color = :grey40, label = "prior median & 90% (σ=0.5)",
-          ribbon = (fill(pri.med - pri.lo, Tn), fill(pri.hi - pri.med, Tn)),
-          fillalpha = 0.08, fillcolor = :grey60)
-    return p
-end
-
-"""
     plot_dispersion_cells(lbl, origin, cfg, grid; weighted, h=1, week_index=nothing, save_dir)
         -> Plots.Plot | nothing
 
@@ -1223,9 +1102,7 @@ the child/adult **block boundary** drawn on top.
 ⚠ **Four flat quadrants are the CORRECT result** for the current model. Dispersion is block-linear ×
 week with no per-cell term, so every cell inside a child/adult block is identical by construction and
 this panel is really a 2×2 read-out drawn on a 7×7 grid. It is kept because it is the clearest visual
-confirmation of that, and because pointing it at the legacy `-hd` chains
-(`save_dir = CONTACTS_SAVE_DIR_HD`, `contacts = CONTACTS_TOKEN_HD`) shows the within-quadrant
-variation the per-cell RE used to produce — the before/after in one picture.
+confirmation of that.
 
 (Between 2026-07-30 and 2026-08-02 the reading was the opposite: flat quadrants then meant the RE
 scale had collapsed to ~0. Don't carry that interpretation over.)

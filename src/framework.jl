@@ -295,7 +295,7 @@ different parameter spaces never reload each other's stale chains.
 distinguishing changes; it stopped being a running version tag on 2026-08-09, when nine accumulated
 suffixes were dropped (see the `-w8h-lc0` entry at the end). Everything below is the history those
 suffixes recorded, kept as documentation of what each generation on disk means — the retained
-tokens are the `CONTACTS_TOKEN_PF`/`_HD`/`_AR1` literals, not this function.
+tokens are the `CONTACTS_TOKEN_PF`/`_AR1` literals, not this function.
 
 The historical suffix chain, oldest first (the filename does not otherwise encode
 dispersion/transmission structure): `-gsar-cut`
@@ -352,12 +352,12 @@ The token is SHARED with `stage2_path`, and that is correct here (unlike the 202
 where bumping would have orphaned Stage-1 chains for a Stage-2-only change): Stage 2 conditions on
 Stage-1 draws, so a Stage-1 sampler change invalidates both. The Pathfinder generation keeps the
 un-suffixed token and stays on disk untouched as the comparison baseline — read the two side by
-side the way `11j_viz_utils.jl` already reads `CONTACTS_TOKEN_HD`.
+side, passing `contacts` (and `save_dir`) explicitly to the viz readers.
 
-**Both older generations are RETAINED on disk**: `-hd` in `dt_intermediate_hierarchical/` (2022 files)
-and the pre-hierarchy `…-sc` in `dt_intermediate_old/` (1520 files). The `-hd` set is still read by
-`src/10j_viz_utils.jl`/`11j_viz_utils.jl` to compare "flat hierarchy" against "no hierarchy"; it needs
-`CONTACTS_TOKEN_HD` **and** `CONTACTS_SAVE_DIR_HD` together, since token and directory both differ.
+**Both older generations were once RETAINED on disk**: `-hd` in `dt_intermediate_hierarchical/`
+(2022 files) and the pre-hierarchy `…-sc` in `dt_intermediate_old/` (1520 files). Both directories
+have since left the tree, and the `-hd` readers (`CONTACTS_TOKEN_HD`, `reconstruct_tau_draws`,
+`plot_tau_over_weeks`, the legacy branch of `_read_disp_chain`) were removed with them on 2026-10-16.
 The `dt_intermediate_old/` set is NOT reusable here even though its Stage 1 also has no RE — its
 hurdle-Weibull Stage 1 lacks `p0f` and used the old κ clamp [-3,3], and all of its Stage 2 predates
 `w_mu`/`w_sigma`, `ref_bin=4` and the `susc_inf_sd_prior` change.
@@ -623,8 +623,8 @@ contacts_label(cfg::FrameworkConfig) =
 Does `contacts` name a **retained previous generation** rather than a current-style one?
 
 The test is the `-gsar-cut` fragment. Every token minted before 2026-08-09 carries the long
-accumulated prefix `…-gsar-cut-sc-p0-gi…` (`CONTACTS_TOKEN_PF`, `CONTACTS_TOKEN_HD`,
-`CONTACTS_TOKEN_AR1` and everything before them); no token minted after it does, because the prefix
+accumulated prefix `…-gsar-cut-sc-p0-gi…` (`CONTACTS_TOKEN_PF`, `CONTACTS_TOKEN_AR1` and
+everything before them); no token minted after it does, because the prefix
 was dropped that day. So this is an exact partition of the tokens that exist, not a heuristic.
 
 WHY IT EXISTS. Some model changes leave the chain's parameter names and shapes completely
@@ -643,7 +643,7 @@ carry a positive marker for a property it has by construction.
 is_legacy_token(contacts::AbstractString) = occursin("-gsar-cut", contacts)
 
 """Default contacts token for the read-only viz helpers that do NOT receive a `cfg`
-(`stage1_chain_path`, `reconstruct_p0_draws`, `reconstruct_tau_draws`, …), so a token bump lands in
+(`stage1_chain_path`, `reconstruct_p0_draws`, …), so a token bump lands in
 one place instead of the seven hard-coded copies that previously had to be edited in lockstep.
 Resolves to the per-week (`constant_contacts=false`) regime — the setting every notebook uses — and,
 since `stage1_use_nuts` became the default on 2026-08-05, to the **NUTS** sampler generation, i.e. it
@@ -653,7 +653,7 @@ now carries the `-nuts` suffix.
 holds 504 `8j_s1_*` + 1512 `8j_s2_*` under `temporal-w8h-lc0-nuts` — both degree models × 63 origins
 (2020-10-18 … 2021-12-26) × h1–4 × the six combos — fitted on the HPC with NUTS/Mooncake. So the
 read-only helpers that default to this constant (`stage1_chain_path`, `reconstruct_p0_draws`,
-`reconstruct_tau_draws`, the 9j/10j/11j/12j figures) now hit the grid by default, and the hazard has
+the 9j/10j/11j/12j figures) now hit the grid by default, and the hazard has
 INVERTED: what breaks is pointing a notebook AWAY from `-nuts`, which is why 9j/10j/13j had their
 `ENV["STAGE1_USE_NUTS"]` defaults corrected the same day. Audit with `audit_stage1_grid` (14j §0).
 
@@ -669,7 +669,7 @@ It is a load-time constant built from the **default** `FrameworkConfig`. The tok
 any dispersion prior (it did while the horseshoe's τ₀ was being tuned), so it is stable again — but
 helpers that take a `cfg` still default to `contacts_label(cfg)` rather than this, which stays the
 right habit for any future field that does enter the token. Use this only where no `cfg` is in scope
-(see `CONTACTS_TOKEN_HD` for the previous generation)."""
+(see `CONTACTS_TOKEN_AR1` for the previous generation)."""
 const CONTACTS_TOKEN = contacts_label(FrameworkConfig(constant_contacts = false))
 
 """The **pre-`-s0`** Pathfinder Stage-1 generation's token — what the `8j_s1_*` / `8j_s2_*` files in
@@ -680,7 +680,7 @@ const CONTACTS_TOKEN = contacts_label(FrameworkConfig(constant_contacts = false)
 ⚠ **A LITERAL, no longer `contacts_label(…; stage1_use_nuts=false)`.** It became one when `-s0`
 landed the same day: that generation predates the sum-to-zero constraint, so it now differs from the
 current token by a MODEL component as well as the sampler, and no `cfg` can reproduce it. This is
-the same pattern `CONTACTS_TOKEN_HD` already uses — a retained generation is named by its literal
+the pattern every retained generation follows — it is named by its literal
 string, because the config that produced it no longer exists. Its Stage 1 has the unconstrained
 `z` (28×12 = 336 coordinates, 402/990 total), which is why `reconstruct_mu_draws` must branch on the
 field construction rather than assume the current one.
@@ -703,11 +703,10 @@ default `ENV["STAGE1_USE_NUTS"]` to `"true"` and read THAT. This generation is r
 side-by-side comparison only, and reaching it is now an explicit, deliberate act.
 
 ⚠ **It needs `CONTACTS_SAVE_DIR_AR1` too** — the grid was moved out of `dt_intermediate/` into
-`dt_intermediate_ar1/` when `-w8h-lc0` landed, so this is the `CONTACTS_TOKEN_HD` situation and not
-the `CONTACTS_TOKEN_PF` one: passing the token alone against the default `save_dir` finds **nothing** —
+`dt_intermediate_ar1/` when `-w8h-lc0` landed, so unlike `CONTACTS_TOKEN_PF` passing the token alone against the default `save_dir` finds **nothing** —
 `dt_intermediate/` holds the current `-nuts` generation and nothing under this token.
 
-A LITERAL for the usual reason (cf. `CONTACTS_TOKEN_PF`/`_HD`): no `cfg` can reproduce it now that
+A LITERAL for the usual reason (cf. `CONTACTS_TOKEN_PF`): no `cfg` can reproduce it now that
 the window length and the level construction have both moved. Its Stage 1 has Tn = 12 (389/977
 latents) and its `c_t` is whitened through `Lc`, so `reconstruct_mu_draws` must branch on the
 construction — which it does, via `is_legacy_token`."""
@@ -718,25 +717,6 @@ const CONTACTS_TOKEN_AR1 = "temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1"
 `CONTACTS_TOKEN_AR1`; token-without-directory silently finds nothing. Path is relative to `src/`,
 matching the rest of the framework's `cwd == src/` convention."""
 const CONTACTS_SAVE_DIR_AR1 = joinpath(@__DIR__, "..", "dt_intermediate_ar1")
-
-"""The PREVIOUS generation's token (`-hd`, 2026-07-30 → 2026-08-02): flat hierarchical dispersion
-with a per-week half-Normal τ_t (and, briefly after it, the `-rhs` horseshoe). `plot_within_block_sd`
-reads it side by side with `CONTACTS_TOKEN` as the "did the RE actually go away" check — the current
-model's within-block SD of log-dispersion must be identically 0 against a non-zero `-hd` line. Only
-the dispersion mirrors understand it — `stage1_moment_draws` does NOT (see `_read_disp_chain`).
-
-⚠ **`CONTACTS_SAVE_DIR_HD` NO LONGER EXISTS (verified 2026-09-04)**, so that comparison currently
-renders the current line alone: every `-hd` reader is `isfile || return nothing`, which is why this
-degrades to a missing panel rather than an error. Check the DIRECTORY as well as the token before
-concluding anything from a blank `-hd` series."""
-const CONTACTS_TOKEN_HD = "temporal-gsar-cut-sc-hd-p0-gi"
-
-"""Where the `-hd` generation's chains live. They were moved out of `dt_intermediate/` into
-`dt_intermediate_hierarchical/` (2022 files: 504 `8j_s1_*`, 1512 `8j_s2_*`, plus the derived `9j_*`
-caches), so a cross-generation read needs BOTH a different token and a different directory — passing
-`CONTACTS_TOKEN_HD` alone against the default `save_dir` silently finds nothing. Path is relative to
-`src/`, matching the rest of the framework's `cwd == src/` convention."""
-const CONTACTS_SAVE_DIR_HD = joinpath(@__DIR__, "..", "dt_intermediate_hierarchical")
 
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).
