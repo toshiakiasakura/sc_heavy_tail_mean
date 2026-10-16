@@ -82,7 +82,15 @@ src/
   renewal.jl                 Generation-interval PMF (log-normal) + weekly renewal iteration / frozen-contact forecast
   ngm.jl                     NGM builders (Mean / Neighbourhood / DiagonalMean / Null): C* = builder C0 used directly, no post-hoc balancing + leaky susceptibility
   joint_model.jl             Two-stage cut: model_degree (Stage 1) + model_transmission (Stage 2); fit_stage1/stage2_inputs/fit_stage2_pooled; two_stage_forecast; prefit_stage1!/prefit_stage2!; null_contact_level/null_moment_draws
-  scoring.jl                 WIS via R scoringutils (RCall, quantile format) + native sample CRPS cross-check
+  scoring.jl                 WIS via R scoringutils (RCall, quantile format) + native sample CRPS cross-check.
+                               Since 2026-10-15 also the two MULTIVARIATE rules 15j needs — `energy_score(X, y)`
+                               and `variogram_score(X, y; p=0.5)`, both taking `X` as `d × M` (one COLUMN per draw,
+                               matching `scoringRules::es_sample`) — plus `_kbn`, their compensated-summation step.
+                               ⚠ `energy_score` at `d == 1` IS `crps_sample`, same `1/M²` convention; that identity
+                               is the file's sharpest tripwire and the reason `_kbn` exists (naive accumulation of
+                               the 5e7-term pair sum broke it by 8.3e-6 relative at M=10 000; see tasks/lessons.md).
+                               `score_wis` also gained a sixth frame, **`by_model_dt_h_age`** (the FULL forecast
+                               unit, 21 168 rows) — any new frame MUST be added to the `required`-columns assert.
   8j_viz_utils.jl            Read-only 8j viz — reconstructs susc/inf/ρ from cached joint-model chains (no model rebuild)
   9j_viz_utils.jl            Forecast assembly cache + scoring reports + all 8j/9j figures (REF_MODEL, panel_grid)
   10j_viz_utils.jl           Model diagnostics — μ/dispersion reconstruction from Stage-1 chains (stays on the original four combos); `_read_disp_chain` carries a legacy `-hd` branch for the retained hierarchical chains.
@@ -112,7 +120,7 @@ src/
                                ⚠ **`assign_age_bin` CONSUMES `rng`** (see `degree_agepair.jl`): participants first,
                                contactees second, from ONE `MersenneTwister(cfg.seed)`. Appending the contactee draws
                                AFTER the participant ones is exactly why adding the pairs left the marginals
-                               bit-identical — verified against the pre-existing `res/14j_fit_summary.csv`.
+                               bit-identical — verified against the pre-existing `res_prev_mixed_20261015/14j_fit_summary.csv`.
                                ⚠ **THE FOUR PAIRS DO NOT SUM TO THE MARGINALS, DELIBERATELY.** A pair needs the
                                contactee's bin and `assign_age_bin` returns `nothing` below the grid's first bin;
                                those contacts are dropped from the pairs and counted in the marginal's
@@ -258,6 +266,75 @@ src/
                                  none): `panel ∈ {ngm_R, contact_rel_R}`, per label × origin, plus the
                                  observed series and the weekly-averaged national R.
 
+  15j_viz_utils.jl           MULTIVARIATE scoring (2026-10-15; margins cut 2026-10-16) — 9j's WIS is univariate, so
+                               nothing asked whether the 7 age bins move TOGETHER as a model says. Reads 9j's own
+                               `9j_assembly_*.jld2` (`load_9j_assembly`: `isfile` → `load` → validate; it deliberately
+                               does NOT call `assemble_or_load_forecasts`, which fits on miss) and recovers truth from
+                               `qall.observed` (`assembly_truth`), so it needs NO inc2prev or CoMix read and cannot
+                               refit — 15j §5 asserts that by grep.
+                               ⚠ **`MARGIN_ORDER` IS NOW `("none", "age")` — the horizon-spanning margins `"time"`
+                               and `"age-time"` ARE NOT REPORTED** (user request, 2026-10-16), and the reason is
+                               structural: `two_stage_forecast` fits every horizon with its own `fit_or_load_stage2`
+                               and its own `MersenneTwister(cfg.seed + h)` and plugs the lag with the MEDIAN over
+                               draws, so the model emits NO cross-horizon joint predictive to score. `decouple_check`
+                               measured it — destroying the cross-horizon draw pairing moved ES ≤0.06% and VS ≤0.8%,
+                               because there was no coupling there to destroy. Both margins stay COMPUTABLE behind an
+                               explicit `margins =` (`_margin_groups` and `wis_aggregate` keep their branches); they
+                               are simply not reported. `"none"` (d=1) is NOT a view either — it is the baseline that
+                               carries the ES ≡ `crps_sample` assert and the only WIS-vs-CRPS comparison on an
+                               identical cell (measured WIS/CRPS median ratio 1.0452, the 19-level discretisation gap).
+                               ⚠ **LOG SCALE ONLY** for anything reported, and for these rules that is not a
+                               preference: the fans hold extreme but FINITE draws (max 3.80e109) that every existing
+                               guard passes and that WIS never sees (`to_quantile_long` keeps only the 5–95%
+                               quantiles), so natural-scale ES reaches 6.1e101 at the worst cell. `p = 0.5` does NOT
+                               rescue it.
+                               ⚠ `fast_univariate = true` fills the `d == 1` ES from `crps_sample` (exact, and
+                               ~60% of the sweep's cost); `verify_es_reduces_to_crps` forces the SLOW path, which is
+                               what licenses the shortcut — never read that check off the fast-path rows.
+                               ⚠ **THE MEAN RANKING IS AGGREGATION-INVARIANT AND THE MEDIAN RANKING IS NOT**, and
+                               both are reported (`rel_median`/`rel_mean`, `rank_median`/`rank_mean`) because their
+                               disagreement is a RESULT. Mean-over-groups of a sum-over-collapsed-cells is the total
+                               ÷ the group count and the total is the same cells however grouped; a median of sums is
+                               not a sum of medians. Measured: mean WIS per cell is LITERALLY unchanged across margins
+                               (0.4683 `weighted-hweibull|mean`, 0.5109 `unweighted-negbin|mean`) while the median per
+                               cell moves 0.3087→0.3993 and 0.3334→0.3980 and CROSSES. A rank swap between panels is a
+                               property of the summary statistic, not a disagreement between rules.
+                               ⚠ **THE VARIOGRAM SCORE IS NOT A SKILL RANKING.** VS is shift-invariant and not proper
+                               for the marginals, so a uniformly biased forecast is not penalised at all. Measured on
+                               this grid by `summarise_mvscores_by_horizon` at `margin="age"`: by MEAN, Σ WIS, Σ CRPS
+                               and ES give ONE identical ordering at all four horizons and both variogram orders do
+                               not — and at h=4 `vs_p1` ranks **`no-contact|null` FIRST**, i.e. a model with a constant
+                               C* and no contact data at all wins. Report VS as a dependence diagnostic beside ES,
+                               never instead of it. `plot_score_rank_bump_by_horizon` draws median and mean as two
+                               rows of ONE chart for exactly these two reasons.
+                               ⚠ `decouple_check` permutes each coordinate's draws independently; `margins` now
+                               defaults to `("age",)`, the only vector the model produces jointly.
+                               ⚠ `scoringutils_semantics_check` MOVED from `joint_across = "horizon"` to
+                               `"age_group"` when the horizon margins went. It is the only thing that pins
+                               `joint_across`'s meaning — the assumption the whole notebook rests on — so it has to
+                               live on a margin that is still reported. Moved, never deleted.
+  export_notebook_pdf.py     EXECUTED notebook -> readable PDF (2026-10-15). `jupyter nbconvert --to pdf`
+                               works but produces an unreadable PDF for every notebook here, because they
+                               all print wide DataFrames. Three separate causes, each needing its own fix:
+                               (1) nbconvert hard-wraps output at `charlim = 80`
+                               (`templates/latex/style_jupyter.tex.j2`, `output.text | wrap_text(charlim)`)
+                               using `textwrap`, which strips leading whitespace on continuation lines and
+                               so destroys column alignment. ⚠ Overriding `charlim` with a copied template
+                               did NOT work — the value sits under `if charlim is not defined`, and a custom
+                               template directory was ignored even installed under
+                               `~/.local/share/jupyter/nbconvert/templates` and named with `--template`. The
+                               script registers a NO-OP `wrap_text` on the exporter instead, which is where
+                               the filter actually resolves. (2) DataFrames.jl emits ANSI colour (IJulia's
+                               stdout reports colour support) and `ansi2latex` turns every run into
+                               `\textbf{}`/`\textcolor{}`, inflating the .tex and breaking more lines — so
+                               ANSI is stripped first. (3) Portrait A4 cannot hold 144 monospace characters,
+                               hence landscape + `\fvset{fontsize=\footnotesize}` (the arithmetic is in the
+                               docstring). It also adds `\newcounter{none}`, which pandoc's uncaptioned
+                               `longtable` idiom needs, and it REPORTS any surviving LaTeX error rather than
+                               shipping a PDF that built with two of them.
+                               ⚠ It FAILS if the widest line exceeds what the page can hold, instead of
+                               silently emitting a wrapped table. Run it on the EXECUTED copy, never on the
+                               plain in-tree notebook (it exits if there are no outputs).
   <N>j_*.ipynb               Numbered notebook entry points:
                                1j data explore · 2j duration · 3j effective degree · 4j Danon [legacy] ·
                                5j group contacts · 6j fitting dist · 7j weekly age-pair · 8j forecast fitting ·
@@ -273,6 +350,29 @@ src/
                                  is NO LONGER IN THE TREE, so the generator cannot be re-run. Do NOT hand-port §7 — at
                                  `horizons = 1:1` its §7a horizons figure degenerates to a single x-point (the helper
                                  renders it, but a one-point line chart is not the diagnostic). Restore the generator first.
+                               15j MULTIVARIATE scoring (2026-10-15; reshaped 2026-10-16) — compares 9j's WIS
+                                 against the energy and variogram (p=0.5 and p=1) scores over AGE, at each horizon.
+                                 Pure READER of `9j_assembly_*.jld2`; needs no `ENV["STAGE1_USE_NUTS"]` (asserts the
+                                 default, like 12j/14j) and cannot refit. Outputs `res/15j_*` (11 PNG + 9 CSV). §5
+                                 carries the verification suite, including the reproduction of 9j's own `crps` frame
+                                 for all 378 (model, origin) — the check that catches a transposed age/horizon index,
+                                 which every shape assert passes.
+                                 §7 asks the ranking question twice: `plot_score_rank_bump` (panel per margin) and
+                                 `plot_score_rank_bump_by_horizon` (4 lead times × 2 summary statistics). It then
+                                 carries FOUR `plot_score_diff_over_time` figures — 9j's `plot_wis_diff_over_time`
+                                 ported to each score, SAME reference (`weighted-hweibull|neighbourhood`) and same two
+                                 drawn models PLUS `no-contact|null`, so `res/15j_score_diff_over_time_*.png` reads
+                                 directly against `res/9j_wis_diff_over_time.png`.
+                                 ⚠ Σ WIS in those figures is a SUM over the 7 age bins; 9j's `by_model_dt_h` WIS is a
+                                 MEAN over them. Factor 7 — identical shapes, different y-axis magnitudes.
+                                 ⚠ EVERY `save_show` call in a notebook MUST end in `;`. `save_show` both DISPLAYS
+                                 and RETURNS the figure, so a bare trailing call renders it TWICE. 15j shipped on
+                                 2026-10-15 with 6 of its 8 figures duplicated in the PDF for exactly this reason;
+                                 9j has always had the `;` on all 14 of its calls.
+                                 ⚠ `15j_rel_score_by_age.png` / `15j_rel_score_joint.png` are the DELETED ES-over-time
+                                 and ES-over-age-and-time views. The notebook's last cell warns if either is still in
+                                 `res/`: nothing there records its own provenance, so a leftover PNG of a dropped view
+                                 is worse than one never written.
                                14j PUBLICATION figures (2026-09-04; §5/§6 added 2026-09-10) — the only notebook here that is NOT a diagnostic.
                                  §0 audits the Stage-1 grid (`audit_stage1_grid`); §1–§3 the observed and
                                  duration-weighted degree distributions (pdf + ccdf) with NegBin and hurdle-Weibull
@@ -419,6 +519,29 @@ src/
                                  the row sum, the population weighting and (being monotone) the median across draws
                                  — a cheap exact tripwire for a wrong `g`, a swapped K1/K2 or κ draws out of step
                                  with μ.
+                                 §6c/§6d (2026-10-15) — the INFECTION-SIDE input audit, the twin of §0's contact-side
+                                 grid audit; no CoMix data in either. §6c puts both inc2prev fits against the ONS CIS
+                                 positivity they were fitted to, by age, on 8 panels; §6d collapses to the England
+                                 total and adds the ascertainment ratio. The THIRD incidence source is **UKHSA
+                                 reported case counts** (`ukhsa_weekly_cases`, `make_incidence_total_fig`,
+                                 `incidence_total_frame`).
+                                 ⚠ **`"ukhsa-reported"` is NOT in `_I2P_SOURCES`, deliberately.** That tuple drives
+                                 the inc2prev frame loader, the `gen_dab` frame-identity assert and the per-row
+                                 population assert; a non-inc2prev stem trips all three. It enters as `cis-observed`
+                                 does — one entry in `_I2P_ROWS`/`_I2P_SERIES` plus its own `VAL`/`ND` branch.
+                                 ⚠ `COVID-19_cases_rateRollingMean` is a right-aligned **7-day rolling SUM per
+                                 100k**, so a Sunday week is read off its SATURDAY; `"90"` and `"90+"` are ONE band
+                                 published twice (summing both double-counts); `casesByDay` is `age: "all"` only.
+                                 ⚠ Four of the seven CIS bins nest exactly in 5-year bands; `2-10`, `11-15`, `16-24`
+                                 are apportioned by single-year population (uniform rate within band), and ages 0-1
+                                 are dropped as the grid drops them. Weights come from `dt_ukhsa/` and are ASSERTED
+                                 against `grid.POP` (they reproduce `populations.csv` with difference 0).
+                                 ⚠ Adding this source WIDENED the §6c week calendar 130 → 132: the reported series is
+                                 complete at both edges where neither fit is, and the frame keeps a week when ANY
+                                 source is. The calendar itself is still built from inc2prev + CIS dates only.
+                                 ⚠ Reported cases are infections × **ascertainment**, which falls off a cliff at the
+                                 end of free testing (1 Apr 2022): 0.229 → 0.314 → 0.109 → 0.041 by half-year. The
+                                 CoMix origin span sits entirely LEFT of it. Never read the gap as model error.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 
@@ -452,9 +575,27 @@ dt_intermediate/             Fitted Turing chains (JLD2): date-stamped dist fits
                                length. `_p0_draws_valid` (`14j_viz_utils.jl`) is the detector — a `p0f` coordinate
                                identically 0 or 1 over every draw cannot be a Beta posterior — and the re-transferred
                                grid is clean (0 of 63 h1 chains). Any new reader of `p0f` should call it.
-                               Of the previous generations only ONE survives in the tree:
+                               ⚠ **THE 1512 `8j_s2_*` HERE WERE REFITTED 2026-09-16** against
+                               `estimates_age.csv` after the infection source switched away from
+                               `estimates_age_ab.csv` (see the schema Gotcha). The 504 `8j_s1_*` were NOT refitted
+                               and are the same files throughout — Stage 1 never sees infection data. The token is
+                               UNCHANGED (`contacts_label` encodes no data source, and bumping it would orphan
+                               Stage 1), so **the only record of which source a Stage-2 fit used is which directory
+                               it is in**.
+                               Of the previous generations TWO survive in the tree:
                                  dt_intermediate_ar1/          504 s1 + 1512 s2, CONTACTS_TOKEN_AR1 (= CONTACTS_SAVE_DIR_AR1)
                                                                — Pathfinder, `-t0-ar1`
+                                 dt_intermediate_residual/     504 s1 + 1512 s2, the SAME token as the live grid
+                                                               (`temporal-w8h-lc0-nuts`) — the pre-2026-09-16
+                                                               generation fitted against `estimates_age_ab.csv`,
+                                                               byte-identical to what `dt_intermediate/` held before
+                                                               the refit. ⚠ Same token AND same filenames as the live
+                                                               grid, distinguished ONLY by directory — the sharpest
+                                                               form of the "same token, two generations" hazard below.
+                                                               Reachable by no constant or ENV var: `SAVE_DIR` is
+                                                               hard-coded to `../dt_intermediate` in the driver and
+                                                               the notebook, so it can only be read by passing
+                                                               `save_dir` to a viz helper. It is the rollback path.
                                `dt_intermediate_superseded_20260810/`, `_old/`, `_oldinit_nuts/`, `_hierarchical{,_ver1}/`,
                                `_age_block_ver1/`, `_ar1_uniformphi/`, `_GP_RBP/` and `nuts_pilot*/` are **all gone**, so
                                `CONTACTS_SAVE_DIR_HD` and the `-hd` readers (`plot_within_block_sd`,
@@ -469,7 +610,18 @@ dt_intermediate/             Fitted Turing chains (JLD2): date-stamped dist fits
                                Stage-1 artefacts now record `phi_init_scale`, and `audit_stage1_grid` audits it: an
                                older file tallies `:ABSENT`, so a mixed grid fails the gate.
 inc2prev/                    Git submodule (github.com/epiforecasts/inc2prev). Supplies the CIS age/population grid
-                               (data-processed/populations.csv) and infection + antibody estimates (outputs/estimates_age_ab.csv)
+                               (data-processed/populations.csv) and infection estimates (outputs/estimates_age.csv
+                               since 2026-09-16; **outputs/estimates_age_ab.csv** until then — see the schema Gotcha)
+dt_ukhsa/                    UKHSA dashboard reported COVID-19 cases for England — 14j §6c/§6d ONLY; nothing is
+                               fitted to them. Three COMMITTED CSVs (national daily counts, 5-year-band daily 7-day
+                               rates, England single-year populations) + `fetch_ukhsa_cases.py`, which built them.
+                               ⚠ That script is the ONLY thing in this repo that touches the network, and it is
+                               Python because the API serves paginated JSON only (`?format=csv` 404s, the bulk
+                               endpoint is 403) while `Project.toml` carries no HTTP/JSON package — adding one
+                               would change `Manifest.toml` and force an HPC image rebuild. It re-runs its four
+                               self-tests on every invocation, including against an unchanged cache.
+                               ⚠ The single-year populations are emitted here because `inc2prev/data-raw/uk_pop.xls`
+                               is a legacy OLE2 `.xls` that **XLSX.jl cannot read** at all.
 inst/                        Spec markdown — 2_weekly_age_pair.md (→7j), 3_preliminary_model_struct.md (→8j+framework),
                                analysis_plan_heavy_tail_mean.md/.docx (overall plan, docx wins), pcbi.1011453.pdf (Munday 2023), media/
                                — read these for task source-of-truth
@@ -594,7 +746,10 @@ Why iid (`-lc0`, user request): the level was whitened through `Lc = chol(Qtᵀ�
 - `ZeroTruncConvolutedDist` appears in both `zeroinf.jl` and `zerotrunc.jl` — the second definition silently overwrites the first.
 - `Distributions.cov(d)` in this codebase returns the **coefficient of variation**, not covariance — non-standard naming.
 - *(Legacy Danon)* `C_Duration` codes in Danon's `Contact_data.csv` are `{-1, 0, 1, 2, 3}`, offset by one from the codebook's `{1..4}` (`-1 → NA`, `0..3 → 1..4`); `C_Number ∈ {-1, 0}` rows (43) are anomalous and dropped. Data now removed — kept only as reference if the strand is revived.
-- **inc2prev `estimates_age_ab.csv` schema**: `name=="infections"` is a **daily per-capita proportion** — multiply by `population` and 7-day-sum for weekly counts. `name=="gen_dab"` is antibody prevalence ∈[0,1] but its `date` column is **empty** — dates are reconstructed from `t_index` via the `infections` rows' `t_index→date` map (see `infection_data.jl`).
+- **inc2prev estimates schema, and the 2026-09-16 SOURCE SWITCH**: `name=="infections"` is a **daily per-capita proportion** — multiply by `population` and 7-day-sum for weekly counts. `name=="gen_dab"` is antibody prevalence ∈[0,1] but its `date` column is **empty** — dates are reconstructed from `t_index` via the `infections` rows' `t_index→date` map (see `infection_data.jl`). **`_EST_PATH` now points at `outputs/estimates_age.csv`** (user request, errors found in the use of the `_ab` variant); it was `estimates_age_ab.csv` until then. The **schema is identical**; the **row set is not**, in two ways that both bite:
+  - **`estimates_age.csv` carries NO ANTIBODY AT ALL** — no `gen_dab`, no `est_ab` (only the `_ab` variants have them), so `weekly_antibody` returns all-zero. That is inert **only** because `model_transmission` pins `F = 1.0` (2026-08-04), making the NGM factor `(1+(F−1)·A) ≡ 1` whatever `A` holds. `weekly_antibody` detects the no-rows case and emits ONE `@info` per session (`_notify_no_antibody`) instead of its per-week gap `@warn`, which would otherwise fire for every week at all ~126 call sites. ⚠ **A CALLER THAT COLLAPSES THOSE TWO CASES BREAKS OUTRIGHT, AND ONE DID:** `ngm_antibody_columns` (14j §6) asserted that no target week came back all-zero — correct while the source carried antibody, universal afterwards — so **14j could not run at all** from 2026-09-16 until 2026-10-15, which is why `res/` held no `14j_*` files. It now forks on whether the source has `gen_dab` rows, as `weekly_antibody` itself does. Any new guard on antibody must do the same. ⚠ Two §6 captions also explained the NGM↔C* difference by the leaky antibody factor "suppressing the older bins where `A_a` approaches 1"; with `A ≡ 0` and `F` pinned that factor is identically 1, so the figures were right and their stated reason was not — prose that explains a number is a dependency of the data too. ⚠ **Re-enabling `F ~ Beta(5,1)` against this source means silently ZERO protection** — F would be inferred from a covariate that is identically 0. The per-week warning is UNCHANGED for a source that does carry antibody; do not collapse the two cases.
+  - **The `infections` estimates themselves differ** — the `_ab` file is a joint fit to prevalence *and* antibody data. Measured over 2020-10-01…2022-01-31: **median 8.6% relative difference in the mean, p90 76%**. Populations and the 7 CIS bins are identical; `estimates_age.csv` runs to 2023-01-31 vs 2022-03-26.
+  - ⚠ **NOTHING DETECTS THE SWITCH.** `contacts_label` encodes only `constant_contacts`/`stage1_use_nuts`, every skip-check is `isfile`, and `assemble_or_load_forecasts` validates only `origins`/`labels` — and origins are **unchanged**, because `available_forecast_origins` uses a hard-coded `infection_start` plus the contact data. The 1512 `8j_s2_*` and the four `9j_assembly_*`/`9j_rt_*`/`9j_relrt_*`/`9j_obsrt_*` caches had to be **deleted by hand**. **Stage 1 is unaffected** — `model_degree` sees contacts and `pop`, and `pop` is `grid.POP` from `data-processed/populations.csv`, a different file. The 504 `8j_s1_*` chains were kept and reused verbatim.
 - **Turing + Weibull/exp over/underflow**: `κ = exp(log_kappa)` can go non-finite on aggressive Pathfinder/optim steps → `DomainError: Weibull α>0`. Log-parameters (`log_kappa`, `log_k`, `log μ` in `model_degree`; `log_gamma_sar` in `model_transmission`) are soft-**clamped** (`_softclamp`); the mode stays interior so gradients are unaffected. Keep those clamps when editing either model. **`_softclamp` must stay the Inf-safe nested form** `lo + softplus((hi − softplus(hi − x)) − lo)` — the naive `x − softplus(x−hi) + softplus(lo−x)` returns **NaN** at `x=±Inf` (`Inf − Inf`), so when a raw log-latent (`log_kappa`/`log_k`) or the GP field overflows to Inf, `κ=exp(softclamp(Inf))` becomes NaN and the Weibull throws (aborting the whole fit). This bit the **neighbourhood** NGM hardest (its `gamma(1+2/κ)` second moment pushes the optimiser to extremes); see `tasks/lessons.md` 2026-07-11. (`_softcap`, the upper-only sibling, went with the horseshoe's `lam` on 2026-08-02.)
 - **The forecast already uses FUTURE contacts.** For horizon `h`, `fit_or_load_stage2` fits Stage 1 on `WeeklyWindow(origin + 7h)` and the forecast NGM is frozen at `Cstar_end[m]` = the **origin+h** contact matrix, while infections/antibody stay at the origin. This is deliberate (the "contact-updated iterate", Munday's design), not a leak to fix — and it is why `inst/6`'s "the no-interaction model is allowed to use the future mean contacts" needed no forecast-path change. The **null** model is the sole exception: its `c̄` is computed from the origin's 8 focal weeks — which every horizon-`h` contact window contains in full under `-w8h` — and reused for every horizon.
 - **Per-model panel figures must derive their layout** (`panel_grid` in `9j_viz_utils.jl`). `plot_ratio` / `plot_ratio_bins` / `plot_lengthscales` were hard-coded `layout = (2, 2)` while there were exactly four models and silently lose panels at six.

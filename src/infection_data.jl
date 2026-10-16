@@ -1,13 +1,38 @@
-# infection_data.jl — load age-stratified infection + antibody estimates from
-# inc2prev and aggregate to the inc2prev-aligned weekly grid.
+# infection_data.jl — load age-stratified infection (+ antibody, where the source carries it)
+# estimates from inc2prev and aggregate to the inc2prev-aligned weekly grid.
 #
-# estimates_age_ab.csv schema: `name` selects the quantity (infections, gen_dab, …),
-# `variable` is the age group, `mean`/`sd` the daily estimate, `population` the
-# age-group size, `t_index` a 1-based day index. `infections` carries `date`;
-# `gen_dab` (antibody prevalence) does NOT — its date is recovered from `t_index`
-# via the infections rows (matches CovidAgeGroupForecast run_forecasts_for_infections.R:75).
+# SOURCE: `estimates_age.csv` since 2026-09-16 (user request — errors found in the use of the
+# `_ab` variant). The SCHEMA is identical in both files: `name` selects the quantity, `variable`
+# is the age group, `mean`/`sd` the daily estimate, `population` the age-group size, `t_index` a
+# 1-based day index. What differs is the ROW SET, in two ways that both matter:
+#
+#   1. `estimates_age.csv` carries NO ANTIBODY AT ALL — no `gen_dab`, no `est_ab`. Those rows
+#      exist only in the `_ab` variants. `weekly_antibody` therefore returns all-zero against
+#      this source; see its docstring for why that is harmless TODAY and when it would stop being.
+#   2. The `infections` estimates THEMSELVES differ. The `_ab` file is a joint fit to prevalence
+#      AND antibody data, so its infection posterior is not the same quantity. Measured over
+#      2020-10-01…2022-01-31: median 8.6% relative difference in the mean, p90 76%. Switching
+#      files is a REFIT, not a relabelling.
+#
+# Both files start 2020-07-31; `estimates_age.csv` runs to 2023-01-31 against the `_ab` file's
+# 2022-03-26. `infections` carries `date` in both, and the `t_index → Date` map built from those
+# rows is retained for `gen_dab`, which does NOT carry `date` wherever it exists at all (matches
+# CovidAgeGroupForecast run_forecasts_for_infections.R:75).
+#
+# ⚠ CACHE. Changing this path invalidates every `8j_s2_*` and the four derived `9j_assembly_*`/
+# `9j_rt_*`/`9j_relrt_*`/`9j_obsrt_*` caches — and NOTHING DETECTS THAT. Every skip-check in the
+# codebase is `isfile`, and `assemble_or_load_forecasts` validates only `origins`/`labels`, which
+# this switch leaves unchanged (origins come from the contact data and a hard-coded
+# `infection_start`). The stale files must be DELETED by hand. Stage 1 is unaffected:
+# `model_degree` takes contact statistics and `pop`, and `pop` is `grid.POP` from
+# `data-processed/populations.csv` — a different file, identical between the two variants.
+#
+# ⚠ The previous generation, fitted against `estimates_age_ab.csv`, is preserved byte-identical
+# in `dt_intermediate_residual/` (504 `8j_s1_*` + 1512 `8j_s2_*`). Nothing in a filename or cache
+# token records which source a fit used — `contacts_label` encodes only `constant_contacts` and
+# `stage1_use_nuts` — so that directory IS the provenance record.
 
-const _EST_PATH = joinpath(@__DIR__, "..", "inc2prev", "outputs", "estimates_age_ab.csv")
+const _EST_PATH = joinpath(@__DIR__, "..", "inc2prev", "outputs", "estimates_age.csv")
 
 _toint_safe(x) = x isa Integer ? Int(x) :
                  x isa AbstractFloat ? Int(round(x)) :
@@ -52,25 +77,56 @@ function weekly_infections(df::DataFrame, weeks::Vector{Date}, grid)
     return I_mean, sqrt.(I_var)
 end
 
+# Fires the "this source has no antibody" notice ONCE per session rather than once per call.
+# The absence is a property of the FILE, not of the window, so every one of the ~126 call sites in
+# a full grid run would otherwise report the same fact — and `weekly_antibody`'s per-week warning
+# would list EVERY week of EVERY window, burying the run in output that says one thing.
+const _NO_ANTIBODY_NOTIFIED = Ref(false)
+
+function _notify_no_antibody()
+    _NO_ANTIBODY_NOTIFIED[] && return nothing
+    _NO_ANTIBODY_NOTIFIED[] = true
+    @info """weekly_antibody: the estimates source carries NO `gen_dab` rows — antibody is \
+             all-zero for every week and every age bin. This is `estimates_age.csv`, which has no \
+             antibody at all (only the `_ab` variants do), and it is HARMLESS while the leaky \
+             term is disabled: `model_transmission` pins `F = 1.0`, so the NGM's antibody factor \
+             `(1 + (F-1)*A)` is exactly 1 whatever `A` contains.
+             ⚠ RE-ENABLING `F ~ Beta(5, 1)` (joint_model.jl) against this source would mean ZERO \
+             antibody protection everywhere, silently — F would be inferred from a covariate that \
+             is identically 0. Point `_EST_PATH` back at an `_ab` variant first.""" source = _EST_PATH
+    return nothing
+end
+
 """Weekly antibody prevalence A_a(t) ∈ [0,1] (A × length(weeks)), averaged over the
 week from `gen_dab`; dates recovered from `t_index` via `tmap`.
 
-⚠ Unmatched weeks are filled with `0.0`, which is INDISTINGUISHABLE from genuinely zero antibody
-prevalence — and zero antibody means full susceptibility, so a zero-filled column inflates
-whatever it feeds. Nothing bounds forecast origins by the `gen_dab` series' end (the sibling
-problem `weekly_infections` has, tasks/lessons.md 2026-07-15). Since 2026-07-30 this **warns**
-once per call listing the offending weeks; `what` labels them in the message (e.g. "forecast
-target"), and `warn_unmatched=false` silences it for callers that expect gaps.
+⚠ **THE CURRENT SOURCE (`estimates_age.csv`) HAS NO `gen_dab` ROWS AT ALL**, so this returns an
+all-zero matrix and emits `_notify_no_antibody()`'s one-time `@info`. That is inert today only
+because `model_transmission` pins `F = 1.0` — read that notice before re-enabling the term.
+The no-rows case is handled SEPARATELY from the per-week gap below on purpose: "this file has no
+antibody" and "this window straddles the end of the antibody series" are different facts and want
+different reports.
+
+⚠ Where the source DOES carry antibody, unmatched weeks are filled with `0.0`, which is
+INDISTINGUISHABLE from genuinely zero antibody prevalence — and zero antibody means full
+susceptibility, so a zero-filled column inflates whatever it feeds. Nothing bounds forecast
+origins by the `gen_dab` series' end (the sibling problem `weekly_infections` has,
+tasks/lessons.md 2026-07-15). Since 2026-07-30 this **warns** once per call listing the offending
+weeks; `what` labels them in the message (e.g. "forecast target"), and `warn_unmatched=false`
+silences it for callers that expect gaps.
 
 The zero fill is retained as the VALUE on purpose: a `NaN`/`missing` would propagate silently
 into the NGM and poison every downstream draw. The warning is the tripwire, not the fill."""
 function weekly_antibody(df::DataFrame, tmap::Dict{Int,Date}, weeks::Vector{Date}, grid;
                          warn_unmatched::Bool = true, what::AbstractString = "window")
     A = grid.N; T = length(weeks)
+    gd = @subset(df, :name .== "gen_dab")
+    # Source-level absence: report once and return, WITHOUT the per-week warning — every week is
+    # "unmatched" here, and that message would name the file's contents as if it were a gap.
+    isempty(gd) && (_notify_no_antibody(); return zeros(A, T))
     wkset = Dict(w => k for (k, w) in enumerate(weeks))
     ageidx = _age_index_map(grid)
     acc = [Float64[] for _ in 1:A, _ in 1:T]
-    gd = @subset(df, :name .== "gen_dab")
     for r in eachrow(gd)
         d = get(tmap, _toint_safe(r.t_index), nothing); d === nothing && continue
         w = week_start(d); haskey(wkset, w) || continue

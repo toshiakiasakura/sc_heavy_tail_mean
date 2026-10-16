@@ -261,15 +261,27 @@ Approximate, on a current workstation with a broadband connection:
 | Source | Files | Role | Redistributed here? |
 |---|---|---|---|
 | **CoMix UK** social contact survey | `dt_comix_no_public/{part,contacts}.csv` → `{part_uk,contacts_uk}.arrow` | participant-days and their reported contacts (the explanatory data) | **No** — see below |
-| **inc2prev** (from the ONS COVID-19 Infection Survey) | `inc2prev/outputs/estimates_age_ab.csv` | age-stratified estimated infection incidence and antibody prevalence in England (the outcome data) | **Yes** — openly available, pinned as a git submodule |
+| **inc2prev** (from the ONS COVID-19 Infection Survey) | `inc2prev/outputs/estimates_age.csv` | age-stratified estimated infection incidence in England (the outcome data). Was `estimates_age_ab.csv` until 2026-09-16 | **Yes** — openly available, pinned as a git submodule |
+| **UKHSA COVID-19 dashboard** | `dt_ukhsa/*.csv` | England reported case counts, national and in 5-year age bands — a comparison series for 14j §6c/§6d only; nothing is fitted to it | **Yes** — open data, fetched once by `dt_ukhsa/fetch_ukhsa_cases.py` |
 | **inc2prev** | `inc2prev/data-processed/populations.csv` | CIS age bins and England population sizes | **Yes** — openly available, pinned as a git submodule |
 
 The **inc2prev** inputs are external and versioned: the submodule is pinned to commit
-`78e3d8717219c4238fb9dc971405d0562695a6f3` of <https://github.com/epiforecasts/inc2prev>. Only the
-two files above are read. Note two schema quirks handled in `src/infection_data.jl`:
-`name == "infections"` rows are a **daily per-capita proportion** (multiplied by population and
-7-day-summed for weekly counts), and `name == "gen_dab"` (antibody) rows have an **empty `date`
-column**, so dates are reconstructed from `t_index`.
+`78e3d8717219c4238fb9dc971405d0562695a6f3` of <https://github.com/epiforecasts/inc2prev>. The two
+files above are what the forecasting framework reads; 14j §6c also reads `estimates_age_ab.csv` and
+`data-processed/cis_age.csv` to audit the switch described next. Note two schema quirks handled in
+`src/infection_data.jl`: `name == "infections"` rows are a **daily per-capita proportion**
+(multiplied by population and 7-day-summed for weekly counts), and `name == "gen_dab"` (antibody)
+rows have an **empty `date` column**, so dates are reconstructed from `t_index`.
+
+⚠ **The infection source moved from `estimates_age_ab.csv` to `estimates_age.csv` on 2026-09-16**
+(errors were found in the use of the `_ab` variant). The schema is identical and the row set is not:
+`estimates_age.csv` carries **no antibody block at all**, so `weekly_antibody` returns all-zero.
+That is inert only because `model_transmission` pins `F = 1.0`, making the NGM's leaky-protection
+factor `(1 + (F-1)·A) ≡ 1` whatever `A` holds — re-enabling `F ~ Beta(5, 1)` against this source
+would infer `F` from a covariate that is identically zero, i.e. **zero antibody protection
+everywhere, silently**. The `infections` estimates also differ between the two files (median 8.6%
+relative difference, p90 76%). 14j §6c plots both against the ONS CIS positivity they were fitted
+to, which is the audit of that switch.
 
 The **CoMix UK** individual-level data are **not redistributed in this repository**
 (`dt_comix_no_public/` is gitignored) because they are participant-level social contact records

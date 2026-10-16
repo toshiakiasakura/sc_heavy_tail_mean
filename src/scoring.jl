@@ -38,9 +38,11 @@ natural and the log scale** (`transform_forecasts(fun=log_shift, offset=1)`; ins
 each returned frame carries a `scale ∈ {"natural","log"}` column, and WIS is
 aggregated **by horizon** across all forecast dates/origins (`by_model_h`), so the
 headline metric is the log-scale, by-horizon WIS (`scale=="log"`). Returns
-`(; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)` with WIS +
-components, bias, and interval coverage; `by_model_h_age` adds the age-stratified
-(model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics, and
+`(; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age, by_model_dt_h_age)`
+with WIS + components, bias, and interval coverage; `by_model_h_age` adds the age-stratified
+(model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics, `by_model_dt_h_age`
+is the same at the FULL forecast unit (+ `forecast_date`, 21 168 rows — added for 15j, which must
+sum WIS over exactly the margins an energy score collapses), and
 `n_negative`/`negative_by_model` report predicted quantiles that fell below zero.
 
 ⚠ **The two scales are scored from different objects.** The Gaussian observation fan of
@@ -106,12 +108,21 @@ function score_wis(df_quant::DataFrame)
     by_model_dt_h <- as.data.frame(summarise_scores(sc, by = c("model","forecast_date","horizon","scale")))
     # age-stratified WIS by horizon (Fig 3C analog): one WIS per model × horizon × age bin
     by_model_h_age <- as.data.frame(summarise_scores(sc, by = c("model","horizon","age_group","scale")))
+    # FULL forecast unit (model x origin x horizon x age). Added 2026-10-15 for 15j, which compares
+    # WIS against the multivariate energy score: the matched comparator for "ES over the 7 age bins
+    # at (model, origin, horizon)" is the SUM of WIS over those 7 bins at that origin and horizon,
+    # and `by_model_h_age` has already averaged over origins before you can take that sum. Scoring
+    # two rules on two different aggregations would conflate the aggregation with the metric. The
+    # grouping is 1-to-1 with the forecast unit, so nothing is actually aggregated here.
+    by_model_dt_h_age <- as.data.frame(summarise_scores(sc,
+        by = c("model","forecast_date","horizon","age_group","scale")))
     """
     by_model       = rcopy(R"by_model")
     by_model_h     = rcopy(R"by_model_h")
     by_model_dt    = rcopy(R"by_model_dt")
     by_model_dt_h  = rcopy(R"by_model_dt_h")
     by_model_h_age = rcopy(R"by_model_h_age")
+    by_model_dt_h_age = rcopy(R"by_model_dt_h_age")
     n_neg          = Int(rcopy(R"n_neg"))
     neg_by_model   = rcopy(R"neg_rows")
     n_nonfinite    = Int(rcopy(R"n_nonfinite"))
@@ -149,8 +160,12 @@ function score_wis(df_quant::DataFrame)
     # and vanish from `by_model_h`.
     required = ["wis", "overprediction", "underprediction", "dispersion", "bias",
                 "interval_coverage_50", "interval_coverage_90", "ae_median"]
+    # EVERY returned frame must be in this tuple. A metric can survive in `by_model` and vanish
+    # from `by_model_h`, so a frame left out of the sweep is a frame whose dropped columns nobody
+    # notices -- which is the exact failure this assert exists for.
     missing_cols = union([setdiff(required, names(f)) for f in
-                          (by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age)]...)
+                          (by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age,
+                           by_model_dt_h_age)]...)
     if !isempty(missing_cols)
         qs = sort(unique(df_quant.quantile_level))
         error("""
@@ -164,6 +179,7 @@ function score_wis(df_quant::DataFrame)
               Fix: round the levels (`to_quantile_long` does this via `round(q; digits=2)`).""")
     end
     return (; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age,
+              by_model_dt_h_age,
               n_negative = n_neg, negative_by_model = neg_by_model,
               n_nonfinite, nonfinite_by_model, units_by_model)
 end
@@ -185,4 +201,133 @@ function mean_crps(fc::AbstractArray{<:Real,3}, truth::AbstractMatrix)
     A, H, _ = size(fc)
     vals = [crps_sample(collect(fc[a, h, :]), truth[a, h]) for a in 1:A, h in 1:H]
     return mean(vals)
+end
+
+# ── Multivariate proper scoring rules (15j) ───────────────────────────────────────────
+# The univariate `crps_sample` above scores one cell at a time. These two score a whole
+# `d`-vector jointly, which is what lets 15j ask whether the 7 age bins (or the 4 horizons)
+# move together as the model says they should. Both take `X` as `d × M` — one COLUMN per
+# draw — which matches `scoringRules::es_sample(y, dat)` and keeps a draw's coordinates
+# contiguous in Julia's column-major memory (measured 0.095 s at d=7, M=10_000).
+
+"""
+    _kbn(s, c, x) -> (s, c)
+
+One Kahan–Babuška–Neumaier compensated-summation step: add `x` to the running sum `s` carrying the
+lost low-order bits in `c`; the sum is `s + c`.
+
+⚠ **This is not premature polish — it is what makes the energy score's own defining identity hold
+at this grid's `M`.** `energy_score`'s pair term sums `M(M−1)/2` square roots (5e7 terms at
+`M = 10 000`) and the score is then a DIFFERENCE of two nearly equal quantities, so naive
+accumulation is amplified twice over. Measured on the 2026-09-16 forecast grid at `d = 1`, where
+the energy score must equal `crps_sample` exactly: naive summation disagreed by up to **8.3e-6**
+relative over 21 168 real groups, compensated summation by **≤1e-13**.
+  Note why a cross-check against `scoringRules::es_sample` does NOT catch this: that function sums
+the same O(M²) way, so both implementations carry the same error and agree to 1e-14 while both are
+off. Only the comparison against the well-conditioned O(M log M) `crps_sample` exposes it.
+"""
+@inline function _kbn(s::Float64, c::Float64, x::Float64)
+    t = s + x
+    c += ifelse(abs(s) >= abs(x), (s - t) + x, (x - t) + s)
+    return t, c
+end
+
+"""
+    energy_score(X, y) -> Float64
+
+Sample energy score (Gneiting–Raftery, β=1) of the `d × M` draw matrix `X` against the
+observation `y` (length `d`):
+
+    ES = (1/M)·Σ_m‖x_m − y‖  −  (1/(2M²))·Σ_i Σ_j‖x_i − x_j‖
+
+⚠ **The `1/M²` pair-term convention is load-bearing.** It is the biased Gneiting estimator, and
+it is exactly what `crps_sample` above and `scoringRules::es_sample` both use — so **at `d == 1`
+this function equals `crps_sample(vec(X), y[1])` to floating-point exactness**. That identity is
+the cheapest tripwire available for this whole file (15j asserts it over 10 584 real groups at
+`rtol = 1e-10`); switching to the unbiased `1/(M(M−1))` form would silently break it.
+
+⚠ **The estimator's bias depends on `M`**, so two groups scored at different `M` are two
+different estimators. Callers comparing models must equalise `M` first — see 15j's
+`mv_scores`, which also explains why that is *not* the same thing as aligning draws.
+
+⚠ **Not robust to extreme draws, and the natural scale is not safe.** ES is a mean of Euclidean
+norms, so one pathological draw dominates it: measured on the 2026-09-16 forecast grid, a single
+3.8e109 draw takes the natural-scale ES of its cell to 6.1e101 against a grid median of ~3.9e4.
+WIS is structurally immune because it sees only the 5–95% quantiles; ES sees every draw. Score
+on the log scale (`log(x+1)`, as `score_wis` does via `log_shift`), not the natural one.
+"""
+function energy_score(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real})
+    d, M = size(X)
+    length(y) == d || throw(DimensionMismatch(
+        "energy_score: X is $(d)×$(M) (d × M) but y has length $(length(y)); " *
+        "X must carry ONE COLUMN PER DRAW"))
+    M == 0 && return NaN
+    t1 = 0.0; c1 = 0.0
+    @inbounds for m in 1:M
+        s = zero(Float64)
+        for k in 1:d
+            s += abs2(float(X[k, m]) - float(y[k]))
+        end
+        t1, c1 = _kbn(t1, c1, sqrt(s))
+    end
+    t1 = (t1 + c1) / M
+    # Σ_i Σ_j over ALL ordered pairs = 2·Σ_{i<j} (the i==j terms are 0), so the half-sum
+    # doubled and divided by 2M² is just the half-sum divided by M².
+    t2 = 0.0; c2 = 0.0
+    @inbounds for i in 1:M
+        for j in (i + 1):M
+            s = zero(Float64)
+            for k in 1:d
+                s += abs2(float(X[k, i]) - float(X[k, j]))
+            end
+            t2, c2 = _kbn(t2, c2, sqrt(s))
+        end
+    end
+    return t1 - (t2 + c2) / (M^2)
+end
+
+"""
+    variogram_score(X, y; p = 0.5) -> Float64
+
+Sample variogram score of order `p` of the `d × M` draw matrix `X` against `y`:
+
+    VS_p = Σ_i Σ_j ( |y_i − y_j|^p − (1/M)·Σ_m |x_mi − x_mj|^p )²
+
+over all ordered pairs with uniform weights — `scoringRules::vs_sample(y, dat, p)`'s convention.
+The full double sum (not the `i<j` half) is what pins the normalisation, and is the one thing
+only the R cross-check can confirm; 15j runs it.
+
+Complexity is **`O(M·d²)`**, not ES's `O(M²·d)` — at `d=28, M=10_000` that is 7.8e6 against
+2.8e9, i.e. VS is effectively free and several `p` can be computed for nothing.
+
+⚠ **VS is shift-invariant and is NOT proper for the marginals.** It sees only pairwise
+*differences*, so a forecast biased uniformly high is not penalised at all. It therefore
+complements the energy score and must never replace it — and the distinction belongs in the
+figure's own title, not only in this docstring.
+
+⚠ **`p` is a dependence-weighting knob, not a robustness one.** Lowering it to 0.5 does *not*
+make the natural scale usable: measured, the cell that sends ES to 6.1e101 sends VS(p=0.5) to
+1.2e103. Score on the log scale and read `p` as a choice about which pairs to emphasise.
+
+Returns `NaN` at `d == 1` (a one-coordinate field has no pairwise structure) rather than `0.0`,
+so it cannot average silently into a summary.
+"""
+function variogram_score(X::AbstractMatrix{<:Real}, y::AbstractVector{<:Real}; p::Real = 0.5)
+    d, M = size(X)
+    length(y) == d || throw(DimensionMismatch(
+        "variogram_score: X is $(d)×$(M) (d × M) but y has length $(length(y)); " *
+        "X must carry ONE COLUMN PER DRAW"))
+    (M == 0 || d == 1) && return NaN
+    tot = 0.0
+    @inbounds for i in 1:d
+        for j in (i + 1):d
+            acc = 0.0; ca = 0.0
+            for m in 1:M
+                acc, ca = _kbn(acc, ca, abs(float(X[i, m]) - float(X[j, m]))^p)
+            end
+            dev = abs(float(y[i]) - float(y[j]))^p - (acc + ca) / M
+            tot += abs2(dev)
+        end
+    end
+    return 2 * tot          # the i<j half-sum doubled = the full ordered double sum
 end

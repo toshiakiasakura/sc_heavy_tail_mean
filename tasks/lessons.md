@@ -1954,7 +1954,7 @@ misread this once and briefly concluded the opposite of the truth.
 other model has a single non-finite value. On the 41.7 % of units that ARE finite it scores natural
 WIS **1.03e45** and log WIS **9.54**, against 0.40–0.72 log for the other five.
 
-For contrast, the archived pre-`-ar1` generation (`res/pre_ar1_baseline/8j_scores_by_model.csv`,
+For contrast, the archived pre-`-ar1` generation (`res_prev_mixed_20261015/pre_ar1_baseline/8j_scores_by_model.csv`,
 the `-hd` Pathfinder grid) scored this same pairing at natural WIS **31 145** and log **0.358** — the
 *best* log-scale WIS of the six. So this is a regression, not a standing property.
 
@@ -2538,3 +2538,259 @@ the stack in the only order that works — supervisor first (or it relaunches th
 missing), then watcher, then wrapper, then the driver with SIGTERM → verify → SIGKILL — and prints
 the artefact count before and after, because files landing *during* a stop are exactly the ones a
 model or init change makes stale.
+
+## 2026-09-16 — Changing the data under a two-stage cut: what a token cannot record
+
+**What changed.** `_EST_PATH` moved from `inc2prev/outputs/estimates_age_ab.csv` to
+`estimates_age.csv` (user request — errors found in the use of the `_ab` variant). One `const`,
+because every caller takes it as a default kwarg: Stage-2 fitting, `load_forecast_truth` (the
+scoring target), 9j, 10j, 14j.
+
+**The cut is what made this cheap.** Stage 1 never sees infection data — `model_degree(dm, ds, pop,
+cfg)` takes contact statistics and `pop`, and `pop` is `grid.POP` read from
+`data-processed/populations.csv`, a *different* file that is byte-identical between the two
+variants. So all 504 `8j_s1_*` NUTS chains (≈351 CPU-h) stayed valid and only the 1512 `8j_s2_*`
+Pathfinder fits had to be redone. **Check which stage actually consumes the data you changed before
+assuming a full refit** — the answer here was in the model's argument list.
+
+**What nothing detected, and why.** Three independent layers all failed to notice:
+- `contacts_label` encodes only `constant_contacts` and `stage1_use_nuts`. A data source is not in
+  the token, and *should not be* — bumping it would orphan the Stage-1 chains it is shared with.
+- Every skip-check in the codebase is `isfile`. A stale `8j_s2_*` is reloaded as if fresh.
+- `assemble_or_load_forecasts` validates `origins` and `labels`. Both are **unchanged** by this
+  switch, because `available_forecast_origins` derives origins from the contact data plus a
+  hard-coded `infection_start = 2020-08-02` — not from the estimates file. So the 876 MB assembly
+  cache would have silently served forecasts built from the old infections.
+
+The generalisation: **a cache that validates its inputs' NAMES cannot notice a change in their
+CONTENTS.** Here the origins and the model labels are exactly the metadata that stayed constant,
+which is what made the switch invisible to every guard that exists. Manual deletion of
+`8j_s2_*` + `9j_assembly_*`/`9j_rt_*`/`9j_relrt_*`/`9j_obsrt_*` was the whole safety mechanism.
+
+**The antibody trap, and why zero-fill needed a second case.** `estimates_age.csv` has no `gen_dab`
+rows at all, so `weekly_antibody` returns all-zero. That is inert *today* only because
+`model_transmission` pins `F = 1.0` (2026-08-04), making `(1+(F−1)·A) ≡ 1` whatever `A` holds — the
+term is off, so its covariate cannot matter. But the existing per-week `@warn` for unmatched weeks
+would then fire for *every* week of *every* window at ~126 call sites, which is how a real tripwire
+becomes noise you learn to scroll past. The fix was to keep both cases and report them differently:
+a source-level `isempty(gd)` branch emitting **one `@info` per session**, and the per-week warning
+left exactly as it was for a source that does carry antibody.
+
+*Transferable:* **"this file has no X" and "this window is missing some X" are different facts and
+want different reports.** Collapsing them loses the gap detector, which is the one that catches a
+window straddling the end of a series.
+
+*The standing hazard:* re-enabling `F ~ Beta(5,1)` against this source would infer F from a
+covariate that is identically zero — a posterior equal to its prior, and **zero antibody protection
+everywhere, silently**. The `@info` says so at the point of use; `_notify_no_antibody`'s message is
+the warning, not a status line.
+
+**Provenance is now a directory, not a token.** The pre-switch generation is preserved
+byte-identical in `dt_intermediate_residual/` — same token, same filenames, distinguished *only* by
+which directory it sits in. That is the sharpest form of the "same token names two incompatible
+generations" hazard already recorded here, and it is deliberate: the alternative (a token bump) costs
+504 Stage-1 chains to record a fact about Stage 2.
+
+## 2026-10-15 — "This data does not exist" is a measurement, and it ages
+
+**What happened.** The task was to put raw reported case counts beside the two inc2prev fits in 14j.
+Two places in the tree — `cis_weekly_positivity`'s docstring and §6c's methods cell — said flatly:
+
+> (Age-stratified *reported case counts* do not exist for this comparison: inc2prev's only dashboard
+> pull is vaccinations, and UKHSA's live API carries `age: "all"` only.)
+
+Taken at face value that closes the task: the figure the user asked for cannot be drawn. It was
+false. The old `api.coronavirus.data.gov.uk` is indeed gone (its DNS no longer resolves), but its
+replacement `api.ukhsa-dashboard.data.gov.uk` publishes `COVID-19_cases_rateRollingMean` in 5-year
+age bands back to 2020-02. The claim had been true when written and had quietly expired.
+
+**The generalisable bit.** A note recording an *absence* is a measurement with a date and an
+instrument, exactly like a benchmark number — but it gets written as a timeless statement of fact
+("do not exist"), so it reads as a settled constraint rather than as something to re-check. Worse
+than a stale benchmark: a stale benchmark makes you redo work, a stale absence makes you *not do*
+work, and nothing ever contradicts it because nobody looks.
+
+Write absences the way this repo writes measurements: **what was checked, against what, when.**
+"Checked 2026-10-15: `api.ukhsa-dashboard.data.gov.uk` carries cases by 5-year band; `casesByDay`
+carries `age: \"all\"` only" survives contact with a changing API. "Do not exist" does not. Both
+sites now say which endpoint was checked and that the earlier claim had gone stale.
+
+**The second-order lesson: an upstream switch leaves silent wreckage beyond the obvious.** The same
+session found that `res/` held **no** `14j_*` outputs at all. The cause was that
+`ngm_antibody_columns` asserted `weekly_antibody` had never zero-filled a target week — a good guard
+written when the source carried antibody. After the 2026-09-16 move to `estimates_age.csv`, which
+has **no `gen_dab` rows at all**, the condition it guarded became universal and 14j could not run.
+The notebook had simply not been re-run since the switch.
+
+Two rules fall out, both already this repo's style elsewhere:
+
+1. **A guard must distinguish "the quantity is absent by construction" from "the quantity is missing
+   here".** `weekly_antibody` already did (`_notify_no_antibody` vs its per-week `@warn`); its caller
+   collapsed the two and broke. The fork is three lines: ask whether the source has the rows at all.
+2. **An absent artefact is not evidence of a clean tree.** `res/` being empty of `14j_*` looked like
+   "not run yet" and was actually "cannot run". The CLAUDE.md entry already warns about blank-but-
+   plausible *panels*; a blank-but-plausible *directory* is the same failure one level up.
+
+**And the captions outlived the data.** Two §6 cells explained the NGM↔C* difference partly by the
+leaky antibody factor "suppressing the older bins where `A_a` approaches 1". Against the current
+source `A ≡ 0`, and `F` is pinned to 1.0 regardless, so that factor is identically 1. The *figures*
+were unaffected — `F = 1` had made the term inert long before the source moved — but the stated
+reason for what they show was wrong. Prose that explains a number is as much a dependency of the
+data as the code that computes it, and it is the part no assertion covers.
+
+**Measured, for the record** (England, over 2020-07 … 2023-02):
+
+- `rateRollingMean` is a **right-aligned 7-day rolling SUM per 100 000**, so a Sunday-start week is
+  read off its SATURDAY and needs no re-summing — the same aggregation `weekly_infections` performs.
+  Confirmed against `casesByDay`: 2021-01-01…07 sums to 366 377 ⇒ 647.88/100k vs a published 648.04.
+- `age = "90"` and `age = "90+"` are **one band published twice** (identical date ranges and row
+  counts; 7 of 973 dates differ by ≤4.2e-4 relative over this span, 73 of 1426 and up to 2.6e-2 over
+  the full published range). Summing both double-counts the oldest group.
+- Summing 5-year bands into the CIS bins needs **single-year** populations for `2-10`, `11-15` and
+  `16-24`; the other four nest exactly. `inc2prev/data-raw/uk_pop.xls` (`MYE2 - Persons`) reproduces
+  `populations.csv`'s seven England bins with difference **0**, so it is provably the workbook those
+  came from — but it is a legacy OLE2 `.xls` that **XLSX.jl cannot read**, which is why the
+  populations reach Julia as a CSV emitted by the Python prep step.
+- Reconstruction vs the independent national count: median **0.9956** over all bands and 0.9886 over
+  the 7 CIS bins (the ~0.7% gap is the under-2s the grid excludes). ⚠ The *range* runs to 0.873, and
+  every outlier is **Christmas week 2022**, where the age-banded and national series disagree
+  upstream by up to 13%. A max-ratio assert would fail the notebook on someone else's reporting
+  artefact; both the prep script and §6d assert the **median** and *print* the outlying weeks.
+- Ascertainment (reported ÷ `estimates_age`) by half-year: 0.229 → 0.292 → 0.314 → **0.109** →
+  **0.041** → 0.023. The cliff is the end of free universal testing in England on **1 April 2022**,
+  not an epidemiological event. It sits entirely to the right of the CoMix origin span.
+
+## 2026-10-15 — The energy score's defining identity is a numerical tripwire, and naive summation fails it
+
+15j (`src/15j_viz_utils.jl`, `src/15j_multivariate_scoring.ipynb`) adds the multivariate **energy
+score** and **variogram score** beside the existing `crps_sample`, to ask whether the models get the
+*joint* age/horizon forecast right rather than each cell separately. Three things went wrong on the
+way, all of the same family: **a check that compares two implementations of the same algorithm
+cannot see an error both of them make.**
+
+**1. The identity is the check, and it caught what the R oracle could not.** `energy_score(X, y)`
+with `d == 1` must equal `crps_sample(vec(X), y)` exactly — both use the biased `1/M²` pair-term
+convention, as does `scoringRules::es_sample`. Measured on the real grid at `M = 10 000`, a naive
+accumulation disagreed by **8.26e-6** relative over 21 168 groups. Compensated
+(Kahan–Babuška–Neumaier) summation took it to **3.25e-13**. Why it is that bad: the pair term sums
+`M(M−1)/2` = 5e7 square roots, and the score is then a **difference of two nearly equal
+quantities**, so the accumulation error is amplified twice over.
+⚠ **The cross-check against `scoringRules::es_sample` passed at 1e-14 the whole time**, because
+`es_sample` sums the same O(M²) way — both implementations were wrong in the same direction. Only
+the comparison against the well-conditioned O(M log M) `crps_sample` exposed it. When you add a
+second implementation of a metric, make at least one check compare *different algorithms*, not
+different ports of the same one.
+
+**2. "Bit-identical" measured on six values is not measured.** `scoringutils::log_shift(x, offset=1)`
+evaluates `log(x + offset, base = exp(1))`, and a spot-check on 0, 1, 3.7, 1e5, 2.2e21 and 3.8e109
+returned `identical() == TRUE`. On 20 000 real `qall.predicted` values, **3 differ by 1 ulp**
+(max |Δ| 1.8e-15) — R and Julia call different libm `log`. The assert now tests a *relative*
+tolerance of 1e-12: ulp-loose, but still four orders of magnitude tighter than the thing it exists to
+catch, since a wrong offset or base moves the result by O(1). An exactness claim needs a sample
+large enough to falsify it.
+
+**3. An extreme FINITE draw is a guard class nothing in the repo had.** `score_wis` drops whole units
+for **non-finite** predictions, and there are none on this grid — but the fans hold finite draws up
+to **3.80e109** (1279 above 1e8, concentrated in `weighted-hweibull|*` and `unweighted-negbin|mean`).
+WIS never sees them, because `to_quantile_long` keeps only the 5–95% quantiles and discards the tail.
+ES and VS are means over *every* draw, so one such draw is the whole score: natural-scale ES reaches
+**6.1e101** at the worst cell against a grid median of ~3.9e4, and VS(p=0.5) **1.2e103** — so
+lowering `p` does not rescue it either; `p` is a dependence-weighting knob, not a robustness one.
+⚠ A knock-on worth knowing: on the natural scale the `d == 1` identity in (1) can only reach ~2.3e-9,
+**irreducibly**, because with a 3.8e109 draw beside ~1e5 ones Float64 cannot represent the small
+contributions at all, so two algebraically identical algorithms must lose different amounts. Check
+the identity on the scale you report (log), and read the natural-scale figure as evidence about the
+draws rather than about the code.
+**The lesson generalises past 15j:** any all-draws metric added to this project inherits this
+exposure, and any quantile-based one is accidentally protected from it. Do not infer from "WIS is
+fine" that the fans are.
+
+**4. The margin that looks cheapest was 60% of the cost.** The univariate baseline is 28 of the 40
+groups a fan contributes, and computing its ES through the general O(M²) kernel cost ~5300 s of the
+sweep's ~9000 s CPU to recompute a number `crps_sample` already had in O(M log M).
+`mv_scores(…; fast_univariate = true)` takes the shortcut — and the identity in (1) is exactly what
+licenses it, which is why `verify_es_reduces_to_crps` deliberately forces the slow path and must
+never be read off the fast-path rows.
+
+**5. Where the joint actually is, and where it only looks like one.** Across AGE the draws are a
+genuine shared-parameter sample (one `Cstar_end[post_index[d]]`, one susc/inf/F/γ_SAR/GI per draw,
+coupled by `pred = N * acc`), but the observation layer `p + σ·randn` is **iid across age** and
+dominates: mean |corr| ≈ 0.07–0.10, i.e. the shared component is ~9% of each coordinate's variance.
+Across HORIZON there is **no joint predictive at all** — each horizon is a separate
+`fit_or_load_stage2` with its own pooled draws and its own `MersenneTwister(cfg.seed + h)`, and the
+intervening lag plug is the *median* over draws. So "ES over time" is a **definition** (the
+independence coupling of four marginal forecasts), not an estimate, and the permutation test that
+destroys the pairing is a consistency check *expected* to return ≈0 rather than a test with a null to
+reject. Measured: shuffling each coordinate's draws independently moves ES by ≤0.06% and VS by ≤0.8%.
+⚠ Saying only "the draw pairing is arbitrary" invites a reader to look for a better pairing in the
+artefacts. There is none; the model does not emit one.
+
+---
+
+## 2026-10-16 — A score you can compute is not a score you should report, and a helper that both displays and returns will render every figure twice
+
+Round 2 on 15j. Four lessons, three of which are about *reporting* rather than arithmetic — which is
+the point: every number below was already correct.
+
+**1. `save_show` DISPLAYS and RETURNS, so a bare trailing call renders the figure TWICE.**
+`save_show(fig, path) = (pad_margins(fig); savefig(fig, path); display(fig); fig)`
+([9j_viz_utils.jl:118](../src/9j_viz_utils.jl#L118)). When that call is a cell's last expression
+without a trailing `;`, IJulia emits the returned `Plot` as `execute_result` *on top of* the
+`display(fig)` the helper already did. 15j shipped its first PDF with **6 of its 8 figures
+duplicated**; 9j has always had the `;` on all 14 of its calls, so this was a convention that was
+simply not carried across. Two things make it worth a lesson rather than a shrug:
+- It is **invisible in the source** and invisible in a passing run. Nothing errors, nothing warns,
+  the notebook exits 0 and every figure is correct — there are just two of each.
+- Two of 15j's cells were clean **by accident**, because a trailing `println()` happened to make the
+  cell value `nothing`. Do not rely on that; put the `;` on the `save_show` itself.
+The mechanical check, on the EXECUTED copy, is three lines of Python: hash every `image/png` output
+and assert `len(unique) == len(total)`. That is how this was found, and it belongs in any notebook
+whose figures are going to a PDF.
+
+**2. "The model does not produce this" is a reason to DROP a score, not merely to caveat it.**
+15j's first round reported the energy score over the horizon axis and over age×horizon, each with a
+correct, prominent caveat that the model emits no cross-horizon joint predictive (separate
+`fit_or_load_stage2` + RNG per horizon, median lag plug) and that the permutation test returns ≈0
+because there is no coupling to destroy. All of that was true, measured and written down — and it
+was still the wrong call. A figure captioned "energy score over time" will be read as saying
+something about temporal dependence by anyone who does not read the caveat, and the caveat is the
+thing that gets dropped first when a figure is lifted into a talk. **The margins stay computable
+behind an explicit `margins =`; what changed is that nothing reports them by default.** Keeping the
+code and dropping the default is the version that neither loses the measurement nor publishes it.
+
+**3. A MEAN ranking cannot move with the aggregation; a MEDIAN ranking can — and the gap between
+them is a result, not a nuisance.** Mean-over-groups of a sum-over-collapsed-cells is the total
+divided by the group count, and that total is the same cells however they are grouped. A median of
+sums is not a sum of medians. Measured on this grid for the two near-tied models:
+
+| | median/cell | mean/cell | mean ÷ median |
+|---|---|---|---|
+| `weighted-hweibull\|mean`, per cell | **0.3087** | 0.4683 | 1.517 |
+| `unweighted-negbin\|mean`, per cell | 0.3334 | 0.5109 | 1.532 |
+| `weighted-hweibull\|mean`, summed over 28 | 0.3993 | 0.4683 | 1.173 |
+| `unweighted-negbin\|mean`, summed over 28 | **0.3980** | 0.5109 | 1.284 |
+
+The mean per cell is *literally unchanged* — that is the additivity, directly observable. Summing
+cells averages away each model's per-cell right skew at *different* rates, the median climbs toward
+the mean, and two series 7% apart that move at different rates cross. **So a rank swap between
+panels of a bump chart can be a property of the summary statistic and not a disagreement between
+scoring rules**, and a reader cannot tell which unless you show both. `plot_score_rank_bump_by_horizon`
+draws median and mean as two rows of one chart for this reason. The same arithmetic explains why
+`summarise_mvscores` returns `rel_median` *and* `rel_mean`: print both, always.
+
+**4. The variogram score is not a skill ranking, and this grid proves it rather than asserting it.**
+VS is shift-invariant and not proper for the marginals — it sees only pairwise differences, so a
+uniformly biased forecast is not penalised at all. That is textbook. What makes it concrete here:
+ranked by MEAN at `margin = "age"`, **Σ WIS, Σ CRPS and the energy score give ONE identical ordering
+at all four horizons, and both variogram orders do not** — and at h=4 `vs_p1` ranks
+**`no-contact|null` FIRST**, i.e. a model with a constant `C*` and no contact data at all wins the
+score. Nothing is wrong with the number; it is measuring dependence structure, and the null model's
+constant contact matrix happens to produce a good one. Report VS beside ES as a dependence
+diagnostic, label it as such in the figure and not only in the prose, and never let it carry a
+"which model is best" sentence on its own.
+
+⚠ A corollary for the verification suite: when the margin a check lived on is dropped, **move the
+check, do not delete it**. `scoringutils_semantics_check` is the only thing pinning what
+`joint_across` means — the assumption the entire notebook rests on — and it was written against
+`joint_across = "horizon"`. It now runs `joint_across = "age_group"` on a `margin = "age"` group.
+A check is tied to the claim it tests, not to the data it happened to use.

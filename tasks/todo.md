@@ -518,3 +518,54 @@ median (0.5 ⇒ the data moved nothing; < 0.05 ⇒ pushed into the prior's lower
 - [ ] §7 reads ONE origin. The rolling-origin view of ρ/φ is 9j's `plot_lengthscales`, which is
       Stage-2-gated and refuses Matérn-temporal chains — worth reconciling if the ρ_gap finding is
       pursued across the 63 origins.
+
+# 2026-10-15 — 14j: reported case counts as a third incidence source, and §6d
+
+User request, three parts: switch the main data to `estimates_age.csv`; visualise **total** COVID-19
+incidence over time from the raw reported counts + `estimates_age.csv` + `estimates_age_ab.csv`; and
+visualise the **age-stratified** incidence from the same three.
+
+## Done
+
+- [x] **The `estimates_age.csv` switch was already in place** (`infection_data.jl:35`, uncommitted
+      since 2026-09-16) — verified rather than redone. What was missing was the paperwork: four
+      documents still advertised the `_ab` file, one of them (`hpc/README.md`'s transfer checklist)
+      operationally, where it would have shipped the wrong file to the cluster.
+- [x] `README.md`, `hpc/README.md`, `inst/3_preliminary_model_struct.md` §2.3 corrected, each now
+      stating the no-antibody consequence and the standing `F ~ Beta(5,1)` hazard.
+- [x] **`dt_ukhsa/fetch_ukhsa_cases.py`** — fetches `COVID-19_cases_casesByDay` (national counts)
+      and `COVID-19_cases_rateRollingMean` (5-year bands) from the UKHSA dashboard API into three
+      committed CSVs, plus England single-year populations out of `inc2prev/data-raw/uk_pop.xls`
+      (a legacy OLE2 `.xls` XLSX.jl cannot read). Network lives here and nowhere else; it runs its
+      own four self-tests on every invocation, including against an unchanged cache.
+- [x] **`ukhsa_weekly_cases`** (`14j_viz_utils.jl` §G2) — weekly reported counts per CIS bin, read
+      off each week's SATURDAY because the metric is a right-aligned 7-day rolling SUM per 100k.
+- [x] **Wired into `inc2prev_age_timeseries` as its own `VAL`/`ND` branch**, like `cis-observed` and
+      explicitly NOT via `_I2P_SOURCES`. §6c's incidence figure now carries four lines.
+- [x] **§6d + `make_incidence_total_fig`/`incidence_total_frame`** — the England total from all three
+      sources over the ascertainment ratio they imply, both built from §6c's own `bin == 0` rows.
+- [x] Fixed the positional `cols[end]` in `make_inc2prev_timeline_fig`: the "estimates_age_ab.csv
+      ends" marker took the LAST series' colour, so a fourth series silently recoloured it.
+
+## Found while doing it — both pre-existing, both fixed
+
+- [x] **14j could not run at all against `estimates_age.csv`.** `ngm_antibody_columns` asserted that
+      `weekly_antibody` never zero-filled a target week; that source has no `gen_dab` rows, so the
+      condition it guarded had become universal. The guard now forks on whether the source carries
+      antibody, as `weekly_antibody` itself does. This is why `res/` held no `14j_*` files.
+- [x] **Two §6 captions described an antibody effect this source cannot produce** ("`A_a` approaches
+      1 in the older bins"). `A ≡ 0` here and `F` is pinned to 1.0 anyway, so the NGM↔C* difference
+      is `susc` and `inf` alone. The figures were right; their explanation was not.
+
+## Open
+
+- [ ] **`inst/analysis_plan_heavy_tail_mean.md`/`.docx` still specifies `outputs/estimates_age_ab.csv`.**
+      Deliberately NOT edited: the `.md` is a pandoc conversion of the authoritative `.docx` (CLAUDE.md:
+      "docx wins"), so editing it would both contradict its source and be lost on the next conversion.
+      The implementation diverges from the plan here **by user request**; the docx is the thing to
+      update, and only its owner can.
+- [ ] **The UKHSA caches are a point-in-time pull.** `rateRollingMean` is revised upstream — `"90"`
+      vs `"90+"` already differ by up to 2.6% in Dec 2023, outside the span used here. Re-running
+      `--refresh` is cheap; nothing detects staleness, as usual.
+- [ ] Reported cases are published for **England**, matching inc2prev. If the contact side is ever
+      put on the same axis, it is **UK** — the mismatch §6c/§6d already flag in every caption.

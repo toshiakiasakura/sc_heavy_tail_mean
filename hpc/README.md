@@ -61,7 +61,7 @@ Into `/home/<user>/prj_sc_heavy_tail_mean/` (= `PROJECT_DIR` in `config.sh`):
 |---|---|
 | the repo (`src/`, `hpc/`, `Project.toml`, `Manifest.toml`, `inst/`, `tasks/`) | `git clone` on the login node is fine |
 | `dt_comix_no_public/part_uk.arrow`, `contacts_uk.arrow` | **gitignored — WinSCP only** |
-| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age_ab.csv` | the submodule; only these two files are read |
+| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these two files are read by the fitting path. ⚠ **`estimates_age.csv`, not the `_ab` variant** — the source moved on 2026-09-16 and shipping the old file would refit the whole grid against different infection estimates with nothing detecting it |
 | the `.simg` | ~3–5 GB (squashfs of the 12.6 GB image) |
 
 Then, on the login node:

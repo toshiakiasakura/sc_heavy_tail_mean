@@ -123,8 +123,11 @@ column `n_fit` $= 8$ in *every* Stage-1 chain (10j asserts `t_o_est == cfg.n_fit
 
 ### 2.3 Infection and antibody series
 
-Age-stratified estimates are taken from the `inc2prev` output `estimates_age_ab.csv`
-(`infection_data.jl`):
+Age-stratified estimates are taken from the `inc2prev` output `estimates_age.csv`
+(`infection_data.jl`, `_EST_PATH`). ⚠ **This was `estimates_age_ab.csv` until 2026-09-16**, when the
+source was changed (errors were found in the use of the `_ab` variant). The schema is identical, the
+`infections` posterior is not (median 8.6% relative difference, p90 76%), and the antibody
+consequences are spelled out below:
 
 - **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$. The `name == "infections"` rows give
   a *daily per-capita infection proportion* with mean and SD; the weekly count is the 7-day sum of
@@ -143,6 +146,15 @@ Age-stratified estimates are taken from the `inc2prev` output `estimates_age_ab.
   It therefore **warns** on unmatched weeks, loudly for forecast targets. The zero fill is retained as
   the value (a `NaN`/`missing` would propagate into the NGM); the warning is a tripwire for when the
   origin cap is raised past the `gen_dab` series' end, and is silent over the current 63 origins.
+
+  ⚠ **Against the current source there are NO `gen_dab` rows at all**, so $A_{a,t} \equiv 0$ for
+  every week and every bin: `estimates_age.csv` carries no antibody block, only the `_ab` variants
+  do. `weekly_antibody` detects the no-rows case and emits one `@info` per session rather than the
+  per-week gap warning, which would otherwise fire at every one of ~126 call sites. This is inert
+  **only** because §3.1 pins $F = 1$, so the leaky factor $1 + (F-1)A_a \equiv 1$ whatever $A$ holds.
+  **Re-enabling $F \sim \mathrm{Beta}(5,1)$ against this source would infer $F$ from a covariate that
+  is identically zero** — a posterior equal to its prior, and zero antibody protection everywhere,
+  with no error and no warning. Point `_EST_PATH` back at an `_ab` variant first.
 
 Populations $N_a$ and proportions $N_a / \sum_b N_b$ complete the `WindowData` container.
 

@@ -100,11 +100,16 @@ Upper bound: the contact-updated iterate needs contact data out to
 bound only). The data-derived bound alone is **too generous** and callers should cap it:
 CoMix's main panel stops 2022-03-02, but a stray 2022-11-16…2022-11-28 block drags
 `last_contact_week` — and hence `tmax` — out to 2022-10-30, so origins from ~2022-03-06
-roll through a window with no contact data. inc2prev is a second, uncaught limit: its
-`infections`/`gen_dab` end 2022-03-26 and `weekly_infections`/`weekly_antibody`
-(`infection_data.jl`) skip unmatched weeks into pre-zeroed arrays, so later origins are
-silently zero-filled rather than erroring. 8j/9j pass `origin_max=Date(2021,12,31)`
-(⇒ last origin 2021-12-26).
+roll through a window with no contact data. inc2prev is a second, uncaught limit:
+`estimates_age.csv`'s `infections` end 2023-01-31 (the `_ab` variant used until 2026-09-16
+ended 2022-03-26, and carries no `gen_dab` at all now — see `infection_data.jl`), and
+`weekly_infections`/`weekly_antibody` skip unmatched weeks into pre-zeroed arrays, so later
+origins are silently zero-filled rather than erroring. 8j/9j pass `origin_max=Date(2021,12,31)`
+(⇒ last origin 2021-12-26), which is well inside both.
+
+⚠ `infection_start` is a HARD-CODED default, not read from the estimates file, so switching
+between inc2prev variants does NOT move the origin grid — which is exactly why the 9j assembly
+cache (validated on `origins`/`labels` alone) cannot notice such a switch.
 """
 function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
                                     craw = nothing,

@@ -77,7 +77,7 @@ grid = cis_age_grid()
 
 FIT_END = Date(get(ENV, "FIT_END", "2021-12-31"))
 raw = load_raw_contact_inputs()
-inf = load_raw_infection_inputs()            # (; df, tmap) — read estimates_age_ab.csv once
+inf = load_raw_infection_inputs()            # (; df, tmap) — read estimates_age.csv once
 FORECAST_ORIGINS = available_forecast_origins(cfg; grid = grid, craw = raw.craw,
                                               origin_max = FIT_END)
 haskey(ENV, "ORIGIN_MIN") && filter!(>=(Date(ENV["ORIGIN_MIN"])), FORECAST_ORIGINS)
