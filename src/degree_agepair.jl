@@ -84,16 +84,16 @@ end
 
 """
     available_forecast_origins(cfg; grid=cis_age_grid(), craw=nothing,
-                               infection_start=Date(2020,8,17), step_weeks=1,
+                               infection_start=Date(2020,8,3), step_weeks=1,
                                origin_max=nothing)
 
 Rolling MONDAY-start forecast origins the current data support. Lower bound: the
-12-week fit/lag window (`origin−11wk … origin`) must lie within the OUTCOME series
-(`infection_start` = first FULL Monday week of ONS CIS by age, `cis_age.csv`, whose first day
-is Fri 2020-08-14) ⇒ first origin **2020-11-02**. The infection window is still
+12-week fit/lag window (`origin−11wk … origin`) must lie within the INFECTION series
+(`infection_start` = first FULL Monday week of `estimates_age.csv`'s infections, which start
+Fri 2020-07-31) ⇒ first origin **2020-10-19**. The infection window is still
 `n_fit + smax` weeks even though the CONTACT window is only `n_fit + h` (`-w8h`), a
-weaker bound that never binds. `weekly_cis_positives` asserts 7 days in every cell, so an
-earlier start fails loudly rather than averaging a part-week.
+weaker bound that never binds. `load_window_data` asserts every window week is fully covered
+(`_assert_infection_coverage`), so an earlier start fails loudly rather than zero-filling.
 Upper bound: the contact-updated iterate needs contact data out to
 `origin + max horizon` weeks, so the last origin is
 `last_contact_week − max(horizons)`. `craw` is the raw contact table
@@ -103,8 +103,8 @@ Upper bound: the contact-updated iterate needs contact data out to
 bound only). The data-derived bound alone is **too generous** and callers should cap it:
 CoMix's main panel stops Wed 2022-03-02, but a stray 2022-11-16…2022-11-28 block drags
 `last_contact_week` — and hence `tmax` — out to late 2022, so later origins roll through a
-window with no contact data. 8j/9j pass `origin_max = Date(2022, 1, 24)` (⇒ 65 origins,
-2020-11-02 … 2022-01-24): the last origin whose h=4 contact week (2022-02-21) is complete.
+window with no contact data. 8j/9j pass `origin_max = Date(2022, 1, 24)` (⇒ 67 origins,
+2020-10-19 … 2022-01-24): the last origin whose h=4 contact week (2022-02-21) is complete.
 
 ⚠ `infection_start` is a HARD-CODED default, not read from the outcome file, so switching
 outcome source does NOT move the origin grid — which is exactly why the 9j assembly
@@ -112,7 +112,7 @@ cache (validated on `origins`/`labels` alone) cannot notice such a switch.
 """
 function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
                                     craw = nothing,
-                                    infection_start::Date = Date(2020, 8, 17),
+                                    infection_start::Date = Date(2020, 8, 3),
                                     step_weeks::Int = 1,
                                     origin_max::Union{Nothing,Date} = nothing)
     craw === nothing && (craw = load_raw_contact_inputs().craw)

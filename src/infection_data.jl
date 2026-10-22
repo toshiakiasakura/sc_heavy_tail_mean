@@ -1,11 +1,12 @@
 # infection_data.jl — the framework's infection-side inputs on the Monday-start weekly grid.
 #
-# OUTCOME (2026-10-22, user request): ONS CIS positivity by age (`inc2prev/data-processed/cis_age.csv`,
-# England, daily) × population — `weekly_cis_positives`. It REPLACED inc2prev's modelled infections
-# as `WindowData.I_mean` (renewal history, Stage-2 target, scoring truth). It is a PREVALENCE used
-# as-is where the renewal expects incidence; see `weekly_cis_positives`. Everything below about
-# `estimates_age.csv` now concerns ANTIBODY only (all zero, F pinned) and `weekly_infections`, which
-# the 14j/16j audits still read.
+# OUTCOME: inc2prev's modelled NEW INFECTIONS from `estimates_age.csv` (`weekly_infections`, 7-day sum
+# × population) — `WindowData.I_mean` (renewal history, Stage-2 target, scoring truth). On 2026-10-22
+# it was briefly switched to ONS CIS positivity × population (`weekly_cis_positives`, still here) and
+# switched BACK the same day (user decision, after 1j compared the sources): positivity is a stock,
+# not the incidence the renewal models, and the `_ab` comparison showed which inc2prev file to trust.
+# `load_window_data` now ASSERTS that every week it reads is fully covered by the estimates, since
+# `weekly_infections` zero-fills a missing day silently.
 #
 # SOURCE: `estimates_age.csv` since 2026-09-16 (user request — errors found in the use of the
 # `_ab` variant). The SCHEMA is identical in both files: `name` selects the quantity, `variable`
@@ -61,8 +62,9 @@ end
 
 _age_index_map(grid) = Dict(l => i for (i, l) in enumerate(grid.LAB))
 
-# ONS CIS modelled PCR positivity by age (England, daily, 118 stacked publication vintages): the
-# framework OUTCOME since 2026-10-22. See `cis_weekly_positivity` / `weekly_cis_positives`.
+# ONS CIS modelled PCR positivity by age (England, daily, 118 stacked publication vintages) — what
+# inc2prev was fitted to. NOT the framework outcome (briefly it was, on 2026-10-22; see the header);
+# read by 1j/14j. See `cis_weekly_positivity` / `weekly_cis_positives`.
 const _CIS_AGE_PATH = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "cis_age.csv")
 
 """
@@ -72,18 +74,14 @@ const _CIS_AGE_PATH = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "ci
 Weekly ONS CIS PCR positivity by CIS age bin, `A × length(weeks)`, as a **proportion**. The
 `× population` happens once in `inc2prev_age_timeseries`, so the raw proportion stays inspectable.
 
-⚠ **THE FRAMEWORK OUTCOME IS BUILT FROM THIS** (2026-10-22): `weekly_cis_positives` multiplies `P` by
-`grid.POP` and feeds Stage 2 and scoring. It lived in `14j_viz_utils.jl` until then, as a §6c
-comparator, and was moved here verbatim.
+Moved here verbatim from `14j_viz_utils.jl` on 2026-10-22, when it briefly built the framework outcome
+(`weekly_cis_positives`); the outcome went back to `weekly_infections` the same day and this stays a
+shared reader for 1j and 14j §6c.
 
 This is the genuinely OBSERVED series — `inc2prev/stan/inc2prev.stan:176` is
 `prev ~ normal(odcases, combined_sigma)`, i.e. `proportion_pos` is literally what both estimate files
-were fitted to. (For the REPORTED case counts that sit beside it in the incidence figure, see
-`ukhsa_weekly_cases`. An earlier version of this docstring said age-stratified reported counts "do
-not exist for this comparison, and UKHSA's live API carries `age: \"all\"` only" — that was true of
-the retired `api.coronavirus.data.gov.uk` and is FALSE of its replacement, where
-`COVID-19_cases_rateRollingMean` is published in 5-year bands. A note that data does not exist is a
-measurement with a date on it; this one had gone stale and closed off a figure.)
+were fitted to. (UKHSA reported case counts by age used to sit beside it in 14j §6c; they were
+removed on 2026-10-22 with `dt_ukhsa/`.)
 
 ⚠ **`cis_age.csv` IS NOT A SERIES — IT IS 118 STACKED PUBLICATION VINTAGES OF ONE.** 34 692
 England/`age_school` rows collapse to 6307 `(date, bin)` cells. Read without a collapse it silently
@@ -192,27 +190,23 @@ end
 """
     weekly_cis_positives(cis, weeks, grid; vintage = :latest) -> (I_mean, I_sd)
 
-The framework OUTCOME (2026-10-22, user request): the number of people in England currently PCR
-positive, by CIS age bin and Monday week, `A × length(weeks)` — weekly MEAN ONS CIS positivity
-(`cis_weekly_positivity`) × `grid.POP`. It replaces inc2prev's modelled infections
-(`weekly_infections`) everywhere `WindowData.I_mean` is read: the renewal history, the Stage-2
-likelihood target and the scoring truth.
+The number of people in England currently PCR positive, by CIS age bin and Monday week,
+`A × length(weeks)` — weekly MEAN ONS CIS positivity (`cis_weekly_positivity`) × `grid.POP`. It was the
+framework OUTCOME for part of 2026-10-22 and is NOT any more (`load_window_data` uses
+`weekly_infections`); 1j uses it to compare the two.
 
-⚠ **IT IS A PREVALENCE (a stock), USED AS-IS where the renewal expects incidence** (user's choice).
-Weekly positivity × pop is roughly (mean detectable duration ≈ 8.7 d)/7 ≈ 1.24 weekly incidences,
-lagged and smoothed; γ_SAR and the generation interval absorb that. Never read γ_SAR from these fits
-as a per-contact attack rate on the incidence scale.
+⚠ It is a PREVALENCE (a stock). Weekly positivity × pop is about (mean detectable duration ≈ 8.7 d)/7 ≈
+1.24 weekly incidences in steady state, and 0.6–2.3× week to week as the growth rate moves (1j).
 
 `I_sd` = weekly mean of the daily `(HI − LO)/(2·1.96)` × POP — inc2prev's own CrI → SD rule
 (`R/model.R`). Daily values come from one smooth ONS model, so the SDs are AVERAGED (perfect
 correlation), not added in quadrature as independent days would be.
 
 ⚠ ASSERTS 7 days and a finite, positive value in EVERY cell. `cis_weekly_positivity` NaN-fills an
-empty cell and averages a part-week silently; here either is an error, because it is what the
-origin grid's lower bound (`available_forecast_origins`' `infection_start`, the first full Monday
-week 2020-08-17) exists to prevent.
+empty cell and averages a part-week silently; here either is an error. CIS by age covers 2020-08-14 …
+2023-01-31 (first full Monday week 2020-08-17).
 
-`cis` is the raw `cis_age.csv` frame (`load_raw_infection_inputs().cis`), read once per process.
+`cis` is the raw `cis_age.csv` frame (`_cis_frame()`), read once per process.
 """
 function weekly_cis_positives(cis::AbstractDataFrame, weeks::AbstractVector{Date}, grid;
                               vintage::Symbol = :latest)
@@ -233,9 +227,8 @@ _load_cis(path::AbstractString = _CIS_AGE_PATH) =
     (isfile(path) || error("no such file $path — is the inc2prev submodule checked out?");
      CSV.read(path, DataFrame))
 
-# ONE read of `cis_age.csv` per process, shared by every `load_window_data`/`load_forecast_truth`
-# call, so none of their ~25 call sites had to change signature when the outcome moved to the CIS.
-# Locked because `prefit_*!` call the data provider from concurrent tasks. Treated read-only.
+# ONE read of `cis_age.csv` per process for `weekly_cis_positives`' callers. Locked because it was written
+# to be called from `prefit_*!`'s concurrent data providers. Treated read-only.
 const _CIS_CACHE = Ref{Union{Nothing,DataFrame}}(nothing)
 const _CIS_LOCK  = ReentrantLock()
 _cis_frame() = lock(_CIS_LOCK) do
@@ -340,29 +333,46 @@ end
 """
     load_raw_infection_inputs(; path=_EST_PATH)
 
-Read the infection-side inputs **once**: the inc2prev estimates CSV with its `t_index → Date` map
-(now used for ANTIBODY only — `estimates_age.csv` carries none, so `A ≡ 0`), and the ONS CIS
-by-age frame `cis` that the OUTCOME comes from (`weekly_cis_positives`). Returns `(; df, tmap, cis)`;
-pass `inf.df, inf.tmap` straight into `load_window_data(win, inf.df, inf.tmap; grid)`, which reads
-the CIS from the same per-process cache (`_cis_frame`). Every frame is treated read-only, so it is
-safe to reuse across origins and to read concurrently from a background prefetch task.
+Read the inc2prev estimates CSV **once** and build the `t_index → Date` map (the read
+`load_window_data` would otherwise repeat on every origin). Returns `(; df, tmap)` to pass
+straight into `load_window_data(win, inf.df, inf.tmap; grid)`, mirroring
+`load_raw_contact_inputs()`. The frame is treated read-only — `weekly_infections`/
+`weekly_antibody` `@subset` it into copies — so it is safe to reuse across origins and to
+read concurrently from a background prefetch task.
 """
 function load_raw_infection_inputs(; path::AbstractString = _EST_PATH)
     df, tmap = _load_estimates(path)
-    return (; df, tmap, cis = _cis_frame())
+    return (; df, tmap)
+end
+
+"""
+    _assert_infection_coverage(tmap, weeks, what)
+
+Every day of every week in `weeks` must carry an `infections` estimate (`tmap`'s dates).
+`weekly_infections` zero-fills a missing day, so a part-covered week would enter the renewal as a
+silently LOW count. `estimates_age.csv` covers 2020-07-31 … 2023-01-31, so the first complete Monday
+week is 2020-08-03 — `available_forecast_origins`' `infection_start`, which puts the first origin at
+2020-10-19.
+"""
+function _assert_infection_coverage(tmap::Dict{Int,Date}, weeks::AbstractVector{Date}, what::AbstractString)
+    days = Set(values(tmap))
+    bad = [w for w in weeks if !all(d -> d in days, w:Day(1):(w + Day(6)))]
+    @assert isempty(bad) "load_window_data: $(length(bad)) $what week(s) not fully covered by the infection \
+        estimates ($(minimum(days)) … $(maximum(days))), first $(first(bad)). weekly_infections would \
+        zero-fill the missing days silently."
 end
 
 """Assemble `WindowData` from a **pre-loaded** estimates frame `df` and `t_index → Date`
 map `tmap` (from `load_raw_infection_inputs()`), skipping the per-call CSV read. Byte-identical
-to the `path`-reading method; safe to call concurrently (read-only over `df`/`cis`).
+to the `path`-reading method; safe to call concurrently (read-only over `df`).
 
-`I_mean`/`I_sd` are the ONS CIS positives × population (`weekly_cis_positives`, 2026-10-22) — NOT
-inc2prev's modelled infections, which `weekly_infections` still reads for the 14j/16j audits. The
-field names are unchanged so no reader had to move; read them as "people currently positive"."""
+`I_mean`/`I_sd` are inc2prev's modelled weekly NEW infections (`weekly_infections`). Every week of
+the window must be fully covered by the estimates (`_assert_infection_coverage`)."""
 function load_window_data(win::WeeklyWindow, df::DataFrame, tmap::Dict{Int,Date};
-                          grid = cis_age_grid(), cis::AbstractDataFrame = _cis_frame())
+                          grid = cis_age_grid())
     weeks = win.all_weeks
-    I_mean, I_sd = weekly_cis_positives(cis, weeks, grid)
+    _assert_infection_coverage(tmap, weeks, "window")
+    I_mean, I_sd = weekly_infections(df, weeks, grid)
     AB = weekly_antibody(df, tmap, weeks, grid; what = "window")
     # Antibody at the FORECAST TARGET weeks t₀+h, for the frozen forecast NGM (§3.2). A gap here
     # matters more than one in the fit window — it drives every horizon-h prediction — so it gets
@@ -381,10 +391,11 @@ function load_window_data(win::WeeklyWindow; path::AbstractString = _EST_PATH, g
     return load_window_data(win, df, tmap; grid = grid)
 end
 
-"""Realized weekly CIS positives × population (A × n_horizons) for the forecast target weeks
-— the scoring `true_value`. Same quantity as `load_window_data`'s `I_mean` (`weekly_cis_positives`)."""
-function load_forecast_truth(win::WeeklyWindow; grid = cis_age_grid(),
-                             cis::AbstractDataFrame = _cis_frame())
-    I_mean, _ = weekly_cis_positives(cis, win.forecast_weeks, grid)
+"""Realized weekly infection counts (A × n_horizons) for the forecast target weeks
+— the scoring `true_value`. Asserts the target weeks are fully covered, as `load_window_data` does."""
+function load_forecast_truth(win::WeeklyWindow; path::AbstractString = _EST_PATH, grid = cis_age_grid())
+    df, tmap = _load_estimates(path)
+    _assert_infection_coverage(tmap, win.forecast_weeks, "forecast-target")
+    I_mean, _ = weekly_infections(df, win.forecast_weeks, grid)
     return I_mean
 end

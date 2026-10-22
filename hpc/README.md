@@ -17,10 +17,10 @@ and skip.
 | `conditional` | 2 degree models × h1–4 = 8 | 6 combos × h1–4 = 24 | *no contact*, *contact* |
 | `frozen` | 2 × h0 = 2 | 6 combos × h0 = 6 | *contact frozen* |
 | `variant` | (reuses the h1–4 chains) | 6 `VariantNGM` combos × h1–4 = 24, + 5 contact ones × h0 = 5 if `frozen` | *variant*, *variant + contact*, *variant + contact frozen* |
-| **all (default)** | **10** | **59** | all six — **650 s1 + 3 835 s2** over 65 origins |
+| **all (default)** | **10** | **59** | all six — **670 s1 + 3 953 s2** over 67 origins |
 
 The grid is the `-eng` generation (token `temporal-w8h-lc0-eng-nuts`): England-only CoMix
-participants, the ONS CIS positivity-by-age outcome, MONDAY weeks, origins 2020-11-02 … 2022-01-24.
+participants, MONDAY weeks, origins 2020-10-19 … 2022-01-24; the outcome is inc2prev's `estimates_age.csv` infections.
 
 | file | what it is |
 |---|---|
@@ -73,7 +73,7 @@ Into `/home/<user>/prj_sc_heavy_tail_mean/` (= `PROJECT_DIR` in `config.sh`):
 |---|---|
 | the repo (`src/`, `hpc/`, `Project.toml`, `Manifest.toml`, `inst/`, `tasks/`) | `git clone` on the login node is fine |
 | `dt_comix_no_public/part_uk.arrow`, `contacts_uk.arrow` | **gitignored — WinSCP only** |
-| `inc2prev/data-processed/populations.csv`, `inc2prev/data-processed/cis_age.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these three files are read by the fitting path. `cis_age.csv` is the OUTCOME (ONS CIS positivity by age); `estimates_age.csv` supplies only the (all-zero) antibody covariate — ⚠ **not the `_ab` variant**, which would silently change it |
+| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these two files are read by the fitting path. `estimates_age.csv` is the OUTCOME (weekly infections) and the (all-zero) antibody covariate — ⚠ **not the `_ab` variant**, whose infections 1j shows are badly distorted in four age bins |
 | `dt_cog_uk/cog_uk_england_weekly.csv` | **untracked — WinSCP it.** The variant sets (`SCENARIOS` containing `variant`); the driver refuses to start without it |
 | the `.simg` | ~3–5 GB (squashfs of the 12.6 GB image) |
 
@@ -94,7 +94,7 @@ ever does.)
 
 ⚠ **Check the quota before you start.** A Stage-1 NUTS chain is ~28 MB (NegBin) / ~72 MB
 (hurdle-Weibull) at `nuts_draws = 2000` (h0 chains are smaller), and the grid is 5+5 of them per
-origin × 65 origins ≈ **32 GB**, plus the Stage-2 pooled files and the ~4–5 GB image. `quota -s` / `df -h ~` first; a
+origin × 67 origins ≈ **33 GB**, plus the Stage-2 pooled files and the ~4–5 GB image. `quota -s` / `df -h ~` first; a
 full filesystem part-way through a 5 h array is an expensive way to find out. (Since artefacts are
 now written temp-then-rename, running out of space fails the *temp* write and the target path is
 never touched — a loud, resumable failure rather than a truncated file the next run would skip as
@@ -162,7 +162,7 @@ sbatch --dependency=afterok:"${jid}" hpc/s2_array.slurm      # starts only if EV
 crashed Stage-1 slice never lets Stage 2 start against an incomplete grid (the s2 driver would hold
 those origins back anyway, and say so). Run them by hand in that order if you prefer.
 
-Each task owns a **round-robin slice** of the 65 origins (`ORIGIN_OFFSET=$SLURM_ARRAY_TASK_ID`,
+Each task owns a **round-robin slice** of the 67 origins (`ORIGIN_OFFSET=$SLURM_ARRAY_TASK_ID`,
 `ORIGIN_STRIDE=$SLURM_ARRAY_TASK_COUNT`), so no two tasks ever write the same artefact. The slice and
 its origin list are printed at the top of every task log — that print is the evidence the partition
 was disjoint.
@@ -193,7 +193,7 @@ squeue --user=$USER                       # running / pending
 squeue --user=$USER --start                # expected start time
 sacct -j <jobid> --format=JobID,Elapsed,MaxRSS,State
 tail -f logs/s1_<jobid>_0.log
-ls dt_intermediate/8j_s1_*temporal-w8h-lc0-eng-nuts* | wc -l    # target 650 (s1), 3835 for 8j_s2_*
+ls dt_intermediate/8j_s1_*temporal-w8h-lc0-eng-nuts* | wc -l    # target 670 (s1), 3953 for 8j_s2_*
 scancel <jobid>
 ```
 

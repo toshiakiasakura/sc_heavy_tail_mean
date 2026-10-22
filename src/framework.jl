@@ -643,8 +643,10 @@ carries no `-m32`. Both were rewritten against `is_legacy_token` below — read 
 adding a third.
 
 ⚠ **`-eng` (2026-10-22, user request) is a DATA generation, not a model change**: England-only
-CoMix (`england_only`), the ONS CIS outcome (`weekly_cis_positives`) and the Monday grid
-(`WEEK_ANCHOR`). Model, parameter names and dimensions are all UNCHANGED, so the token is the only
+CoMix (`england_only`), the Monday grid (`WEEK_ANCHOR`) and the origin span 2020-10-19 … 2022-01-24; the
+outcome is still `estimates_age.csv`'s infections (a switch to ONS CIS positivity was made and reverted
+on the same day, before anything was fitted under this token). Model, parameter names and dimensions are
+all UNCHANGED, so the token is the only
 evidence — the reason it was bumped rather than left to the directory. (Monday origins could not
 collide with the Sunday filenames anyway; the token makes the provenance explicit.) The UK /
 inc2prev / Sunday grid is `CONTACTS_TOKEN_SUN`."""

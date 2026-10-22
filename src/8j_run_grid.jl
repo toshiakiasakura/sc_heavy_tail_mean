@@ -15,7 +15,7 @@
 #            6 combos × h0 (frozen)                                                    =  6
 #            6 VariantNGM combos × 1:4 (variant)                                       = 24
 #            5 contact VariantNGM combos × h0 (variant AND frozen)                     =  5
-# ⇒ 10 + 59 per origin; 650 + 3835 over the 65-origin grid. Stage 1 fits h1–4 and h0 in ONE
+# ⇒ 10 + 59 per origin; 670 + 3953 over the 67-origin grid. Stage 1 fits h1–4 and h0 in ONE
 # fan-out per origin (one `prefit_stage1!` call over `S1_HORIZONS`), so the two h0 chains never run
 # 2-wide on their own — the barrier problem `queue = true` was written for in 8j §2b.
 #
@@ -95,9 +95,9 @@ cfg  = FrameworkConfig(constant_contacts = false, stage1_use_nuts = STAGE1_USE_N
                        ad_backend = AD_BACKEND)
 grid = cis_age_grid()
 
-FIT_END = Date(get(ENV, "FIT_END", "2022-01-24"))   # ⇒ 65 Monday origins, 2020-11-02 … 2022-01-24
+FIT_END = Date(get(ENV, "FIT_END", "2022-01-24"))   # ⇒ 67 Monday origins, 2020-10-19 … 2022-01-24
 raw = load_raw_contact_inputs()              # England-only roster (`england_only`)
-inf = load_raw_infection_inputs()            # (; df, tmap, cis) — antibody CSV + ONS CIS outcome, once
+inf = load_raw_infection_inputs()            # (; df, tmap) — read estimates_age.csv once
 # COG-UK variant composition — the variant sets need it, and it is an UNTRACKED file, so a cluster
 # copy of the repo lacks it unless it was uploaded alongside `dt_comix_no_public/`.
 cog = if "variant" in SCENARIOS
@@ -214,8 +214,13 @@ if isempty(pending)
     # s2 with origins held back is NOT complete: report it as a failure (exit 3), so `run_grid.sh`
     # stops and Slurm marks the task FAILED, rather than an s2 job submitted before Stage 1 finished
     # "completing" with nothing fitted.
-    if PHASE == "s2" && any(w -> s2_missing(w) > 0, wins) && get(ENV, "DRY_RUN", "0") != "1"
-        say("*** nothing READY for PHASE=s2, but ", count(w -> s2_missing(w) > 0, wins),
+    if PHASE == "s2" && any(w -> s2_missing(w) > 0, wins)
+        nb = count(w -> s2_missing(w) > 0, wins)
+        if get(ENV, "DRY_RUN", "0") == "1"     # the preflight: report it, but exit 10 so a loop never spins
+            say("DRY_RUN=1 — nothing READY for PHASE=s2: ", nb, " origin(s) blocked on Stage 1 (a real run exits 3)")
+            exit(10)
+        end
+        say("*** nothing READY for PHASE=s2, but ", nb,
             " origin(s) still need Stage 2 and are blocked on Stage 1 — run/finish s1 first")
         exit(3)
     end

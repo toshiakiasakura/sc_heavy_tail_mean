@@ -15,11 +15,11 @@
 #                              §5's raw home vs non-home share of contact DURATION
 #   §G  `_perron_share` + `incidence_age_shares` — §6's expected age distribution (the dominant
 #                              eigenvector of C*) and its inc2prev observed comparator
-#   §G2 `inc2prev_age_timeseries` + `cis_weekly_positivity` + `ukhsa_weekly_cases` — §6c, the
-#                              INFECTION-side input audit: both inc2prev fits, the ONS CIS
-#                              positivity they were fitted to, and UKHSA reported cases, by age
-#   §G3 `incidence_total_frame` / `make_incidence_total_fig` — §6d, the same three incidence
-#                              sources as an England total, over the ascertainment they imply
+#   §G2 `inc2prev_age_timeseries` + `cis_weekly_positivity` — §6c, the INFECTION-side input
+#                              audit: both inc2prev fits and the ONS CIS positivity they were
+#                              fitted to, by age. (UKHSA reported cases and §G3/§6d — the England
+#                              total and its ascertainment — were removed on 2026-10-22 with
+#                              `dt_ukhsa/`.)
 #   §H  the three round-5 figures
 #   §I  `collect_ngm_age_eigen` + `ngm_antibody_columns` — §6's NGM twin (eigenvector of N, not C*)
 #   §J  `reproduction_frame` / `make_reproduction_fig` — §7's two stacked R panels
@@ -1869,19 +1869,6 @@ _i2p_est_path(stem::AbstractString) = joinpath(@__DIR__, "..", "inc2prev", "outp
 # — what `estimate.R --ab` fits (via `read_ab()`). See `ons_antibody_age`.
 const _AB_AGE_PATH  = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "ab_age.csv")
 
-# The UKHSA reported-case caches. ⚠ These are the FIRST data in §6c that are not an inc2prev file,
-# which is why `"ukhsa-reported"` is deliberately NOT in `_I2P_SOURCES` (that tuple drives the
-# inc2prev frame loader, the `gen_dab` frame-identity assert and the per-row population assert, and
-# a non-inc2prev stem trips all three). It enters exactly as `"cis-observed"` does: its own branch.
-#
-# They are built ONCE by `dt_ukhsa/fetch_ukhsa_cases.py` and COMMITTED, so 14j needs no network —
-# the only route into that API is paginated JSON and `Project.toml` carries no HTTP/JSON package.
-# Adding one would change `Manifest.toml`, which per CLAUDE.md forces an HPC image rebuild.
-const _UKHSA_DIR      = joinpath(@__DIR__, "..", "dt_ukhsa")
-const _UKHSA_AGE_PATH = joinpath(_UKHSA_DIR, "ukhsa_cases_age_rate_daily.csv")
-const _UKHSA_NAT_PATH = joinpath(_UKHSA_DIR, "ukhsa_cases_national_daily.csv")
-const _UKHSA_POP_PATH = joinpath(_UKHSA_DIR, "england_single_year_population.csv")
-
 "The two inc2prev age-stratified fits §6c compares. Identical 31-column schema, identical 7 CIS bins
 and populations; they differ in the ROW SET (only `_ab` carries antibody) and in the `infections`
 posterior itself (the `_ab` file is a joint fit to prevalence AND antibody data)."
@@ -1909,12 +1896,7 @@ const _I2P_ROWS = ((source = "cis-observed",     quantity = "prevalence", name =
                    (source = "estimates_age",    quantity = "incidence",  name = "infections", agg = "sum"),
                    (source = "estimates_age",    quantity = "prevalence", name = "dcases",     agg = "mean"),
                    (source = "estimates_age_ab", quantity = "incidence",  name = "infections", agg = "sum"),
-                   (source = "estimates_age_ab", quantity = "prevalence", name = "dcases",     agg = "mean"),
-                   # REPORTED CASES — a FLOW, so `sum`, like `infections`. `name` is empty because
-                   # this one does not come from an inc2prev frame at all (see `_UKHSA_AGE_PATH`).
-                   # There is deliberately NO `prevalence` twin: a confirmed test is an incidence
-                   # event, not a stock, and this roster is not a cross product.
-                   (source = "ukhsa-reported",   quantity = "incidence",  name = "",           agg = "sum"))
+                   (source = "estimates_age_ab", quantity = "prevalence", name = "dcases",     agg = "mean"))
 
 # Plot specs per figure kind: `(source, quantity, label, colour, linestyle, linewidth)`.
 # A `nothing` colour means "take the next `_model_cols` entry" — the observed is NOT a model and must
@@ -1927,206 +1909,14 @@ const _I2P_ROWS = ((source = "cis-observed",     quantity = "prevalence", name =
 const _I2P_SERIES = (
     incidence  = (("cis-observed",     "prevalence", "observed — CIS pos. × pop  [stock]", :black, :solid, 2.5),
                   ("estimates_age",    "incidence",  "estimates_age  [flow]",              nothing, :solid, 2.0),
-                  ("estimates_age_ab", "incidence",  "estimates_age_ab  [flow]",           nothing, :dash,  2.0),
-                  # Explicit colour, not a `_model_cols` slot: reported cases are an OBSERVATION,
-                  # like the CIS line, and must not consume a model colour. Not black either — black
-                  # already means "the series both files were fitted to" in this figure, and these
-                  # are a different observation of a different quantity. `:dashdot` carries the
-                  # identity redundantly for greyscale, per the "never colour-alone" rule.
-                  ("ukhsa-reported",   "incidence",  "reported cases — UKHSA  [flow]",    :grey35, :dashdot, 2.0)),
+                  ("estimates_age_ab", "incidence",  "estimates_age_ab  [flow]",           nothing, :dash,  2.0)),
     prevalence = (("cis-observed",     "prevalence", "observed — CIS pos. × pop",          :black, :solid, 2.5),
                   ("estimates_age",    "prevalence", "estimates_age — dcases",             nothing, :solid, 2.0),
                   ("estimates_age_ab", "prevalence", "estimates_age_ab — dcases",          nothing, :dash,  2.0)),
 )
 
 # `cis_weekly_positivity` MOVED VERBATIM to `infection_data.jl` (2026-10-22), where
-# `weekly_cis_positives` builds the framework outcome from it. §6c still calls it from there.
-
-"""
-    _ukhsa_band(age) -> String
-
-The UKHSA dashboard's 5-year band label for a single year of age (`"00-04"` … `"85-89"`, `"90+"`).
-Mirrors `band_of` in `dt_ukhsa/fetch_ukhsa_cases.py`; the two must agree or the band populations
-stop matching the band rates.
-"""
-_ukhsa_band(age::Integer) = age >= 90 ? "90+" :
-    (lo = 5 * fld(age, 5); string(lpad(lo, 2, '0'), "-", lpad(lo + 4, 2, '0')))
-
-"""
-    ukhsa_weekly_cases(weeks; grid, rate_path, nat_path, pop_path, rate_df, nat_df, pop_df)
-        -> (; W, n_days, national, recon_ratio, bands)
-
-Weekly **reported** COVID-19 case counts for England by CIS age bin, `A × length(weeks)`, from the
-UKHSA dashboard caches in `dt_ukhsa/`. The third incidence series in §6c, beside the two inc2prev
-fits — and the only one that is a direct count of ascertained events rather than a model output.
-
-⚠ **THIS IS NOT INFECTIONS, AND THE GAP IS NOT CONSTANT.** A reported case is a confirmed test, so
-the series is the product of incidence and ascertainment — and ascertainment moves by more than an
-ORDER OF MAGNITUDE across this span. Measured, reported ÷ `estimates_age` infections by half-year:
-0.229 (2020H2) → 0.292 → 0.314 (2021H2) → **0.109** (2022H1) → **0.041** (2022H2) → 0.023 (2023H1),
-median 0.225 over the full 130 weeks and 0.278 over the 86 weeks `estimates_age_ab` also covers.
-The cliff is the **end of free universal testing in England on 1 April 2022**, not a change in the
-epidemic: the denominator keeps moving while the numerator stops being collected. It belongs in the
-figure as the thing the models are NOT — never as a target they should hit — and it is why §6d
-carries an ascertainment panel rather than leaving the reader to read the gap off a log axis.
-It is nonetheless the right FLOW comparator: both it and `infections` are 7-day sums of new events,
-which the CIS positivity (a stock) is not.
-
-⚠ **ENGLAND**, like inc2prev. The CoMix contact side of §4–§7 is UK.
-
-**Units, and why the Sunday.** The source metric `COVID-19_cases_rateRollingMean` is the **7-day
-rolling SUM of cases per 100 000, right-aligned** — the value at date `d` covers `[d−6, d]`. A
-Monday-start week is therefore read off its **Sunday** (`w + Day(6)`; the Saturday on the pre-2026-10-22
-Sunday grid) and needs no re-summing:
-that single number already IS the week's total, on exactly the aggregation `weekly_infections`
-performs. (Verified against the national count metric: `casesByDay` over 2021-01-01…07 sums to
-366 377, and 366377/56550138×1e5 = 647.88 against the published 2021-01-07 value of 648.04.)
-
-**The band → CIS-bin mapping, and the one approximation in this section.** The API publishes 5-year
-bands; the CIS grid is `2-10, 11-15, 16-24, 25-34, 35-49, 50-69, 70+`. Four of the seven nest
-EXACTLY (`25-34` = 25-29+30-34, `35-49`, `50-69`, `70+`). Three do not: `2-10` takes only ages 2-4
-of `00-04` plus `05-09` plus age 10 out of `10-14`; `11-15` takes 11-14 of `10-14` plus age 15 of
-`15-19`; `16-24` takes 16-19 of `15-19` plus `20-24`. Those three are apportioned by **single-year
-population share**, i.e. assuming a uniform per-capita rate within a published band. Since a band's
-count is `rate/1e5 × band_pop` and a bin's share of it is `bin_pop_in_band / band_pop`, the two
-population factors cancel and the arithmetic is simply `rate/1e5 × bin_pop_in_band` — which is the
-same statement, that each bin gets its band's rate applied to its own sub-population.
-
-⚠ **Ages 0 and 1 are DROPPED, as the CIS grid drops them.** Their share of `00-04`'s count is
-discarded rather than folded into `2-10`. That is what makes this series comparable with the
-inc2prev totals, which are also sums over the 7 bins (ages 2+) — and it is most of why the 7-bin
-sum runs a median 0.9886 of the true national count (the rest is the rate's 2-dp rounding).
-
-⚠ **The weights are ASSERTED against `grid.POP`, not trusted.** `dt_ukhsa/england_single_year_
-population.csv` comes from `inc2prev/data-raw/uk_pop.xls` (`MYE2 - Persons`), which is provably the
-workbook `populations.csv` was derived from — summing its single years into the 7 bins reproduces
-`populations.csv` with difference **0**. The assert below re-checks that against the live `grid`, so
-a changed grid or a re-exported workbook fails loudly instead of rescaling this series against the
-model series invisibly. (The workbook itself is a legacy OLE2 `.xls` that XLSX.jl cannot read, which
-is why the populations arrive as a CSV at all.)
-
-⚠ **`n_days` masks the span edges, and NaN never becomes 0.** `n_days[a,t]` is the number of the
-week's seven dates present in the cache, so `require_full_week` drops a ragged boundary week exactly
-as it does for every other source; the value is computed only when that last day is present AND all
-seven days are. Empty cells are `NaN`, following `cis_weekly_positivity` and deliberately NOT
-`weekly_antibody`'s zero-fill — a 0 would draw a line to the floor of a log axis.
-
-⚠ **This series is COMPLETE on weeks the inc2prev files are not**, so adding it widens §6c's week
-calendar at both edges: `inc2prev_age_timeseries` keeps a week when ANY source is complete, and the
-reported series covers 2020-07-26 and 2023-01-29 where neither fit does. Measured, the frame went
-from 130 weeks to 132. Those two weeks draw the reported line alone, the way the figure already
-draws `estimates_age` alone after `estimates_age_ab` ends. The week CALENDAR itself is unchanged —
-it is still built from the inc2prev and CIS dates only, never from the UKHSA span, which runs to
-2023-12 and would otherwise stretch the axis into a region where no model series exists at all.
-
-`national` is the week's 7-day sum of the independent `COVID-19_cases_casesByDay` count metric, and
-`recon_ratio` the 7-bin sum over it. Both are returned so the notebook can assert the reconstruction
-rather than re-deriving it. ⚠ Assert the **median**, not the maximum: upstream, the age-banded and
-national series disagree by up to 13% in Christmas week 2022 while every other week of every year
-sits within 1.3%, so a max-ratio gate fails on an upstream reporting artefact.
-"""
-function ukhsa_weekly_cases(weeks::AbstractVector{Date}; grid = cis_age_grid(),
-                            rate_path::AbstractString = _UKHSA_AGE_PATH,
-                            nat_path::AbstractString  = _UKHSA_NAT_PATH,
-                            pop_path::AbstractString  = _UKHSA_POP_PATH,
-                            rate_df = nothing, nat_df = nothing, pop_df = nothing)
-    for (nm, pth, df) in (("age-banded rate", rate_path, rate_df),
-                          ("national daily count", nat_path, nat_df),
-                          ("single-year population", pop_path, pop_df))
-        df === nothing && !isfile(pth) && error("ukhsa_weekly_cases: no $nm cache at $pth. Build \
-            the UKHSA caches ONCE with `python3 dt_ukhsa/fetch_ukhsa_cases.py` (that step needs \
-            network; the caches are committed precisely so 14j never does).")
-    end
-    rate = rate_df === nothing ? CSV.read(rate_path, DataFrame) : rate_df
-    nat  = nat_df  === nothing ? CSV.read(nat_path,  DataFrame) : nat_df
-    pop  = pop_df  === nothing ? CSV.read(pop_path,  DataFrame) : pop_df
-
-    A = grid.N; T = length(weeks)
-    @assert(issorted(weeks) && allunique(weeks) && all(w -> week_start(w) == w, weeks),
-            "ukhsa_weekly_cases: `weeks` must be sorted, unique MONDAY week-starts — the last-day \
-             lookup is `w + Day(6)`, so a Thursday `week_mid` vector silently matches nothing.")
-
-    # ── band populations, and each (band, CIS bin) overlap, from the single years ──────────
-    bandpop = Dict{String,Float64}()
-    binpop  = zeros(Float64, A)
-    wt      = Dict{Tuple{String,Int},Float64}()
-    for r in eachrow(pop)
-        age = _toint_safe(r.age); p = _tofloat_safe(r.population)
-        b = _ukhsa_band(age)
-        bandpop[b] = get(bandpop, b, 0.0) + p
-        age < first(grid.LO) && continue           # ages 0-1: outside the CIS grid, dropped
-        i = searchsortedlast(grid.LO, age)
-        binpop[i] += p
-        wt[(b, i)] = get(wt, (b, i), 0.0) + p
-    end
-    # THE WEIGHT CHECK. If the single years do not rebuild `grid.POP` exactly then these weights
-    # describe a different population from the one the model series is scaled by.
-    worst = maximum(abs.(binpop .- grid.POP))
-    @assert worst == 0.0 "ukhsa_weekly_cases: the single-year populations in $pop_path sum to the \
-        CIS bins with a maximum difference of $worst against `grid.POP`, not 0. They are supposed \
-        to be the very workbook `populations.csv` was built from, so the band → bin weights would \
-        now describe a different population from the one every other series here is scaled by."
-
-    bands = sort(unique(String.(rate.age_band)))
-    missing_pop = setdiff(Set(bands), keys(bandpop))
-    @assert isempty(missing_pop) "ukhsa_weekly_cases: the rate cache carries band(s) \
-        $(sort(collect(missing_pop))) with no population. Bands are joined by LABEL, so a renamed \
-        or added band would be dropped silently rather than erroring."
-
-    # ── the daily series, indexed for lookup ──────────────────────────────────────────────
-    # (band, date) → rate, plus the set of dates present, which is what `n_days` counts.
-    rt = Dict{Tuple{String,Date},Float64}()
-    rdates = Set{Date}()
-    for r in eachrow(rate)
-        d = _todate_safe(r.date); d === nothing && continue
-        push!(rdates, d)
-        rt[(String(r.age_band), d)] = _tofloat_safe(r.rate_per_100k_7day)
-    end
-    ncases = Dict{Date,Float64}()
-    for r in eachrow(nat)
-        d = _todate_safe(r.date); d === nothing && continue
-        ncases[d] = _tofloat_safe(r.cases)
-    end
-
-    # ── assemble ──────────────────────────────────────────────────────────────────────────
-    W = fill(NaN, A, T); n_days = zeros(Int, A, T)
-    national = fill(NaN, T); recon_ratio = fill(NaN, T)
-    for (t, w) in enumerate(weeks)
-        days = [w + Day(k) for k in 0:6]
-        nd = count(d -> d in rdates, days)
-        n_days[:, t] .= nd
-        sat = w + Day(6)   # the week's LAST day (a Sunday on the Monday grid); name kept
-        (nd == 7 && sat in rdates) || continue
-        # ⚠ NEVER A PARTIAL SUM, the same rule `inc2prev_age_timeseries` applies to the bin → total
-        # sum. A bin's weekly count is a sum over the bands that overlap it, so ONE missing band
-        # silently under-counts every bin it touches — a plausible number, no error. All 19 bands
-        # are present on all 973 dates of the current cache, so this never fires today; it is here
-        # because a later `--refresh` against a changed API is exactly when it would.
-        acc = zeros(Float64, A); whole = true
-        for b in bands
-            r = get(rt, (b, sat), NaN)
-            if !isfinite(r)
-                whole = false; break
-            end
-            # `rate/1e5 × bin_pop_in_band` — see the docstring: the band population cancels.
-            for i in 1:A
-                ww = get(wt, (b, i), 0.0)
-                ww == 0.0 && continue
-                acc[i] += r / 1e5 * ww
-            end
-        end
-        if !whole
-            n_days[:, t] .= 0          # mask it exactly as an uncovered week, never a partial sum
-            continue
-        end
-        W[:, t] = acc
-        if all(d -> haskey(ncases, d), days)
-            national[t] = sum(ncases[d] for d in days)
-            national[t] > 0 && (recon_ratio[t] = sum(acc) / national[t])
-        end
-    end
-    return (; W, n_days, national, recon_ratio, bands)
-end
+# it briefly built the framework outcome (`weekly_cis_positives`). §6c still calls it from there.
 
 """
     _weekly_estimate_mean(df, weeks, grid; name="dcases", scale_by_population=true, warmup_days=21)
@@ -2253,7 +2043,6 @@ it and `n_days` is always retained, so it stays diagnosable.
 function inc2prev_age_timeseries(; grid = cis_age_grid(),
                                  weeks::Union{Nothing,AbstractVector{Date}} = nothing,
                                  inf = nothing, frames = nothing, cis_df = nothing,
-                                 ukhsa = nothing,
                                  vintage::Symbol = :latest,
                                  warmup_days::Integer = 21,
                                  require_full_week::Bool = true,
@@ -2331,15 +2120,6 @@ function inc2prev_age_timeseries(; grid = cis_age_grid(),
     HIq[("cis-observed", "prevalence")] = cis.HI .* grid.POP
     ND[ ("cis-observed", "prevalence")] = cis.n_days
 
-    # REPORTED CASES. Enters exactly as `cis-observed` does — its own branch, NOT via
-    # `_I2P_SOURCES`, because it is not an inc2prev `outputs/*.csv` and so has no `gen_dab` block
-    # and no per-row `population` column for those two asserts to check. Already absolute counts
-    # on a 7-day SUM, so no `grid.POP` scaling and no aggregation here; see `ukhsa_weekly_cases`.
-    # No band: the dashboard publishes a point estimate with no interval.
-    ukh = ukhsa === nothing ? ukhsa_weekly_cases(weeks; grid = grid) : ukhsa
-    VAL[("ukhsa-reported", "incidence")] = ukh.W
-    ND[ ("ukhsa-reported", "incidence")] = ukh.n_days
-
     for src in _I2P_SOURCES
         f = loaded[src]
         # ⚠ POPULATION AGREEMENT. The observed is scaled by `grid.POP` and the models by their own
@@ -2411,9 +2191,7 @@ function inc2prev_age_timeseries(; grid = cis_age_grid(),
     bad = df[(df.quantity .== "incidence") .& df.complete .& (df.value .== 0.0), :]
     @assert nrow(bad) == 0 "inc2prev_age_timeseries: $(nrow(bad)) complete `incidence` cells are \
         exactly 0.0, which this data does not contain. For an inc2prev source that is \
-        `weekly_infections` zero-filling a week outside the file's span; for `ukhsa-reported` it \
-        would be a band → bin allocation that dropped a bin (its minimum weekly bin count over \
-        this span is 188). First: $(first(bad.source, 1)) $(first(bad.week, 1)) bin \
+        `weekly_infections` zero-filling a week outside the file's span. First: $(first(bad.source, 1)) $(first(bad.week, 1)) bin \
         $(first(bad.bin, 1))."
     for spec in _I2P_ROWS
         n = count(r -> r.source == spec.source && r.quantity == spec.quantity && r.complete &&
@@ -2600,8 +2378,8 @@ function make_inc2prev_timeline_fig(ts::DataFrame; kind::Symbol = :incidence,
     np   = length(bins)
     nr, nc = panel_grid(np)                     # DERIVED — never a literal (9j's `panel_grid` lesson)
     # ⚠ Span THIS figure's own drawn data, not the frame's week set. The frame is shared across
-    # kinds and keeps a week when ANY source is complete, so `ukhsa-reported` — which runs a week
-    # wider at each edge than either fit — would otherwise stretch the PREVALENCE figure's axis
+    # kinds and keeps a week when ANY source is complete, so a source that runs wider at an edge
+    # than the others would otherwise stretch the PREVALENCE figure's axis
     # (and its phase shading) into two weeks where all three of its series are NaN and nothing is
     # drawn at all. Falling back to the full set keeps an all-NaN panel from erroring.
     drawn = plotted.week_mid[plotted.complete .& isfinite.(plotted.value)]
@@ -2657,7 +2435,7 @@ function make_inc2prev_timeline_fig(ts::DataFrame; kind::Symbol = :incidence,
     return fig
 end
 
-"§6c's primary figure — the four-line incidence overlay (two fits, CIS positivity, reported\ncases). See `make_inc2prev_timeline_fig`."
+"§6c's primary figure — the incidence overlay (two fits, CIS positivity). See `make_inc2prev_timeline_fig`."
 make_inc2prev_incidence_fig(ts::DataFrame; kw...) =
     make_inc2prev_timeline_fig(ts; kind = :incidence, kw...)
 
@@ -3176,159 +2954,6 @@ function make_antibody_model_fig(gd::DataFrame, obs_fit::DataFrame; obs_later = 
     fig = plot(panels...; layout = (nr, nc), size = (420 * nc, 400 * nr),
                left_margin = 8Plots.mm, bottom_margin = 12Plots.mm, top_margin = 6Plots.mm,
                plot_title = ptitle, plot_titlefontsize = 8)
-    mkpath(res_dir)
-    savefig(fig, joinpath(res_dir, fname))
-    return fig
-end
-
-##########################################################################
-# §G3 — §6d: the ENGLAND TOTAL incidence, and the ascertainment it implies
-##########################################################################
-
-"""
-    incidence_total_frame(ts; observed="ukhsa-reported") -> DataFrame
-
-The tidy table behind §6d, from §6c's own frame — `(panel, source, week, week_mid, value)` with
-`panel ∈ {"counts", "ascertainment"}`.
-
-`"counts"` is just `ts`'s England-total rows (`bin == 0`) for the three **incidence** series, so §6d
-introduces no second data path and cannot drift from §6c: the total is already computed there, under
-the "NEVER A PARTIAL SUM" rule (one NaN bin makes the week NaN rather than stepping the line down as
-bins drop out).
-
-`"ascertainment"` is `reported ÷ estimated` per estimate file — the fraction of infections that
-became a confirmed case. It is the quantity the counts panel is really about, and it needs its own
-axis: it is dimensionless where the other panel is people.
-
-⚠ Only weeks where BOTH series are `complete` and finite contribute a ratio, so the `_ab` file's
-ratio simply stops where that file does rather than diving to the floor.
-"""
-function incidence_total_frame(ts::DataFrame; observed::AbstractString = "ukhsa-reported")
-    tot = @subset(ts, :bin .== 0, :quantity .== "incidence")
-    rows = NamedTuple[]
-    for r in eachrow(tot)
-        push!(rows, (; panel = "counts", source = r.source, week = r.week,
-                       week_mid = r.week_mid, value = r.value))
-    end
-    obs = Dict(r.week => r.value for r in eachrow(tot)
-               if r.source == observed && r.complete && isfinite(r.value))
-    for src in unique(tot.source)
-        src == observed && continue
-        for r in eachrow(@subset(tot, :source .== src))
-            (r.complete && isfinite(r.value) && r.value > 0) || continue
-            haskey(obs, r.week) || continue
-            push!(rows, (; panel = "ascertainment", source = src, week = r.week,
-                           week_mid = r.week_mid, value = obs[r.week] / r.value))
-        end
-    end
-    return sort!(DataFrame(rows), [:panel, :source, :week])
-end
-
-"""
-    make_incidence_total_fig(ts; grid, origins, res_dir, fname, ptitle, max_decades) -> fig
-
-§6d. **Total England COVID-19 incidence over time from three sources**, stacked over the
-ascertainment ratio those three imply.
-
-Top panel — weekly counts of people for the whole CIS age range (ages 2+), `log10(y)` on a LINEAR
-axis with faked decade ticks (the house convention; `yscale = :log10` is forbidden in 14j, where
-both conventions coexist and overlaying them puts y = 5 beside y = 1e5). Three series: the two
-inc2prev fits and the UKHSA reported cases.
-
-Bottom panel — `reported ÷ estimated` per estimate file, on a **linear** axis, with 1.0 marked.
-Mixing a dimensionless ratio onto the counts axis is exactly the thing §7's panel does under
-protest; here there is no reason to, so the two live in separate panels.
-
-⚠ **The reported line is the 7-bin sum, NOT the published national count.** Both inc2prev totals are
-also sums over the same seven CIS bins (ages 2+), so this is the like-for-like choice; the true
-national count — which additionally contains the under-2s — is `ukhsa_weekly_cases`' `national`, and
-the notebook asserts the two agree. Measured median ratio 0.9886.
-
-⚠ **The CIS positivity line from §6c is deliberately ABSENT.** It is a STOCK (people detectable on an
-average day) and every series here is a FLOW (new events in a week). §6c can carry both because its
-caption does the work; a figure whose whole subject is "total incidence from three sources" should
-not quietly include a fourth series in different units.
-
-⚠ Reported cases are incidence × ascertainment, so the gap between the lines is not model error —
-that is what the second panel is for. See `ukhsa_weekly_cases`.
-"""
-function make_incidence_total_fig(ts::DataFrame; grid = cis_age_grid(), origins = nothing,
-                                  res_dir::AbstractString = "../res",
-                                  fname::AbstractString = "14j_incidence_total.png",
-                                  ptitle::AbstractString =
-                                      "Total COVID-19 incidence over time, England (CIS ages 2+): " *
-                                      "two inc2prev fits and UKHSA reported cases",
-                                  max_decades::Real = 7)
-    # The three INCIDENCE entries of §6c's spec, in its order and with its colour allocation, so a
-    # reader carrying the key from the age-stratified figure to this one is not misled. Filtering
-    # leaves both `nothing` colours in place and in order, so the slots are unchanged.
-    series = [sp for sp in _I2P_SERIES.incidence if sp[2] == "incidence"]
-    mc = _model_cols(count(sp -> sp[4] === nothing, series)); ci = 0
-    cols = Any[]
-    for sp in series
-        if sp[4] === nothing; ci += 1; push!(cols, mc[ci]) else push!(cols, sp[4]) end
-    end
-    fw = i2p_framework_source()
-    labels = [sp[1] == fw ? sp[3] * "  ← framework source" : sp[3] for sp in series]
-
-    fr = incidence_total_frame(ts)
-    cnt = @subset(fr, :panel .== "counts")
-    asc = @subset(fr, :panel .== "ascertainment")
-    isempty(cnt) && error("make_incidence_total_fig: no `bin == 0` incidence rows in the frame")
-    dmin, dmax = extrema(cnt.week_mid)
-
-    # ── panel 1: counts, log10 on a linear axis ───────────────────────────────────────────
-    # ⚠ LEGEND PLACEMENT IS NOT COSMETIC HERE. `shade_periods!` writes its rotated phase names at
-    # 93% of the y-range, so a `:topleft`/`:top` box on the panel that carries the labels (panel 2)
-    # lands straight on top of them. Panel 1 does NOT carry them (`labels = pi == 2`), so its
-    # top-left corner is free — the series all start low on a log axis. Panel 2's labels sit in the
-    # shaded bands, which stop at `PERIODS`' end (2021-11-24), so its top-RIGHT is free and is also
-    # where its data has collapsed to the floor.
-    p1 = plot(; xlabel = "", ylabel = "people / week  (log₁₀)",
-                title = "Weekly incidence — England, CIS ages 2+",
-                titlefontsize = 8, xrotation = 45, legend = :topleft, legendfontsize = 6)
-    for (si, sp) in enumerate(series)
-        sf = sort(@subset(cnt, :source .== sp[1]), :week)
-        nrow(sf) == 0 && continue
-        plot!(p1, sf.week_mid, _log10_or_nan.(sf.value);
-              color = cols[si], lw = sp[6], ls = sp[5], label = labels[si])
-    end
-    _i2p_apply_ylims!(p1, _i2p_log_ylims(cnt.value; max_decades = max_decades))
-
-    # ── panel 2: ascertainment, linear ────────────────────────────────────────────────────
-    p2 = plot(; xlabel = "week (Wed mid-date)", ylabel = "reported ÷ estimated",
-                title = "Ascertainment — the share of estimated infections that became a " *
-                        "confirmed case",
-                titlefontsize = 8, xrotation = 45, legend = :topright, legendfontsize = 6)
-    for (si, sp) in enumerate(series)
-        sp[1] == "ukhsa-reported" && continue
-        sf = sort(@subset(asc, :source .== sp[1]), :week)
-        nrow(sf) == 0 && continue
-        plot!(p2, sf.week_mid, sf.value; color = cols[si], lw = sp[6], ls = sp[5],
-              label = "reported ÷ " * sp[1])
-    end
-    # Headroom BEFORE shading: `shade_periods!` writes its rotated phase names at 93% of the range.
-    if !isempty(asc) && any(isfinite, asc.value)
-        hi = maximum(filter(isfinite, asc.value))
-        plot!(p2; ylims = (0.0, 1.30 * max(hi, 1.0)))
-    end
-
-    # Numeric overlays AFTER every Date-bearing series (a leading one collapses the Date axis),
-    # and `shade_periods!` last of all because it reads the y-limits set above.
-    for (pi, pnl) in enumerate((p1, p2))
-        if origins !== nothing && !isempty(origins)
-            vline!(pnl, [week_mid(minimum(origins)), week_mid(maximum(origins))];
-                   color = :gray45, ls = :dot, lw = 1, alpha = 0.8,
-                   label = pi == 1 ? "CoMix origin span (§4–§7)" : "")
-        end
-        pi == 2 && hline!(pnl, [1.0]; color = :gray, ls = :dash, lw = 1,
-                          label = "all infections reported")
-        shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = pi == 2)
-    end
-
-    fig = plot(p1, p2; layout = (2, 1), size = (1100, 820),
-               left_margin = 10Plots.mm, bottom_margin = 12Plots.mm, top_margin = 5Plots.mm,
-               plot_title = ptitle, plot_titlefontsize = 9)
     mkpath(res_dir)
     savefig(fig, joinpath(res_dir, fname))
     return fig

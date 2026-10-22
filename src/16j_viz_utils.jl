@@ -20,12 +20,8 @@
 #       fit weeks (10j's `fit_window_infection_draws`), and its forecast fan at the targets, all on
 #       a right-hand axis
 #   §D  `make_antibody_window_fig` — one panel per CIS bin, segments shaded
-#   §E  `ons_sgtf_share` / `make_variant_incidence_fig` — the same incidence against the England
-#       S-gene-target-failure share (Alpha proxy) and its S-positive complement (≈ Delta from
-#       late April 2021). England-level ONLY: ONS publishes no variant split by age.
-#   §F  `ons_variant_mix` / `make_variant_mix_fig` — every variant category's share over the whole
-#       CoMix span (2020-10 → 2022-01), stacked; §E and §F share ONE release reader,
-#       `_ons_variant_releases`.
+#   (§E/§F — the ONS SGTF share and variant mix — were removed on 2026-10-22 with `dt_ons_variant/`;
+#   variant proportions come from COG-UK alone, `dt_cog_uk/`.)
 #
 # Requires (in this order): `forecast_utils.jl`, `9j_viz_utils.jl` (`panel_grid`), then
 # `14j_viz_utils.jl` (`ons_antibody_age`, `ons_antibody_fit_vintage`, `ons_antibody_to_cis`,
@@ -116,10 +112,9 @@ end
     incidence_window_frame(win, wd, truth; grid) -> DataFrame (bin, bin_label, segment, week,
                                                                week_mid, observed)
 
-The observed OUTCOME over the whole window — ONS CIS positives × pop (`weekly_cis_positives`):
-`wd.I_mean` over `win.all_weeks` (lag + fit) and `truth` (`load_forecast_truth`, `A × H`) at the
-forecast targets. Both come from the same `_cis_frame()`, so they are the series the forecasts were
-fitted to and scored against.
+Observed weekly infections over the whole window: `wd.I_mean` over `win.all_weeks` (lag + fit) and
+`truth` (`load_forecast_truth`, `A × H`) at the forecast targets. `wd` must come from the SAME
+inc2prev file the forecasts were fitted to (`_EST_PATH`), not the `_ab` one the antibody uses.
 """
 function incidence_window_frame(win::WeeklyWindow, wd, truth::AbstractMatrix; grid = cis_age_grid())
     @assert wd.weeks == win.all_weeks "incidence_window_frame: `wd` was not built from `win`"
@@ -376,177 +371,4 @@ function make_antibody_window_fig(fr::DataFrame, gd::DataFrame, win::WeeklyWindo
     mkpath(res_dir)
     savefig(fig, joinpath(res_dir, fname))
     return fig
-end
-
-##########################################################################
-# §E — the variant overlay: S-gene target failure (Alpha proxy) vs S-positive
-##########################################################################
-#
-# The readers (`ons_sgtf_share`, `_ons_variant_releases`, `_GENE_CLASS`, the data paths and
-# `ONS_DELTA_PERIOD_START`) live in `ons_variant.jl`, shared with 1j. Moved verbatim 2026-10-21.
-include(joinpath(@__DIR__, "ons_variant.jl"))
-
-"""
-    make_variant_incidence_fig(inc_obs, inc_fc, inc_cal, var, win; fc_labels, fc_cols, grid,
-                               res_dir="../res", fname="16j_variant_incidence.png") -> Plots.Plot
-
-§1's incidence (observed · calibration · forecast, drawn by the SAME `_incidence_overlay!`) on the
-LEFT axis of one panel per CIS bin, and on the RIGHT axis the England SGTF share (Alpha proxy,
-crimson) and its S-positive complement (≈ Delta from late April 2021, brown dash-dot) from
-`ons_sgtf_share` — the SAME curve in every panel, because ONS publishes no variant split by age.
-A vertical line marks ONS's own Alpha → Delta period boundary (`ONS_DELTA_PERIOD_START`); the three
-`WeeklyWindow` segments are shaded and the forecast start dashed, as in §1.
-"""
-function make_variant_incidence_fig(inc_obs::DataFrame, inc_fc, inc_cal, var::DataFrame,
-                                    win::WeeklyWindow; fc_labels = String[],
-                                    fc_cols = [:steelblue, :darkorange, :seagreen, :purple],
-                                    grid = cis_age_grid(), res_dir::AbstractString = "../res",
-                                    fname::AbstractString = "16j_variant_incidence.png")
-    seg_w = Dict("lag" => win.lag_weeks, "fit" => win.fit_weeks, "forecast" => win.forecast_weeks)
-    seg_c = Dict("lag" => :gray80, "fit" => :lightsteelblue, "forecast" => :navajowhite)
-    seg_l = Dict("lag" => "renewal lag ($(length(win.lag_weeks)) wk)",
-                 "fit" => "fit window ($(length(win.fit_weeks)) wk)",
-                 "forecast" => "forecast targets ($(length(win.forecast_weeks)) wk)")
-    lo = first(win.all_weeks); hi = last(win.forecast_weeks) + Day(7)
-    split = win.origin + Day(7)
-    ticks = vcat(win.all_weeks, win.forecast_weeks, [hi])
-    xl = (Dates.value(lo), Dates.value(hi))
-    col_a, col_s = :crimson, :saddlebrown
-    v = sort(var[(lo .<= var.date .< hi), :], :date)
-    np = grid.N; nr, nc = panel_grid(np)
-    panels = Any[]
-    for b in 1:np
-        pnl = plot(; title = "age $(grid.LAB[b])", titlefontsize = 8, xrotation = 60, xtickfontsize = 5,
-                     xlabel = (b > np - nc) ? "week (Mon start)" : "",
-                     ylabel = (mod1(b, nc) == 1) ? "infections / week" : "", legend = false)
-        # Date series FIRST (a leading numeric overlay collapses the Date axis), then bands/lines.
-        ymax = _incidence_overlay!(pnl, b, inc_obs, inc_fc, inc_cal, fc_labels, fc_cols)
-        for s in _AB_SEGMENTS
-            ws = seg_w[s]
-            vspan!(pnl, [first(ws), last(ws) + Day(7)]; color = seg_c[s], fillalpha = 0.25, linealpha = 0, label = "")
-        end
-        vline!(pnl, [split]; color = :black, ls = :dash, lw = 1, label = "")
-        plot!(pnl; ylims = (0, 1.12 * ymax), xlims = xl, yformatter = _kfmt, ytickfontsize = 6,
-              xticks = (Dates.value.(ticks), Dates.format.(ticks, "d u")))
-        ax = twinx(pnl)
-        plot!(ax, v.date, 100 .* v.share_sgtf; color = col_a, lw = 2.0, label = "")
-        plot!(ax, v.date, 100 .* v.share_spos; color = col_s, lw = 2.0, ls = :dashdot, label = "")
-        vline!(ax, [ONS_DELTA_PERIOD_START]; color = col_a, ls = :dot, lw = 1.4, label = "")
-        plot!(ax; ylims = (0, 105), yticks = 0:20:100, xlims = xl, legend = false, grid = false,
-              ytickfontsize = 6, ylabel = (mod1(b, nc) == nc || b == np) ? "share of identified positives (%)" : "")
-        push!(panels, pnl)
-    end
-    lg = plot(; framestyle = :none, legend = :left, legendfontsize = 7, grid = false, xticks = false, yticks = false)
-    _incidence_legend!(lg, fc_labels, fc_cols, inc_cal !== nothing; axis = "LEFT axis")
-    plot!(lg, [NaN], [NaN]; color = col_a, lw = 2.0, label = "RIGHT axis — SGTF share (Alpha proxy)")
-    plot!(lg, [NaN], [NaN]; color = col_s, lw = 2.0, ls = :dashdot, label = "RIGHT axis — S-positive share\n(≈ Delta from late Apr 2021)")
-    plot!(lg, [NaN], [NaN]; color = col_a, ls = :dot, lw = 1.4,
-          label = "ONS variant period: Alpha → Delta\n($(ONS_DELTA_PERIOD_START))")
-    for s in _AB_SEGMENTS
-        plot!(lg, [NaN], [NaN]; seriestype = :shape, color = seg_c[s], fillalpha = 0.4, linealpha = 0, label = seg_l[s])
-    end
-    plot!(lg, [NaN], [NaN]; color = :black, ls = :dash, lw = 1, label = "forecast starts (end of t₀ week)")
-    if nr * nc > np
-        push!(panels, lg)
-        for _ in 1:(nr * nc - np - 1); push!(panels, plot(; framestyle = :none)); end
-    else
-        plot!(panels[1]; legend = :topleft, legendfontsize = 5)
-    end
-    ptitle = "Weekly infections around forecast origin $(win.origin) (10j's window), ENGLAND — observed, " *
-             "in-sample calibration and forecast, against the Alpha/Delta mix\n" *
-             "RIGHT axis: ONS CIS S-gene-target-failure share (Alpha proxy) among identified positives — " *
-             "⚠ England-level, NOT age-specific: ONS publishes no variant split by age; the same curve is in every panel"
-    fig = plot(panels...; layout = (nr, nc), size = (430 * nc, 400 * nr),
-               left_margin = 8Plots.mm, bottom_margin = 12Plots.mm, top_margin = 6Plots.mm,
-               right_margin = 12Plots.mm, plot_titlevspan = 0.06,
-               plot_title = ptitle, plot_titlefontsize = 8)
-    mkpath(res_dir)
-    savefig(fig, joinpath(res_dir, fname))
-    return fig
-end
-
-##########################################################################
-# §F — the variant mix across the whole CoMix span (England, not by age)
-##########################################################################
-
-# `_VARIANT_OF`, `_VARIANT_ORDER`, `ONS_VARIANT_PERIODS` and `ons_variant_mix` live in `ons_variant.jl`.
-
-# Why ONS variant data are absent where they are — quoted, so a gap is never left unexplained.
-# The second is ONS's own note on technical table 1c (verified in the 2021-09-03 release): the
-# modelled variant tables were FROZEN at 2021-06-06 … 07-17 from 30 July, and resumed with the
-# 2021-12-17 release (data from 2021-10-31). inc2prev re-scraped the frozen table weekly, which is
-# why `cis_variants.csv` repeats it 20 times; nothing is wrong with those rows.
-const _ONS_VARIANT_GAP_NOTES = [
-    (Date(2020, 11, 22), "no ONS variant data\n(SGTF reliable from\nmid-Nov 2020)"),
-    (Date(2021, 10, 31), "ONS stopped updating its\nvariant tables from 30 Jul 2021:\n\"99% of positive cases are\ncompatible with the Delta\nvariant\"")]
-
-"""
-    make_variant_mix_fig(mix; span, origins, window=nothing, res_dir="../res",
-                         fname="16j_variant_mix.png") -> Plots.Plot
-
-ONE wide panel: the daily England variant mix (`ons_variant_mix`) as a STACKED share over `span`,
-monthly ticks via 14j's `_origin_span_xaxis!`. Lumped days are drawn hatched. Overlays:
-ONS's own period boundaries (`ONS_VARIANT_PERIODS`, dotted), the first/last CoMix forecast origin
-(grey dotted), and optionally `window = (lo, hi)` — 16j §1–§2's 16 weeks — as a light band. Days
-before the first ONS variant data are labelled, not left as an unexplained gap.
-"""
-function make_variant_mix_fig(mix::DataFrame; span::Tuple{Date,Date}, origins::AbstractVector{Date},
-                              window = nothing, res_dir::AbstractString = "../res",
-                              fname::AbstractString = "16j_variant_mix.png")
-    lo, hi = span
-    days = sort(unique(mix.date[(lo .<= mix.date .<= hi)]))
-    lut = Dict((r.date, r.variant) => r.share for r in eachrow(mix))
-    pnl = plot(; size = (1500, 560), legend = :outerright, legendfontsize = 7,
-                 ylabel = "share of gene-pattern-identified positives (%)", ylims = (0, 100),
-                 yticks = 0:20:100, xrotation = 45, bottom_margin = 10Plots.mm, left_margin = 8Plots.mm,
-                 top_margin = 8Plots.mm,
-                 title = "ONS COVID-19 Infection Survey — variant mix, ENGLAND (not age-specific), " *
-                         "across the CoMix forecast span\neach category is a TaqPath gene pattern under " *
-                         "ONS's name for that period (SGTF = S-gene target failure); per day the latest release",
-                 titlefontsize = 9)
-    # Stack each CONTIGUOUS run of days on its own: a single series across a data gap would fill
-    # the gap by linear interpolation and draw variant shares ONS never published.
-    runs = Vector{Vector{Date}}()
-    for d in days
-        (isempty(runs) || d - last(last(runs)) > Day(1)) ? push!(runs, [d]) : push!(last(runs), d)
-    end
-    shown = Set{String}()
-    for run in runs
-        cum = zeros(length(run))
-        for (c, lab, col) in _VARIANT_ORDER
-            sh = [get(lut, (d, c), 0.0) for d in run]
-            any(>(0), sh) || continue
-            lower = copy(cum); cum .+= sh
-            plot!(pnl, run, 100 .* cum; fillrange = 100 .* lower, color = col, lw = 0, fillalpha = 0.9,
-                  fillstyle = c == "lumped_other" ? :/ : nothing, label = c in shown ? "" : lab)
-            push!(shown, c)
-        end
-    end
-    # Gaps: before the first data day, and between runs — shaded and EXPLAINED.
-    gaps = Tuple{Date,Date}[]
-    first(days) > lo && push!(gaps, (lo, first(days) - Day(1)))
-    for k in 1:(length(runs) - 1)
-        push!(gaps, (last(runs[k]) + Day(1), first(runs[k + 1]) - Day(1)))
-    end
-    last(days) < hi && push!(gaps, (last(days) + Day(1), hi))
-    for (g0, g1) in gaps
-        vspan!(pnl, [g0, g1]; color = :gray92, linealpha = 0, label = "")
-        note = something(findfirst(n -> n[1] == g1 + Day(1), _ONS_VARIANT_GAP_NOTES), 0)
-        txt = note == 0 ? "no ONS variant data" : _ONS_VARIANT_GAP_NOTES[note][2]
-        annotate!(pnl, g0 + (g1 - g0) ÷ 2, 50, text(txt, 7, :gray25))
-    end
-    # The 16j §1–§2 window as two LINES: a translucent band disappears under the opaque stack.
-    window === nothing || vline!(pnl, [window[1], window[2]]; color = :steelblue, ls = :dash, lw = 2,
-                                 label = "16j §1–§2 window (origin $(window[3]))")
-    for (k, (nm, d)) in enumerate(ONS_VARIANT_PERIODS)
-        vline!(pnl, [d]; color = :black, ls = :dot, lw = 1.2, label = k == 1 ? "ONS variant period starts" : "")
-        annotate!(pnl, d + Day(2), 97, text(nm, 7, :left, :black))
-    end
-    vline!(pnl, [minimum(origins), maximum(origins)]; color = :gray40, ls = :dash, lw = 1,
-           label = "first / last CoMix forecast origin")
-    _origin_span_xaxis!(pnl, (lo, hi))
-    plot!(pnl; ylims = (0, 100))
-    mkpath(res_dir)
-    savefig(pnl, joinpath(res_dir, fname))
-    return pnl
 end

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Epidemiological research project fitting heavy-tailed count distributions to social contact survey data (**CoMix UK** during COVID-19). The goal is to model the degree distribution of daily contacts — decomposed into home vs. non-home — jointly with per-contact duration, and to track these distributions longitudinally. **On this `refactor` branch (2026-10-22) the forecasting framework is the `-eng` generation** — England-only CoMix participants, the ONS CIS positivity-by-age outcome, MONDAY weeks, 65 origins 2020-11-02 … 2022-01-24 — documented in `inst/7_data_sources.md`; any "63 origins / 2020-10-18 … 2021-12-26 / Sunday / inc2prev infections" statement below describes the previous `temporal-w8h-lc0-nuts` generation. (A **Danon 2013** strand is now *legacy*: its raw data `dt_Leon_Danon_2013/` was removed as no longer needed, so `danon_utils.jl` and `4j_Danon_degree_duration.ipynb` are orphaned — code kept, not runnable.)
+Epidemiological research project fitting heavy-tailed count distributions to social contact survey data (**CoMix UK** during COVID-19). The goal is to model the degree distribution of daily contacts — decomposed into home vs. non-home — jointly with per-contact duration, and to track these distributions longitudinally. **Since 2026-10-22 the forecasting framework is the `-eng` generation** — England-only CoMix participants, MONDAY weeks, 67 origins 2020-10-19 … 2022-01-24, outcome still inc2prev's `estimates_age.csv` infections — documented in `inst/7_data_sources.md`; any "63 origins / 2020-10-18 … 2021-12-26 / Sunday" statement below describes the previous `temporal-w8h-lc0-nuts` generation. (A **Danon 2013** strand is now *legacy*: its raw data `dt_Leon_Danon_2013/` was removed as no longer needed, so `danon_utils.jl` and `4j_Danon_degree_duration.ipynb` are orphaned — code kept, not runnable.)
 
 A second, newer strand (`inst/3_preliminary_model_struct.md`, `src/framework.jl` and friends) **extends** the age-stratified renewal / next-generation-matrix (NGM) forecasting model of Munday et al. 2023 (`inst/pcbi.1011453.pdf`; the upstream R+Stan reference `CovidAgeGroupForecast/` is **no longer vendored in-tree** — port provenance survives only in source comments and `tasks/lessons.md`). Here the age-pair **contact-degree distributions** feed the NGM directly (mean or neighbourhood/excess degree), driving a weekly renewal-equation forecast of age-stratified infections. Where the analysis plan (`inst/analysis_plan_heavy_tail_mean.docx`, converted to `.md`) differs from the reference code, **the docx wins**.
 
@@ -73,12 +73,13 @@ src/
   # --- forecasting framework (spec: inst/3_preliminary_model_struct.md) — second preamble via forecast_utils.jl ---
   forecast_utils.jl          Forecast preamble — includes main_utils + CoMix pipeline + all framework modules below
   framework.jl               Swap-axis types (ContactDegreeModel, NGMBuilder), WeeklyWindow, FrameworkConfig, containers, CIS age grid
-  infection_data.jl          The OUTCOME since 2026-10-22: `weekly_cis_positives` = weekly mean ONS CIS positivity
-                               (`cis_weekly_positivity`, moved here verbatim from 14j; `cis_age.csv`, latest vintage) × pop,
-                               with `I_sd` from the CrI half-width; asserts 7 days / finite / > 0 per cell. Read once per
-                               process via `_cis_frame()`, so `load_window_data`/`load_forecast_truth` kept their signatures.
-                               ⚠ A PREVALENCE used as incidence (user's choice) — γ_SAR absorbs the scale.
-                               Also `weekly_infections` (inc2prev, still read by the 14j/16j audits) + gen_dab antibody.
+  infection_data.jl          The OUTCOME: `weekly_infections` (inc2prev `estimates_age.csv` infections, 7-day sum × pop)
+                               + gen_dab antibody. `load_window_data`/`load_forecast_truth` ASSERT every week is fully
+                               covered (`_assert_infection_coverage`; `weekly_infections` zero-fills silently).
+                               Also `cis_weekly_positivity` (moved verbatim from 14j) and `weekly_cis_positives` (ONS CIS
+                               positivity × pop, `_cis_frame()`): the outcome for part of 2026-10-22, REVERTED the same day
+                               after 1j showed positivity is a stock that runs 0.6–2.3× weekly infections (D/7 = 1.24 in
+                               steady state); kept as readers for 1j/14j.
   degree_agepair.jl          Age-pair (7×7 CIS bin) per-cell weekly contact-degree assembly (reuses 7j binning).
                                `assign_age_bin(a, b, grid, rng)` — the population-weighted age-interval → CIS-bin rule
                                — was lifted out of `prepare_degree_data`'s closure on 2026-09-04 so 14j could reuse it
@@ -272,21 +273,11 @@ src/
                                  observed series and the weekly-averaged national R.
 
   16j_viz_utils.jl           16j's helpers (2026-10-16): `antibody_window_frame` (bin × week, framework `A` + ONS matched
-                               Mon–Sun → Sun–Sat by Thursday mid-date, asserted one-to-one), `antibody_window_summary`,
-                               `make_antibody_window_fig`; `_incidence_overlay!`/`_incidence_legend!` (shared by both
-                               figures — §1's PNG verified byte-identical after the extraction); §E `ons_sgtf_share`
-                               (daily England SGTF share; per day the LATEST RELEASE CARRYING BOTH classes, both read from
-                               it) + `make_variant_incidence_fig`; §F `ons_variant_mix` + `make_variant_mix_fig`. §E and §F
-                               share ONE release reader, `_ons_variant_releases(classof)` (§2's CSV verified identical
-                               after the extraction). Requires forecast_utils → 9j → 10j → 14j → 15j utils.
-                               ⚠ Since 2026-10-21 the §E/§F READERS (`ons_sgtf_share`, `ons_variant_mix`,
-                               `_ons_variant_releases`, `_GENE_CLASS`, `_VARIANT_OF`/`_VARIANT_ORDER`,
-                               `ONS_VARIANT_PERIODS`, the data paths) live in `ons_variant.jl`, which this file includes;
-                               the plotters and `_ONS_VARIANT_GAP_NOTES` stayed here.
-  ons_variant.jl             The ONS variant readers, MOVED VERBATIM out of 16j (2026-10-21) so 1j can use them without
-                               16j's forecast stack. Needs only main_utils + `framework.jl` + `infection_data.jl`
-                               (`_todate_safe`/`_tofloat_safe`). Verified: 16j's `16j_variant_share.csv` (112 rows) and
-                               `16j_variant_mix.csv` (658) reproduce exactly through it, and 16j runs end-to-end.
+                               by Thursday mid-date — the same Monday week since 2026-10-22, asserted one-to-one),
+                               `antibody_window_summary`, `make_antibody_window_fig`; `_incidence_overlay!`/
+                               `_incidence_legend!`. Requires forecast_utils → 9j → 10j → 14j → 15j utils.
+                               ⚠ Its §E/§F (ONS SGTF share, ONS variant mix) and `ons_variant.jl`, their reader, were
+                               REMOVED on 2026-10-22 with `dt_ons_variant/`: variant proportions come from COG-UK alone.
   variant_data.jl            COG-UK variant composition for the VARIANT-SPECIFIC renewal (`VariantNGM`, inst/3 §12; 2026-10-21).
                                `load_cog_variant_counts` (wide Monday week × `COG_GROUPS`, sparse rows → 0), `cog_week`
                                (identity on the Monday grid, asserting a Monday — the ONE place that rule lives; it was
@@ -412,10 +403,15 @@ src/
   <N>j_*.ipynb               Numbered notebook entry points:
                                1j data explore (+ ENGLAND data availability, variant mix and its sample sizes,
                                  2026-10-21; `RUN_DATA_CONVERSION = false` skips the one-off CSV/Arrow/df_dds cells;
-                                 exports `res/1j_variant_share_weekly_england.csv`, Monday weeks, two series: `ukhsa` =
-                                 ONS SGTF → UKHSA at 2021-01-04, `genomes_failed_removed` = COG-UK throughout — only the
-                                 COG-UK shares are DRAWN; `res/1j_positive_by_variant_age_england{,_log}.png/.csv` = ONS CIS
-                                 age prevalence × CIS-bin population × the England-wide COG-UK share, NOT age-specific) · 2j duration · 3j effective degree · 4j Danon [legacy] ·
+                                 variant proportions from COG-UK ALONE since 2026-10-22 (the ONS SGTF / UKHSA lineage
+                                 series and their seam check went with `dt_ons_variant/`/`dt_ukhsa/`): the weekly genome
+                                 shares, from COG-UK's first week 2020-01-27 with genome counts, are written to
+                                 **`dt_cog_uk/cog_uk_england_weekly_share.csv`** — processed COG-UK data beside its counts;
+                                 `res/1j_positive_by_variant_age_england{,_log}.png/.csv` = ONS CIS
+                                 age prevalence × CIS-bin population × the England-wide COG-UK share, NOT age-specific;
+                                 2026-10-22 comparisons: inc2prev `dcases` vs ONS prevalence, the outcome (infections) vs ONS
+                                 positives, and `estimates_age_ab` vs `estimates_age` infections — `res/1j_inc2prev_*`,
+                                 `res/1j_outcome_*`, `res/1j_infections_ab_vs_noab_*`) · 2j duration · 3j effective degree · 4j Danon [legacy] ·
                                5j group contacts · 6j fitting dist · 7j weekly age-pair · 8j forecast fitting ·
                                9j forecast diagnostics/scoring (+ §V, 2026-10-21: the ONE fitting section — Stage-2 of
                                  the variant-specific renewal for all six models, h1–4 and h0; `FIT_VARIANT=false` skips;
@@ -600,29 +596,14 @@ src/
                                  the row sum, the population weighting and (being monotone) the median across draws
                                  — a cheap exact tripwire for a wrong `g`, a swapped K1/K2 or κ draws out of step
                                  with μ.
-                                 §6c/§6d (2026-10-15) — the INFECTION-SIDE input audit, the twin of §0's contact-side
-                                 grid audit; no CoMix data in either. §6c puts both inc2prev fits against the ONS CIS
-                                 positivity they were fitted to, by age, on 8 panels; §6d collapses to the England
-                                 total and adds the ascertainment ratio. The THIRD incidence source is **UKHSA
-                                 reported case counts** (`ukhsa_weekly_cases`, `make_incidence_total_fig`,
-                                 `incidence_total_frame`).
-                                 ⚠ **`"ukhsa-reported"` is NOT in `_I2P_SOURCES`, deliberately.** That tuple drives
-                                 the inc2prev frame loader, the `gen_dab` frame-identity assert and the per-row
-                                 population assert; a non-inc2prev stem trips all three. It enters as `cis-observed`
-                                 does — one entry in `_I2P_ROWS`/`_I2P_SERIES` plus its own `VAL`/`ND` branch.
-                                 ⚠ `COVID-19_cases_rateRollingMean` is a right-aligned **7-day rolling SUM per
-                                 100k**, so a Sunday week is read off its SATURDAY; `"90"` and `"90+"` are ONE band
-                                 published twice (summing both double-counts); `casesByDay` is `age: "all"` only.
-                                 ⚠ Four of the seven CIS bins nest exactly in 5-year bands; `2-10`, `11-15`, `16-24`
-                                 are apportioned by single-year population (uniform rate within band), and ages 0-1
-                                 are dropped as the grid drops them. Weights come from `dt_ukhsa/` and are ASSERTED
-                                 against `grid.POP` (they reproduce `populations.csv` with difference 0).
-                                 ⚠ Adding this source WIDENED the §6c week calendar 130 → 132: the reported series is
-                                 complete at both edges where neither fit is, and the frame keeps a week when ANY
-                                 source is. The calendar itself is still built from inc2prev + CIS dates only.
-                                 ⚠ Reported cases are infections × **ascertainment**, which falls off a cliff at the
-                                 end of free testing (1 Apr 2022): 0.229 → 0.314 → 0.109 → 0.041 by half-year. The
-                                 CoMix origin span sits entirely LEFT of it. Never read the gap as model error.
+                                 §6c (2026-10-15) — the INFECTION-SIDE input audit, the twin of §0's contact-side grid
+                                 audit; no CoMix data. Both inc2prev fits against the ONS CIS positivity they were fitted
+                                 to, by age, on 8 panels. ⚠ Its UKHSA reported-case line and the whole of §6d (England
+                                 total + ascertainment: `ukhsa_weekly_cases`, `incidence_total_frame`,
+                                 `make_incidence_total_fig`) were REMOVED on 2026-10-22 with `dt_ukhsa/`.
+                                 ⚠ A source that is not an inc2prev `outputs/*.csv` must NOT go in `_I2P_SOURCES` (it
+                                 drives the frame loader, the `gen_dab` identity assert and the per-row population
+                                 assert); give it its own `VAL`/`ND` branch, as `cis-observed` has.
                                  §6c (cont.) (2026-10-16) — the ANTIBODY observation `estimates_age_ab.csv` was also fitted
                                  to: `inc2prev/data-processed/ab_age.csv` (ONS "COVID-19 antibody data for the UK") drawn
                                  AS PUBLISHED — 9 native ONS bands 16-24…80+, Monday–Sunday weeks, NOT rebinned
@@ -664,18 +645,8 @@ src/
                                  read-only `fit_window_infection_draws` on the h=1 artefacts (needs one CoMix read for the
                                  h=1 degree window; asserts every artefact exists first). Different quantity from the
                                  forecast band — fitted MEAN with observed lags, no noise — exactly as 10j §1.
-                                 §2: the same incidence (left axis) against the England SGTF share (Alpha proxy) and its
-                                 S-positive complement (≈ Delta from late Apr 2021), from `dt_ons_variant/` + `cis_variants.csv`,
-                                 with ONS's Alpha → Delta period boundary (2021-05-18). ⚠ ENGLAND-LEVEL, the same curve in
-                                 every age panel. S-positive passes 50% on 2021-05-23 — inside the h=2 target week.
-                                 Kinks in the daily curve are release (vintage) seams.
-                                 §3: EVERY variant category's share, stacked, over the whole CoMix forecast span
-                                 (2020-10-18 → 2022-01-29; `ons_variant_mix`, `_VARIANT_OF`). Categories are gene patterns
-                                 under ONS's period names; the two "S-positive …" catch-alls are named for what they hold.
-                                 ⚠ ONS FROZE its modelled variant tables 18 Jul – 30 Oct 2021 ("99% … Delta") — a real
-                                 gap, shaded and quoted, never interpolated (each contiguous run is stacked separately).
-                                 ⚠ The Jan-2021 "other" class (S-positive + too-low lumped) must STAY in the denominator
-                                 on its days; dropping it once read Alpha as 100%.
+                                 (§2 — SGTF share — and §3 — the ONS variant mix — were removed on 2026-10-22 with
+                                 `dt_ons_variant/`.)
                                17j FROZEN vs CONDITIONAL (2026-10-17) — scores the frozen-contact forecast fitted in 8j §2b
                                  (`two_stage_forecast(…; frozen = true)`: ONE h0 Stage-1 chain + ONE Stage-2 fit per origin,
                                  C* and antibody frozen at t₀) like 9j, and compares it with 9j's conditional cache (READ
@@ -754,55 +725,19 @@ dt_intermediate/             Fitted Turing chains (JLD2): date-stamped dist fits
 inc2prev/                    Git submodule (github.com/epiforecasts/inc2prev). Supplies the CIS age/population grid
                                (data-processed/populations.csv) and infection estimates (outputs/estimates_age.csv
                                since 2026-09-16; **outputs/estimates_age_ab.csv** until then — see the schema Gotcha)
-dt_ukhsa/                    UKHSA dashboard reported COVID-19 cases for England — 14j §6c/§6d ONLY; nothing is
-                               fitted to them. Three COMMITTED CSVs (national daily counts, 5-year-band daily 7-day
-                               rates, England single-year populations) + `fetch_ukhsa_cases.py`, which built them.
-                               ⚠ The `fetch_*.py` scripts in `dt_ukhsa/`, `dt_ons_variant/` and `dt_cog_uk/` are the
-                               ONLY things in this repo that touch the network. This one is Python because the API serves paginated JSON only (`?format=csv` 404s, the bulk
-                               endpoint is 403) while `Project.toml` carries no HTTP/JSON package — adding one
-                               would change `Manifest.toml` and force an HPC image rebuild. It re-runs its four
-                               self-tests on every invocation, including against an unchanged cache.
-                               ⚠ The single-year populations are emitted here because `inc2prev/data-raw/uk_pop.xls`
-                               is a legacy OLE2 `.xls` that **XLSX.jl cannot read** at all.
-                               `fetch_ukhsa_lineage.py` (2026-10-21, 1j) → `ukhsa_lineage_percent_weekly.csv`: lineage %
-                               of SEQUENCED cases, England, MONDAY weeks, 2021-01-04 … 2024-05-06. ⚠ Assigned with
-                               today's classifier (not real-time; e.g. BA.1 1.22% in Oct 2021 is misassignment); "Other"
-                               absorbs failed sequences; the API publishes NO denominator (see `dt_cog_uk/`).
 dt_cog_uk/                   COG-UK England genome counts per Monday week by constellation group (`scorpio_call`, never
-                               Pango prefixes — aliases break those) — 1j (the sample size behind the UKHSA lineage %)
-                               and, since 2026-10-21, the `VariantNGM` renewal (`variant_data.jl`, 9j §V / 17j §6). `fetch_cog_uk_counts.py` aggregates the ~165 MB public `cog_metadata.csv.gz`
-                               (not kept) into the committed `cog_uk_england_weekly.csv`. Its shares reproduce UKHSA's to a
-                               median 0.00–0.18 pp (self-test 3, reported), which is the evidence it IS that denominator.
-dt_ons_variant/              ONS CIS England S-GENE-TARGET-FAILURE (variant-compatible) positivity for the releases
-                               inc2prev never parsed — 16j §2 ONLY. `fetch_ons_variant.py` (Python, as `dt_ukhsa/`)
-                               reads the 2021 England workbooks' table 6c (releases 2021-01-08 … 04-16) and the technical
-                               workbooks' table 1c (04-23 … 05-14) into the COMMITTED `ons_variant_england_daily.csv`
-                               (all vintages; workbooks are not kept). Series starts **2020-11-22**; `cis_variants.csv`
-                               starts 2021-04-04. Re-runs its self-tests every invocation (`--cache DIR` for dev only).
-                               ⚠ ons.gov.uk 403s urllib's default User-Agent and 429s rapid requests — the script
-                               pauses and backs off. ⚠ Table titles, header layouts, date formats AND units change
-                               release to release: the scale (fraction vs PERCENT — technical v2–v4 are percent, v1 is
-                               not) is DETECTED per file against `cis.csv` national positivity, never assumed.
-                               ⚠ The Jan-2021 releases have TWO measures, "new variant compatible" and "other" (S-positive
-                               and too-low LUMPED), kept as class `s_pos_or_undetermined` — never guessed apart.
-                               ⚠ Every ONS label is a TaqPath GENE PATTERN: "UK/new/Alpha variant compatible" = SGTF,
-                               "not compatible…"/`delta_variant_compatible` = S-positive (`_GENE_CLASS`, 16j).
-                               ⚠ **`inc2prev/data-processed/cis_variants.csv` releases 2021-06-11 and 2021-06-18 are
-                               100× TOO SMALL** (summed variant positivity / national = 0.0099, 0.0096; every other
-                               release 0.91–1.09). `ons_sgtf_share` scale-tests every release and fixes them
-                               (`scale_fixed`); a within-release SHARE is unaffected, absolute values are not.
-                               ⚠ inc2prev's `cis_variants.csv` repeats ONE frozen table (2021-06-06 … 07-17) in 20
-                               releases 2021-07-23 … 12-10: ONS stopped updating it from 30 Jul 2021 (its own note,
-                               "99% … Delta"). Correct rows, not a scrape bug — but no data for 18 Jul – 30 Oct 2021.
-                               ⚠ No ONS variant split BY AGE exists for 2021 (ONS's 2023 variant-by-age article
-                               defines the variant BY PERIOD: Alpha ≤ 17 May 2021, Delta from 18 May).
-                               `fetch_ons_sample_counts.py` (2026-10-21, 1j) → `ons_cis_england_sample_counts_14day.csv`:
-                               table 1d's UNWEIGHTED England counts per 14-day period (positives, swabbed). ONS gives NO
-                               count by gene pattern (6a is % only, and UK). ⚠ Never sum across periods (ONS's note).
-                               ⚠ "Closed" periods ARE revised (≤1.76% v12→v14), and adjacent releases put the periods
-                               a WEEK OUT OF PHASE (v13 shares none with v12) — the cross-check asserts its overlap.
-                               ⚠ 1d's period format changes (two date cells → one text cell); the table SUBTITLE has a
-                               period's shape, so parsing starts below the "Time period" header.
+                               Pango prefixes — aliases break those): the ONE source of variant proportions since
+                               2026-10-22 — the `VariantNGM` renewal (`variant_data.jl`, 9j §V / 17j §6) and 1j, which also
+                               writes the processed weekly shares here (`cog_uk_england_weekly_share.csv`, from 2020-01-27,
+                               with genome counts; the first four weeks hold 1–10 genomes). `fetch_cog_uk_counts.py`
+                               aggregates the ~165 MB public `cog_metadata.csv.gz` (not kept) into the committed
+                               `cog_uk_england_weekly.csv`; it is the ONLY thing in this repo that touches the network
+                               (Python, because `Project.toml` carries no HTTP package — adding one would change
+                               `Manifest.toml` and force an HPC image rebuild).
+                               ⚠ `dt_ons_variant/` (ONS SGTF shares) and `dt_ukhsa/` (UKHSA lineage %, reported cases,
+                               single-year populations) were DELETED on 2026-10-22 (user decision), with 16j §2–§3, 14j
+                               §6c's reported-case line and §6d, and 1j's ONS → UKHSA series. Both were untracked: no copy
+                               in git.
 inst/                        Spec markdown — 2_weekly_age_pair.md (→7j), 3_preliminary_model_struct.md (→8j+framework),
                                analysis_plan_heavy_tail_mean.md/.docx (overall plan, docx wins), pcbi.1011453.pdf (Munday 2023), media/
                                — read these for task source-of-truth
@@ -812,7 +747,7 @@ tasks/                       Working plans (todo.md) and accumulated lessons (le
 hpc/                         LSHTM HPC (Slurm + Singularity) layer for the 8j grid — spec:
                                B4a07_lang_Slurm_singularity_LSHTM_hpc.docx. Fitting ONLY; 9j–17j stay local.
                                Since 2026-10-22 ONE s1 + s2 submission fits EVERY scenario (`SCENARIOS`, default
-                               `conditional,frozen,variant`): 10 s1 + 59 s2 per origin, 650 + 3835 over 65 origins.
+                               `conditional,frozen,variant`): 10 s1 + 59 s2 per origin, 670 + 3953 over 67 origins.
                                Stage 1 fits h1–4 and h0 in ONE fan-out per origin; Stage 2 runs four fit sets
                                (conditional, frozen, variant, variant-frozen). Submit s2 with
                                `--dependency=afterok:<s1 jobid>`. `dt_cog_uk/` must be uploaded (untracked).
@@ -919,7 +854,7 @@ Why iid (`-lc0`, user request): the level was whitened through `Lc = chol(Qtᵀ�
 
 ## Known Gotchas
 
-- **The `-eng` generation (2026-10-22, `refactor` branch) changed THREE DATA INPUTS and NO model** — England-only CoMix (`england_only` on `area_3_name`, never `area_3_code`), the ONS CIS outcome (`weekly_cis_positives`) and the Monday grid. Names and dimensions of every chain are unchanged, so the token `temporal-w8h-lc0-eng` is the only evidence; the old grid is the literal `CONTACTS_TOKEN_SUN`. ⚠ The first origin 2020-11-02 is set by CIS coverage (first full Monday week 2020-08-17 = `infection_start`); `weekly_cis_positives` asserts 7 days per cell, so an earlier origin FAILS rather than averaging a part-week. ⚠ The last origin 2022-01-24 is a `FIT_END` default (8j/9j/17j, `8j_run_grid.jl`, `hpc/config.sh`, 14j's literal, `audit_stage1_grid`) — the data-derived bound is still dragged out by CoMix's stray 2022-11 block. ⚠ The single-origin notebooks moved one day: 2021-05-09 → 2021-05-10, Fig-4's 2020-12-06 → 2020-12-07. ⚠ `england_only` is applied on the FRAMEWORK path only (`load_raw_contact_inputs`, `prepare_degree_data`'s fallback); 1j–7j still read the UK roster.
+- **The `-eng` generation (2026-10-22, `refactor` branch) changed THREE DATA INPUTS and NO model** — England-only CoMix (`england_only` on `area_3_name`, never `area_3_code`), the Monday grid and the origin span; the outcome is unchanged (`estimates_age.csv` infections — a switch to ONS CIS positivity was made and REVERTED on 2026-10-22 before anything was fitted under the token). Names and dimensions of every chain are unchanged, so the token `temporal-w8h-lc0-eng` is the only evidence; the old grid is the literal `CONTACTS_TOKEN_SUN`. ⚠ The first origin 2020-10-19 is set by the infection estimates' coverage (they start Fri 2020-07-31 ⇒ first full Monday week 2020-08-03 = `infection_start`); `load_window_data` asserts full coverage, so an earlier origin FAILS rather than zero-filling a part-week. ⚠ The last origin 2022-01-24 is a `FIT_END` default (8j/9j/17j, `8j_run_grid.jl`, `hpc/config.sh`, 14j's literal, `audit_stage1_grid`) — the data-derived bound is still dragged out by CoMix's stray 2022-11 block. ⚠ The single-origin notebooks moved one day: 2021-05-09 → 2021-05-10, Fig-4's 2020-12-06 → 2020-12-07. ⚠ `england_only` is applied on the FRAMEWORK path only (`load_raw_contact_inputs`, `prepare_degree_data`'s fallback); 1j–7j still read the UK roster.
 
 - **8j–13j all pick their generation from `ENV["STAGE1_USE_NUTS"]`, and SINCE 2026-09-04 THEY ALL DEFAULT TO `"true"` — one unset variable now reads one generation everywhere.** The role-split convention is unchanged (*fitting* → the generation it is about to produce; *read-only* → the generation that exists); what changed is that those coincide, because the complete grid on disk is now the NUTS `temporal-w8h-lc0-nuts` one (504 s1 + 1512 s2) and **nothing** exists under `temporal-w8h-lc0`. Previously 9j/10j/11j defaulted to `"false"`, which pointed them at an empty token. **10j additionally had an INVERTED COMPARISON** — `get(ENV, "STAGE1_USE_NUTS", "true") == "false"` — so `STAGE1_USE_NUTS=true` selected *Pathfinder* and the NUTS grid was reachable only by the nonsensical `=false`; no value made 10j agree with 8j/11j. All four are now `get(ENV, "STAGE1_USE_NUTS", "true") == "true"`. **A mismatch still does not error — it REFITS.** Each notebook builds its own `cfg`, and `cfg.stage1_use_nuts` is what appends `-nuts` to the cache token. Point 9j at a generation that was never fitted and every lookup misses; `two_stage_forecast` → `fit_or_load_stage2` → `fit_or_load_stage1` then *fits on miss*, serially (`fit_or_load_stage2` passes no `max_concurrent`, so its 100 per-draw Pathfinder fits run one at a time, ~9× slower than `prefit_stage2!`), and 9j has no per-cell `try/catch` to even log it, so it grinds rather than failing. **Every notebook that can refit now stops you up front** (2026-09-04): 10j cell 4 and **13j cell 4** (added — it was byte-for-byte 10j's minus the assert, and worse, since at `horizons = 1:1` a miss seeds h=1 artefacts a later full run would then `isfile`-SKIP) assert every required `8j_s1_*` **and** `8j_s2_*` for their origin; **9j cell 4** (added) asserts the same over its whole `wins × combos × horizons` grid, before `assemble_or_load_forecasts`, whose own `isfile` covers only its assembly cache; **11j** asserts in cell 2 (Stage 1, h1 only — it needs no Stage 2 and calls nothing that fits). The asserts ARE the guard, do not delete them. Note the second hazard a silent refit carries: it *writes* into `../dt_intermediate` under the live token, so it races any concurrent grid run — and, on this grid, a refitted cell would carry `phi_pf_max`/`phi_pf_override` that the existing 504 lack, mixing the provenance that `audit_stage1_grid` then fails. **12j and 14j need no flag**: both take the framework default `stage1_use_nuts = true` and assert it. 12j reads Stage-1 chains only; **14j has read Stage-2 pooled artefacts since 2026-09-10** (§6's NGM figures) — but it still calls no `two_stage_forecast`/`fit_or_load_*` anywhere, so it cannot refit even on a total miss: every Stage-2 read is `stage2_pooled_path` → `isfile` → `load`, `contact_reproduction_draws`' read-only pattern. Always audit the grid between 8j and the diagnostics — it lists what is missing for the active token and catches mixed provenance across `sampler`/`ad_backend`/`target_accept`/`nuts_adapts`/`nuts_draws`/`phi_init_scale`/`phi_pf_max`. ⚠ **`tmp/check_grid.jl` no longer exists** (the whole `tmp/` directory left the tree, taking `chain_health.jl`, `run_grid_batched.sh`, `run_diagnostics.sh`, `watch_grid.sh` and `build_13j_nb.py` with it). Its replacement is **`audit_stage1_grid(cfg; …)`** in `src/14j_viz_utils.jl`, run as 14j §0; it covers Stage 1 only, so there is currently no Stage-2 equivalent. 8j and 9j also read `ENV["FIT_END"]` (default `2021-12-31` ⇒ 63 origins) and `ENV["ORIGIN_MIN"]` (unset), which must match between them; `ORIGIN_MIN=2021-04-25 FIT_END=2021-05-09` gives a 3-origin smoke ending on the origin 10j/11j are hard-coded to. 12j and 13j take their single origin from `ENV["ORIGIN_12J"]`/`ENV["ORIGIN_13J"]` (both default `2021-05-09`).
 - **On the HPC the grid is split by ORIGIN, and three things that are silent on a workstation are not on a cluster** (2026-08-12, `hpc/`). (1) **`ORIGIN_STRIDE`/`ORIGIN_OFFSET`** (`8j_run_grid.jl`) give each Slurm array task a disjoint round-robin slice of the origins — *without* them every task takes `pending[1:MAX_ORIGINS]` from the same disk view, so N tasks fit the SAME chains and race each other's writes. The slice's origin LIST is printed in every task log; two logs sharing an origin is the bug. (`DRY_RUN=1` resolves and prints token/slice/batch then exits **10** — the login-node preflight; 10 rather than 0 so that a `DRY_RUN` left set inside a job stops `run_grid.sh` instead of spinning forever.) The array must start at **0** (both `.slurm` files refuse otherwise: a 1-based array leaves slice 0 unfitted and pushes the last task's offset out of range). (2) **`_mem_available_gib` now reads the cgroup under Slurm** (`_slurm_mem_available_gib`, `joint_model.jl`): `/proc/meminfo` reports the whole 768 GB node, so `MEM_FLOOR_GIB` and `fit_concurrency`'s memory cap were both inert and the job would die by cgroup OOM-kill with nothing in the log. Measured in a 2 GiB container: cgroup 1.73 GiB vs `/proc/meminfo` **23.0 GiB**. The branch is gated on `SLURM_JOB_ID`, so nothing changes locally. (3) **Grid artefacts are written by `_atomic_jldsave`** (temp + rename) — a time-limit SIGKILL mid-`jldsave` leaves a truncated `.jld2`, and EVERY skip-check in this codebase is `isfile`, so a truncated file counts as complete and the grid reports itself finished. ⚠ Two departures from the docx are deliberate and documented in `hpc/README.md`: the depot `rm -rf` must use the HOST path (the docx's "does not work" is because `/workdir/...` only exists inside the container), and `JULIA_DEPOT_PATH` takes ONE colon — the docx's `"…::/opt/julia"` has an empty entry that Julia expands to the shared `~/.julia`, which is the concurrency conflict behind its own `IOError -116`.

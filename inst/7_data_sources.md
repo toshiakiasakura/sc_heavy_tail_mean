@@ -1,20 +1,21 @@
 # 7. Data sources of the forecasting framework (audit, 2026-10-22)
 
 What every Stage-1 / Stage-2 / scoring input is, where it is read, and what changed on the
-`refactor` branch (user request: England-only contacts, ONS CIS outcome, Monday weeks, origins
-through Jan 2022). Cache token of the new generation: `temporal-w8h-lc0-eng` (+`-nuts`).
+`refactor` branch (user request: England-only contacts, Monday weeks, origins through Jan 2022).
+Cache token of the new generation: `temporal-w8h-lc0-eng` (+`-nuts`). The outcome was briefly switched
+to ONS CIS positivity and switched back the same day (see "Stage 2 and scoring").
 
 ## Summary
 
 | role | before (`temporal-w8h-lc0-nuts`) | after (`temporal-w8h-lc0-eng-nuts`) |
 |---|---|---|
 | Stage 1 contacts | CoMix **UK** participants | CoMix **England** participants (`england_only`) |
-| Stage 2 target, renewal history, scoring truth | inc2prev **modelled infections** (`estimates_age.csv`, 7-day sum × pop) | **ONS CIS positivity by age × pop** (`cis_age.csv`, weekly mean × pop) |
+| Stage 2 target, renewal history, scoring truth | inc2prev **modelled infections** (`estimates_age.csv`, 7-day sum × pop) | unchanged — now with a full-coverage assert per week |
 | Antibody covariate `A` | `estimates_age.csv` `gen_dab` (absent ⇒ `A ≡ 0`, `F = 1`) | unchanged |
 | Population / age grid | `populations.csv` `age_school`, 7 bins 2-10 … 70+ | unchanged |
 | Variant composition | COG-UK England, Monday weeks, read from the week starting the day after each Sunday week | same file, now the SAME week (`cog_week` = identity) |
 | Week grid | Sunday-start, anchor 2021-03-21 | **Monday-start, anchor 2021-03-22**, Thursday mid labels |
-| Forecast origins | 63, 2020-10-18 … 2021-12-26 | **65, 2020-11-02 … 2022-01-24** |
+| Forecast origins | 63, 2020-10-18 … 2021-12-26 | **67, 2020-10-19 … 2022-01-24** |
 
 ## Stage 1 — CoMix contacts
 
@@ -38,25 +39,22 @@ through Jan 2022). Cache token of the new generation: `temporal-w8h-lc0-eng` (+`
 
 ## Stage 2 and scoring — the outcome
 
-- **File**: `inc2prev/data-processed/cis_age.csv` — ONS COVID-19 Infection Survey **modelled** PCR
-  positivity (MRP model, with 95% credible interval), England, `level == "age_school"`, the 7 CIS
-  bins keyed by `lower_age_limit` ∈ {2, 11, 16, 25, 35, 50, 70} (= `grid.LO`). Daily rows
-  (`start_date == end_date`, asserted), **2020-08-14 … 2023-01-31**, 118 stacked publication
-  vintages (1–7 per date × bin).
-- **Reader**: `cis_weekly_positivity` (moved verbatim from `14j_viz_utils.jl` to `infection_data.jl`)
-  keeps the LATEST vintage per (date, bin) and takes the weekly MEAN (positivity is a stock).
-- **Outcome**: `weekly_cis_positives` → `I_mean = P × POP` (people currently positive),
-  `I_sd = mean daily (HI − LO)/(2·1.96) × POP`. It asserts 7 days and a finite, positive value in
-  every (bin, week) cell.
-- ⚠ **Prevalence used as incidence (user's choice).** The renewal and its likelihood are unchanged,
-  so γ_SAR and the generation interval absorb the stock/flow mismatch (weekly positivity × pop ≈
-  1.24 weekly incidences given a ~8.7-day mean detectable duration, and lagged). γ_SAR from these fits
-  is not a per-contact attack rate on the incidence scale.
-- ⚠ There are **no observed positive COUNTS by age** in the tree. ONS's unweighted England counts
-  (`dt_ons_variant/ons_cis_england_sample_counts_14day.csv`) have no age split and end 2021-03-13.
-- **First origin**: the 12-week infection window (4 lag + 8 fit) must start on or after the first
-  full Monday week of CIS data, 2020-08-17 ⇒ origin **2020-11-02** (`available_forecast_origins`'
-  `infection_start`). An origin a week earlier fails the coverage assert.
+- **File**: `inc2prev/outputs/estimates_age.csv`, `name == "infections"` — inc2prev's modelled daily
+  per-capita infections by the 7 CIS bins, England, **2020-07-31 … 2023-01-31**, fitted to ONS CIS
+  positivity alone. Weekly count = 7-day sum × population (`weekly_infections`); SDs in quadrature.
+- **Coverage**: `load_window_data`/`load_forecast_truth` assert every week read is fully covered
+  (`_assert_infection_coverage`) — `weekly_infections` zero-fills a missing day silently. First full
+  Monday week 2020-08-03 ⇒ first origin **2020-10-19** (`available_forecast_origins`'
+  `infection_start`); an origin a week earlier fails the assert.
+- **Not `estimates_age_ab.csv`** (the joint positivity + antibody fit, the outcome until 2026-09-16):
+  1j's comparison shows its weekly infections nearly FLAT through the spring-2021 trough in 2-10, 11-15,
+  16-24 and 35-49 (up to ~10–20× the positivity-only fit), with the totals within a few %.
+- **Considered and reverted (2026-10-22): ONS CIS positivity × population** (`cis_age.csv`,
+  `weekly_cis_positives`, still in `infection_data.jl`). inc2prev's fitted prevalence reproduces it
+  closely (weekly ratio median 0.996, 90% within 0.89–1.11; 1j), but it is a PREVALENCE: 0.6–2.3× the
+  weekly infections week to week around a steady-state D/7 = 1.24 (D = 8.7 days detectable, inc2prev's
+  `prob_detectable.csv`), a scale and lag the renewal would have to absorb. ⚠ There are no observed
+  positive COUNTS by age in the tree.
 
 ## Covariates
 
@@ -68,5 +66,12 @@ through Jan 2022). Cache token of the new generation: `temporal-w8h-lc0-eng` (+`
 
 ## Audits that still read inc2prev infections
 
-14j §6 (`incidence_age_shares`) and §6c/§6d, and 16j's inc2prev panels, compare inc2prev's fits
-with the CIS and UKHSA data. They read `weekly_infections` on purpose and are unchanged.
+14j §6 (`incidence_age_shares`) and §6c, 16j's inc2prev panels and 1j's comparisons set inc2prev's
+fits beside the CIS data. They read `weekly_infections` on purpose.
+
+## Removed (2026-10-22)
+
+`dt_ons_variant/` (ONS SGTF gene-pattern shares, 16j §2–§3 and 1j) and `dt_ukhsa/` (UKHSA lineage %,
+reported cases and single-year populations — 1j, 14j §6c's fourth line and §6d) were deleted: variant
+proportions come from COG-UK alone (`dt_cog_uk/`, which also holds 1j's processed weekly shares,
+`cog_uk_england_weekly_share.csv`). Both folders were untracked, so git holds no copy.

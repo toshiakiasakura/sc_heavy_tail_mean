@@ -23,7 +23,7 @@
 # SIZING (measured, CLAUDE.md): a Stage-1 NUTS fit takes 1692/2509/2806/3027 s at h=1..4 and
 # typically ~30 min at h0 (one h0 hurdle-Weibull fit took 2 h 20 min), and an origin is 10 such
 # fits, run in ONE fan-out. --cpus-per-task=10 lets all 10 run concurrently ⇒ ~1 h per origin,
-# bounded by the slowest. 65 origins over 16 tasks = 4–5 origins each ⇒ ~5–6 h (worst case ~10 h),
+# bounded by the slowest. 67 origins over 16 tasks = 4–5 origins each ⇒ ~5–6 h (worst case ~10 h),
 # inside 24 h. Memory: ~4 GiB per concurrent NUTS fit × 10 + the shared data ⇒ 80 GB.
 
 set -euo pipefail

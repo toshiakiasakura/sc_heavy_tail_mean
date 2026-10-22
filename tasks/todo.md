@@ -600,17 +600,19 @@ Plan: `.claude/plans/currently-the-forecasting-is-enchanted-flame.md`.
 - [ ] 9j full run: 1827 `8j_s2_*-variant_*` artefacts — STOPPED by user at 50 (2020-10-18/25; sets identical under the new rule)
 - [ ] 17j full run: §6 checks pass; view figures
 
-# 2026-10-22 — `refactor` branch: England CoMix, ONS CIS outcome, Monday weeks, all-scenario HPC run
+# 2026-10-22 — `refactor` branch: England CoMix, Monday weeks, all-scenario HPC run
 
 Plan: `.claude/plans/indexed-knitting-castle.md` (main checkout). Worktree `/worktrees/refactor`.
 
 - [x] data-source audit → `inst/7_data_sources.md`
 - [x] England-only roster (`england_only`, `area_3_name`) in `load_raw_contact_inputs` + `prepare_degree_data` fallback
-- [x] outcome = weekly mean CIS positivity × pop (`weekly_cis_positives`; `cis_weekly_positivity` moved from 14j)
+- [x] outcome = weekly mean CIS positivity × pop (`weekly_cis_positives`) — then REVERTED to `estimates_age.csv` infections (user, after 1j's comparisons); coverage assert added
 - [x] Monday grid (`WEEK_ANCHOR = 2021-03-22`, `inc2prev_week_anchor`, `cog_week` identity, 14j/16j docs)
-- [x] origins 2020-11-02 … 2022-01-24 (`infection_start = 2020-08-17`, `FIT_END` defaults), single origins +1 day
+- [x] origins 2020-10-19 … 2022-01-24, 66 (`infection_start = 2020-08-03`, `FIT_END` defaults), single origins +1 day
 - [x] token `temporal-w8h-lc0-eng` (+`-nuts`); `CONTACTS_TOKEN_SUN` literal for the old grid
 - [x] `8j_run_grid.jl` `SCENARIOS` (conditional, frozen, variant ⇒ 10 s1 + 59 s2 per origin); hpc/ scripts + README
-- [x] spot checks (grid, roster, 65 origins, CIS coverage, variant sets)
-- [ ] full 65-origin grid on the HPC (650 s1 NUTS + 3835 s2) — not started
+- [x] spot checks (grid, roster, origins, outcome coverage, variant sets) — re-run for the 67-origin grid
+- [ ] full 67-origin grid on the HPC (670 s1 NUTS + 3953 s2) — not started
 - [ ] then 9j/17j on the new grid; prose in 9j–17j that quotes 63-origin numbers is stale until re-run
+- [x] 1j: inc2prev dcases vs ONS prevalence; infections vs positives; `_ab` vs no-`_ab` infections (the workbook comparison was dropped with `dt_raw/`)
+- [x] variant proportions from COG-UK ALONE: deleted `dt_ons_variant/` + `dt_ukhsa/` (user), `src/ons_variant.jl`, 16j §2–§3, 14j §6c's UKHSA line + §6d, 1j's ONS→UKHSA series + seam check; COG-UK shares now written to `dt_cog_uk/cog_uk_england_weekly_share.csv`

@@ -806,7 +806,7 @@ const ENGLAND_REGIONS = ("East Midlands", "East of England", "Greater London", "
     england_only(df_part) -> DataFrame
 
 The ENGLAND participant-days of a CoMix-UK participant table (one carrying `:area_3_name`), so that
-the contact side matches the England-only outcome (ONS CIS) and variant data (COG-UK England).
+the contact side matches the England-only outcome (inc2prev) and variant data (COG-UK England).
 Filtered PER ROW, not per person: 650 `part_uid`s report from different nations in different waves.
 
 Contacts need no filter of their own — every consumer inner-joins contacts onto the participant

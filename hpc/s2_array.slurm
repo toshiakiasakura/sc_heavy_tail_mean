@@ -24,7 +24,7 @@
 #
 # SIZING (measured, CLAUDE.md): ~0.2 min per pooled cell with the ReverseDiff Stage-2 backend at
 # max_concurrent=9 (a variant cell costs about the same — its likelihood is vectorised over
-# variants) ⇒ the 3835-cell grid is ~13 h in one process; over 16 tasks ~1 h each plus per-origin
+# variants) ⇒ the 3953-cell grid is ~13 h in one process; over 16 tasks ~1 h each plus per-origin
 # data loading. --time=12:00:00 leaves wide margin. 1 GiB per concurrent fit is generous, so 32 GB
 # covers 16-way concurrency.
 

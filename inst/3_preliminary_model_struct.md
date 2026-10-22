@@ -125,34 +125,26 @@ column `n_fit` $= 8$ in *every* Stage-1 chain (10j asserts `t_o_est == cfg.n_fit
 
 ### 2.3 Infection and antibody series
 
-**Outcome (since 2026-10-22, user request): ONS CIS positivity by age, not a modelled incidence.**
-`weekly_cis_positives` (`infection_data.jl`) reads `inc2prev/data-processed/cis_age.csv` — ONS's
-modelled PCR positivity for England, daily, by the 7 CIS bins, 118 stacked publication vintages, of
-which the latest per (date, bin) is kept — and sets
+Age-stratified estimates are taken from the `inc2prev` output `estimates_age.csv`
+(`infection_data.jl`, `_EST_PATH`). ⚠ **This was `estimates_age_ab.csv` until 2026-09-16**, when the
+source was changed (errors were found in the use of the `_ab` variant — 1j now shows them: in 2-10,
+11-15, 16-24 and 35-49 the `_ab` fit's weekly infections stay nearly flat through the spring-2021
+trough, up to ~10–20× the positivity-only fit, while the totals agree). The schema is identical, the
+`infections` posterior is not, and the antibody consequences are spelled out below:
 
-$$I_{a,t} = N_a \cdot \overline{p}_{a,t}, \qquad
-s^{I}_{a,t} = N_a \cdot \overline{\left(\tfrac{p^{\mathrm{hi}} - p^{\mathrm{lo}}}{2\cdot 1.96}\right)}_{a,t},$$
+- **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$. The `name == "infections"` rows give
+  a *daily per-capita infection proportion* with mean and SD; the weekly count is the 7-day sum of
+  (proportion $\times$ age-group population), and weekly SDs are combined in quadrature across the
+  days of the week (a working independence approximation). Since 2026-10-22 every week read must be
+  fully covered by the estimates (asserted; `weekly_infections` itself zero-fills a missing day). The
+  infections start Fri 2020-07-31, so the first full Monday week is 2020-08-03 and the first origin
+  whose 12 `all_weeks` are covered is **2020-10-19**.
 
-the weekly means of the daily positivity and of its 95% CrI half-width (inc2prev's CrI → SD rule).
-Every cell must have 7 days of data (asserted); CIS by age starts Fri 2020-08-14, so the first full
-Monday week is 2020-08-17 and the first origin whose 12 `all_weeks` are covered is **2020-11-02**.
-
-⚠ **$I_{a,t}$ is now a PREVALENCE (people currently positive), used AS-IS where the renewal expects
-incidence** (user's choice). Weekly mean positivity $\times N_a$ is about (mean detectable duration
-≈ 8.7 d)/7 ≈ 1.24 weekly incidences, lagged and smoothed. The renewal, the likelihood and the
-forecast are unchanged; $\gamma_{\text{SAR}}$ and the generation interval absorb the mismatch, so
-$\gamma_{\text{SAR}}$ from this generation is not a per-contact attack rate on the incidence scale.
-Forecasts and scores are on the same positives-× -population scale.
-
-The inc2prev estimates `estimates_age.csv` (`_EST_PATH`) were the outcome until then and now supply
-only the antibody covariate below. ⚠ That file was `estimates_age_ab.csv` until 2026-09-16 (errors
-were found in the use of the `_ab` variant); the schema is identical, the `infections` posterior is
-not (median 8.6% relative difference, p90 76%).
-
-- *(Until 2026-10-22)* **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$ came from the
-  `name == "infections"` rows: a *daily per-capita infection proportion* with mean and SD; the weekly
-  count was the 7-day sum of (proportion $\times$ age-group population), with weekly SDs combined in
-  quadrature (`weekly_infections`, still used by the 14j/16j audits).
+  ⚠ On 2026-10-22 the outcome was briefly switched to ONS CIS positivity × population
+  (`weekly_cis_positives`) and switched back the same day, before anything was fitted. Positivity is a
+  PREVALENCE: 1j measures it at 0.6–2.3× the weekly infections week to week (D/7 = 1.24 in steady
+  state, D = 8.7 days detectable), a scale and lag the renewal would have had to absorb in
+  $\gamma_{\text{SAR}}$ and the generation interval.
 - **Weekly antibody prevalence** $A_{a,t} \in [0,1]$, the within-week mean of the `name == "gen_dab"`
   rows. Those rows carry no date column, so their dates are reconstructed from the `t_index` field
   via the `t_index → date` map built from the infection rows.

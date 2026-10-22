@@ -830,7 +830,7 @@ end
 """
     _point_forecast_inputs(fc_store, st, contact, origin, cfg; inf, grid, n_before, n_after) -> NamedTuple
 
-Everything one origin's point-forecast panels need: the observed weekly CIS positives × pop `I_obs` (A × weeks)
+Everything one origin's point-forecast panels need: the observed weekly infections `I_obs` (A × weeks)
 over `n_before` weeks up to the origin and `n_after` past it, the six scenario fans (A × H × draws), and
 the x positions. Asserts every fan exists and that `I_obs` reproduces the window's fit weeks
 (`load_window_data`) and scored targets (`load_forecast_truth`) EXACTLY — the long series IS the truth the
@@ -842,7 +842,8 @@ function _point_forecast_inputs(fc_store, st::DataFrame, contact::AbstractString
     @assert n_after >= H "_point_forecast_inputs: n_after = $n_after does not cover the $H horizons"
     win   = WeeklyWindow(origin; n_fit = cfg.n_fit, smax = cfg.smax, horizons = cfg.horizons)
     weeks = collect((origin - Week(n_before - 1)):Week(1):(origin + Week(n_after)))
-    I_obs, _ = weekly_cis_positives(_cis_frame(), weeks, grid)   # the outcome (asserts full coverage)
+    I_obs, _ = weekly_infections(inf.df, weeks, grid)
+    @assert all(>(0), sum(I_obs; dims = 1)) "_point_forecast_inputs: observed weeks outside the estimates around $origin"
     wd = load_window_data(win, inf.df, inf.tmap; grid = grid)
     wi = Dict(w => k for (k, w) in enumerate(weeks))
     fit_w = [w for w in win.fit_weeks if haskey(wi, w)]
