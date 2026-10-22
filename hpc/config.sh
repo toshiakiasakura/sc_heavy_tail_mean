@@ -17,6 +17,12 @@ PROJECT_DIR="${PROJECT_DIR:-/home/${HPC_USER}/prj_sc_heavy_tail_mean}"
 IMAGE_NAME="${IMAGE_NAME:-sc-heavy-tail-hpc_20260812.simg}"
 IMAGE="${IMAGE:-${PROJECT_DIR}/${IMAGE_NAME}}"
 
+# The Singularity module. ⚠ NOT the bare `singularity`: that resolves to the default 4.4.1, whose
+# binary needs libsubid.so.3, which compute nodes lack (2026-10-22, node c30: "error while loading
+# shared libraries: libsubid.so.3" ⇒ exit 127 before the container starts). 3.7.1 runs the
+# docker2singularity .simg without it.
+SINGULARITY_MODULE="${SINGULARITY_MODULE:-singularity/3.7.1}"
+
 # Where each array task's private, writable Julia depot is created. The bind-mounted project dir is
 # the docx default and keeps the depot visible from inside the container without a second --bind.
 # Point it at node-local scratch (e.g. /tmp) if home-directory quota or NFS contention bites.

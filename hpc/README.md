@@ -109,7 +109,7 @@ artefacts**, so a stale chain under the same token is silently kept, never overw
 
 ```bash
 cd ~/prj_sc_heavy_tail_mean
-module load singularity
+module load singularity/3.7.1     # NOT the default 4.4.1: it needs libsubid.so.3, absent on compute nodes
 singularity exec --bind $PWD:/workdir \
     --env JULIA_DEPOT_PATH="/workdir/.julia_preflight:/opt/julia" \
     --env JULIA_NUM_THREADS=4 \

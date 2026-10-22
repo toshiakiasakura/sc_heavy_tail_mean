@@ -94,7 +94,7 @@ echo "scenarios  : ${SCENARIOS}"
 if ! command -v module >/dev/null 2>&1 && [ -f /etc/profile.d/modules.sh ]; then
     . /etc/profile.d/modules.sh          # an `if` condition is exempt from set -e; a bare `||` is not
 fi
-module load singularity
+module load "${SINGULARITY_MODULE}"   # config.sh — NOT the default 4.4.1 (libsubid.so.3)
 
 # ⚠ JULIA_DEPOT_PATH uses a SINGLE colon. The docx's "…::/opt/julia" contains an EMPTY entry, which
 # Julia expands to the DEFAULT depots — i.e. the shared ~/.julia on the host home, concurrently

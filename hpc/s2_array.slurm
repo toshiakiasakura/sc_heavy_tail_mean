@@ -80,7 +80,7 @@ echo "scenarios  : ${SCENARIOS}"
 if ! command -v module >/dev/null 2>&1 && [ -f /etc/profile.d/modules.sh ]; then
     . /etc/profile.d/modules.sh
 fi
-module load singularity
+module load "${SINGULARITY_MODULE}"   # config.sh — NOT the default 4.4.1 (libsubid.so.3)
 
 singularity exec --bind "${PROJECT_DIR}:/workdir" \
     --env JULIA_DEPOT_PATH="${DEPOT_CONT}:/opt/julia" \
