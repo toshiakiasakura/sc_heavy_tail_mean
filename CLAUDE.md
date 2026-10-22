@@ -266,6 +266,65 @@ src/
                                  none): `panel ∈ {ngm_R, contact_rel_R}`, per label × origin, plus the
                                  observed series and the weekly-averaged national R.
 
+  16j_viz_utils.jl           16j's helpers (2026-10-16): `antibody_window_frame` (bin × week, framework `A` + ONS matched
+                               Mon–Sun → Sun–Sat by Thursday mid-date, asserted one-to-one), `antibody_window_summary`,
+                               `make_antibody_window_fig`; `_incidence_overlay!`/`_incidence_legend!` (shared by both
+                               figures — §1's PNG verified byte-identical after the extraction); §E `ons_sgtf_share`
+                               (daily England SGTF share; per day the LATEST RELEASE CARRYING BOTH classes, both read from
+                               it) + `make_variant_incidence_fig`; §F `ons_variant_mix` + `make_variant_mix_fig`. §E and §F
+                               share ONE release reader, `_ons_variant_releases(classof)` (§2's CSV verified identical
+                               after the extraction). Requires forecast_utils → 9j → 10j → 14j → 15j utils.
+                               ⚠ Since 2026-10-21 the §E/§F READERS (`ons_sgtf_share`, `ons_variant_mix`,
+                               `_ons_variant_releases`, `_GENE_CLASS`, `_VARIANT_OF`/`_VARIANT_ORDER`,
+                               `ONS_VARIANT_PERIODS`, the data paths) live in `ons_variant.jl`, which this file includes;
+                               the plotters and `_ONS_VARIANT_GAP_NOTES` stayed here.
+  ons_variant.jl             The ONS variant readers, MOVED VERBATIM out of 16j (2026-10-21) so 1j can use them without
+                               16j's forecast stack. Needs only main_utils + `framework.jl` + `infection_data.jl`
+                               (`_todate_safe`/`_tofloat_safe`). Verified: 16j's `16j_variant_share.csv` (112 rows) and
+                               `16j_variant_mix.csv` (658) reproduce exactly through it, and 16j runs end-to-end.
+  variant_data.jl            COG-UK variant composition for the VARIANT-SPECIFIC renewal (`VariantNGM`, inst/3 §12; 2026-10-21).
+                               `load_cog_variant_counts` (wide Monday week × `COG_GROUPS`, sparse rows → 0), `cog_week`
+                               (framework Sunday week s ↔ COG-UK Monday week s+1 — the ONE place that rule lives),
+                               `variant_set(cc, origin, rule)` (inclusion at t₀: 4-week genomes ≥ 50 OR origin-week share
+                               ≥ 1%; DROP with HYSTERESIS only after all `n_fit` fit weeks < `variant_drop_share` = 0.1%,
+                               via the state machine `_variant_states` scanned from the file's first week; "Other" + the
+                               groups that are off pool into `residual`, which runs the same machine and folds into the
+                               dominant group when off), `variant_split(win, cc, cfg)` → `VariantSplit` over `win.all_weeks`, `with_variants`,
+                               `variant_set_table`. ⚠ Categories are fixed at the ORIGIN for every horizon; no variant data
+                               after t₀ enters a fit or forecast (user's choice). Verified: reproduces the 1j threshold table
+                               (Alpha 2020-10-18, Delta 2021-04-04, BA.1 2021-11-21, BA.2 2021-12-26 first included).
+  17j_viz_utils.jl           FROZEN-CONTACT (h0, unconditional) vs CONDITIONAL forecast (2026-10-17). `assert_h0_artefacts`
+                               (the no-refit guard), `frozen_cache_path` (`17j_assembly_frozen_<token>.jld2`, NEVER 9j's
+                               default path), `check_h0_artefact_shapes`, `scheme_compare_frames` (model × horizon and
+                               PAIRED model × origin × horizon), `paired_ratio_ci` (origin bootstrap), six `plot_scheme_*`
+                               figures. Requires forecast_utils → 9j → 15j utils (conditional side via `load_9j_assembly`).
+                               §6 helpers (2026-10-21): `SCENARIO_ORDER`/`SCENARIO_STYLE`, `scenario_table`, `series_name`
+                               (`<label>@frozen` — a SERIES name only; never pass it to the `|`-splitting path helpers),
+                               `rename_series`, `variant_cache_path` (`17j_assembly_variant{,_frozen}_<token>.jld2`),
+                               `scenario_pair_ratios` (paired origin bootstrap per contact × contrast × h), the
+                               `plot_scenario_*`/`plot_variant_gain_over_time` figures, and (2026-10-22, per contact
+                               model) `plot_scenario_wis_over_time` (rows = horizons; WIS(log) | cumulative diff vs no
+                               contact) and `plot_scenario_forecast_panels(…; groups = takeover_origins(…))` (15 panels:
+                               5 origins centred on the first ≥50% origin of Alpha/Delta/BA.1, all six scenarios; y capped
+                               at 3× observed, off-scale fans COUNTED in the title); `plot_scenario_wis_by_period` (absolute mean WIS by horizon per period; periods via
+                               `scenario_period_label` = 9j's + "before Lockdown 2"/"after Opening up", which 9j drops but
+                               which hold the Omicron origins) and `plot_scenario_age_fans` (age panels at one origin, 2021-05-09); `scenario_wis_by_horizon_until` (WIS by
+                               horizon over origins ≤ a date — the pre-Omicron figure uses ≤ 2021-11-01), and `scenario_rank_frame` +
+                               `plot_scenario_rank_by_horizon` (all 22 distinct series ranked by mean WIS per horizon, pre-Omicron); `plot_scenario_bias` (bias by
+                               horizon; with `plot_scenario_coverage`, drawn over all origins and pre-Omicron).
+                               `plot_scenario_point_forecasts` (2026-10-22) — Fig 4 of Bracher et al. 2021
+                               (`ref/s41467-021-25207-0.pdf`), all ages, one panel per origin; its age twin
+                               `plot_scenario_point_forecasts_by_age` is ONE figure per origin (big all-ages panel over a 2×4
+                               grid: 7 CIS bins + legend). Both draw the six scenarios' MEDIAN h1–4 (no band) as Fig 4's DOTTED
+                               open-marker lines from the origin's observed value, coloured by `SCENARIO_STYLE` (user: keep
+                               the §6 colours; a six-hue variant was tried and reverted). Shared pieces:
+                               `_point_forecast_inputs` (asserts every fan exists and the longer observed series equals the
+                               window's fit weeks and scored truth EXACTLY) and `_point_forecast_panel!`. ⚠ A panel's median
+                               is of the per-draw age SUM, so the age panels do not add to the total. ⚠ Inside a function
+                               with a `grid` kwarg, `@layout [...; grid(2, 4)]` CALLS that kwarg (MethodError: NamedTuple not
+                               callable) — spell the cells out. 17j cell after the age fans: `weighted-hweibull|neighbourhood`
+                               at 2020-12-06 (Alpha) and 2021-05-09 (Delta) → `res/17j_scenarios_point_forecasts_total_*`,
+                               `…_age_<origin>_*.png`, `…_age_*.csv`.
   15j_viz_utils.jl           MULTIVARIATE scoring (2026-10-15; margins cut 2026-10-16) — 9j's WIS is univariate, so
                                nothing asked whether the 7 age bins move TOGETHER as a model says. Reads 9j's own
                                `9j_assembly_*.jld2` (`load_9j_assembly`: `isfile` → `load` → validate; it deliberately
@@ -332,13 +391,29 @@ src/
                                docstring). It also adds `\newcounter{none}`, which pandoc's uncaptioned
                                `longtable` idiom needs, and it REPORTS any surviving LaTeX error rather than
                                shipping a PDF that built with two of them.
+                               ⚠ **GLYPHS** (2026-10-16): the xelatex fonts have no glyph for `≥ ≤ ≈ ≡ ≠ ∈ ⇒ ⚠ ◇ ○ ₀ ─`
+                               or Julia's log frame `┌ │ └` — each rendered as an EMPTY box, silently ("≤ 21%" read
+                               " 21%"). `substitute_glyphs` maps them to ASCII in the EXPORT COPY only (table `GLYPHS`,
+                               before the width check). Verify a new PDF with `gs -sDEVICE=txtwrite` and count U+FFFF;
+                               add any new offender to `GLYPHS`.
+                               (2026-10-21) Lowercase Greek and every sub/superscript LETTER/digit (ᵀ ᵢ ⱼ ₜ ⁰ ⁺ ⁻ ₁ ₂) are missing too,
+                               as are DataFrames' `⋮ ⋱ ⋯ ┼` — measured by exporting a test notebook. Σ ² ¹ · × → • … are fine.
+                               `--fontsize scriptsize` (186 chars) is for notebooks wider than footnotesize's 165;
+                               9j's score tables are 177, so its PDF needs it.
                                ⚠ It FAILS if the widest line exceeds what the page can hold, instead of
                                silently emitting a wrapped table. Run it on the EXECUTED copy, never on the
                                plain in-tree notebook (it exits if there are no outputs).
   <N>j_*.ipynb               Numbered notebook entry points:
-                               1j data explore · 2j duration · 3j effective degree · 4j Danon [legacy] ·
+                               1j data explore (+ ENGLAND data availability, variant mix and its sample sizes,
+                                 2026-10-21; `RUN_DATA_CONVERSION = false` skips the one-off CSV/Arrow/df_dds cells;
+                                 exports `res/1j_variant_share_weekly_england.csv`, Monday weeks, two series: `ukhsa` =
+                                 ONS SGTF → UKHSA at 2021-01-04, `genomes_failed_removed` = COG-UK throughout — only the
+                                 COG-UK shares are DRAWN; `res/1j_positive_by_variant_age_england{,_log}.png/.csv` = ONS CIS
+                                 age prevalence × CIS-bin population × the England-wide COG-UK share, NOT age-specific) · 2j duration · 3j effective degree · 4j Danon [legacy] ·
                                5j group contacts · 6j fitting dist · 7j weekly age-pair · 8j forecast fitting ·
-                               9j forecast diagnostics/scoring · 10j model diagnostics (§1–§6 + §7 Stage-1 GP
+                               9j forecast diagnostics/scoring (+ §V, 2026-10-21: the ONE fitting section — Stage-2 of
+                                 the variant-specific renewal for all six models, h1–4 and h0; `FIT_VARIANT=false` skips;
+                                 asserts a V=1 log-joint/forecast identity first; `res/9j_variant_{sets,gamma}.*`) · 10j model diagnostics (§1–§6 + §7 Stage-1 GP
                                  hyperparameters vs prior) · 11j weekly identifiability + shrinkage ·
                                12j Stage-1 NUTS chain convergence (one origin × both degree models) ·
                                13j model diagnostics, h=1 ONLY — a variant of 10j for generations fitted at a single
@@ -542,6 +617,68 @@ src/
                                  ⚠ Reported cases are infections × **ascertainment**, which falls off a cliff at the
                                  end of free testing (1 Apr 2022): 0.229 → 0.314 → 0.109 → 0.041 by half-year. The
                                  CoMix origin span sits entirely LEFT of it. Never read the gap as model error.
+                                 §6c (cont.) (2026-10-16) — the ANTIBODY observation `estimates_age_ab.csv` was also fitted
+                                 to: `inc2prev/data-processed/ab_age.csv` (ONS "COVID-19 antibody data for the UK") drawn
+                                 AS PUBLISHED — 9 native ONS bands 16-24…80+, Monday–Sunday weeks, NOT rebinned
+                                 (`ons_antibody_age`, `make_ons_antibody_age_fig` → `res/14j_ons_antibody_age.*`). It is
+                                 47 stacked vintages: a vintage's last row is often a PARTIAL week (asserted away), and
+                                 2023-01-18 is present twice (identical; conflicts asserted). One line per VINTAGE.
+                                 ⚠ **FROM VINTAGE 2022-06-29 THE FILE'S `standard` ROWS ARE THE 800 ng/ml SERIES**,
+                                 mislabelled by `update_ab.R` (`head(n = 1)` of the age tables, `standard` pattern `""`).
+                                 So `read_ab()`'s latest-vintage view — what a REFIT would read — is 800 ng/ml under the
+                                 179 label, and comparing thresholds ACROSS vintages inverts them. The existing
+                                 `estimates_age_ab.csv` is unaffected: `ons_antibody_fit_vintage` derives that it read
+                                 2021-12-23 (its `est_ab` ends at that vintage's last window), a genuine 179 release.
+                                 The notebook asserts the newest `standard` is still closer to 800 than to 179.
+                                 ⚠ No ONS antibody band below 16: the fit's 2-10/11-15 `gen_dab` borrows 16-24's params.
+                                 Then `estimates_age_ab.csv`'s modelled antibody PREVALENCE (not a titre) against it:
+                                 `i2p_gen_dab` (daily `gen_dab`, 90% band) vs ONS rebinned to CIS bins exactly as
+                                 `read_ab()` does (`ons_antibody_to_cis`), in-sample (fit vintage) and out-of-sample
+                                 (last genuine-179 vintage past the fit's data) → `res/14j_antibody_model_vs_ons.*`.
+                                 ⚠ Use `gen_dab`, NEVER `dab` — `dab`'s age labels are wrong for grouped fits.
+                                 ⚠ `gen_dab` has no dates; `i2p_gen_dab` ASSERTS every fit group shares the
+                                 `t_index` map. Which cut-off a vintage measures is CLASSIFIED from its values
+                                 (`ons_antibody_vintage_threshold`, → `14j_antibody_vintage_threshold.csv`).
+                               16j ANTIBODY around ONE origin (2026-10-16) — 10j's window (2021-05-09; 4 lag + 8 fit +
+                                 4 forecast weeks): the weekly `A_a(t)` the framework builds from `estimates_age_ab.csv`
+                                 (`load_window_data` → `wd.antibody`/`antibody_fc`, read EXPLICITLY, not via `_EST_PATH`)
+                                 over daily `gen_dab` and the ONS observation the fit read (`16j_viz_utils.jl`, reusing
+                                 14j's `ons_antibody_*`/`i2p_gen_dab`). Pure CSV reader; outputs `res/16j_*`.
+                                 ⚠ `weekly_antibody` averages `gen_dab`'s posterior MEAN — right-skewed in the child bins,
+                                 so `A` sits ~3 pp above the median there. Asserts `wd.antibody` reproduces the weekly mean
+                                 of `gen_dab` EXACTLY. ⚠ Inert today (`A ≡ 0`, `F = 1`): it audits what re-enabling `F`
+                                 would feed. Forecast-week `A` is the REALISED t₀+h value, not a forecast.
+                                 RIGHT axis (`twinx`): observed weekly infections (`estimates_age.csv`) over all 16 weeks
+                                 and 10j's four models' forecast fans at the targets, read from 9j's ASSEMBLY CACHE via
+                                 15j's `load_9j_assembly` (never `assemble_or_load_forecasts`, which fits on miss). The
+                                 incidence and antibody come from DIFFERENT inc2prev files on purpose; asserts the cache's
+                                 truth == `load_forecast_truth` at the origin. ⚠ `load_9j_assembly`'s STALE warning there
+                                 is an mtime false alarm — a submodule checkout touches `estimates_age.csv` unchanged.
+                                 Plus each model's IN-SAMPLE calibration over the fit weeks (dashed ◇), from 10j's
+                                 read-only `fit_window_infection_draws` on the h=1 artefacts (needs one CoMix read for the
+                                 h=1 degree window; asserts every artefact exists first). Different quantity from the
+                                 forecast band — fitted MEAN with observed lags, no noise — exactly as 10j §1.
+                                 §2: the same incidence (left axis) against the England SGTF share (Alpha proxy) and its
+                                 S-positive complement (≈ Delta from late Apr 2021), from `dt_ons_variant/` + `cis_variants.csv`,
+                                 with ONS's Alpha → Delta period boundary (2021-05-18). ⚠ ENGLAND-LEVEL, the same curve in
+                                 every age panel. S-positive passes 50% on 2021-05-23 — inside the h=2 target week.
+                                 Kinks in the daily curve are release (vintage) seams.
+                                 §3: EVERY variant category's share, stacked, over the whole CoMix forecast span
+                                 (2020-10-18 → 2022-01-29; `ons_variant_mix`, `_VARIANT_OF`). Categories are gene patterns
+                                 under ONS's period names; the two "S-positive …" catch-alls are named for what they hold.
+                                 ⚠ ONS FROZE its modelled variant tables 18 Jul – 30 Oct 2021 ("99% … Delta") — a real
+                                 gap, shaded and quoted, never interpolated (each contiguous run is stacked separately).
+                                 ⚠ The Jan-2021 "other" class (S-positive + too-low lumped) must STAY in the denominator
+                                 on its days; dropping it once read Alpha as 100%.
+                               17j FROZEN vs CONDITIONAL (2026-10-17) — scores the frozen-contact forecast fitted in 8j §2b
+                                 (`two_stage_forecast(…; frozen = true)`: ONE h0 Stage-1 chain + ONE Stage-2 fit per origin,
+                                 C* and antibody frozen at t₀) like 9j, and compares it with 9j's conditional cache (READ
+                                 ONLY). The null model's ratio is the noise floor (same C* in both schemes). Outputs `res/17j_*`.
+                                 §6 (2026-10-21) — SIX SCENARIOS per contact model (the 5 contact combos): no contact ·
+                                 contact · contact frozen · variant · variant + contact · variant + contact frozen, the
+                                 variant ones from 9j §V's `-variant` artefacts, assembled into their OWN caches behind an
+                                 artefact-exists guard. Outputs `res/17j_scenarios_*`. Check (8) asserts the existing
+                                 series re-score to §2's frames exactly.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 
@@ -614,13 +751,52 @@ inc2prev/                    Git submodule (github.com/epiforecasts/inc2prev). S
 dt_ukhsa/                    UKHSA dashboard reported COVID-19 cases for England — 14j §6c/§6d ONLY; nothing is
                                fitted to them. Three COMMITTED CSVs (national daily counts, 5-year-band daily 7-day
                                rates, England single-year populations) + `fetch_ukhsa_cases.py`, which built them.
-                               ⚠ That script is the ONLY thing in this repo that touches the network, and it is
-                               Python because the API serves paginated JSON only (`?format=csv` 404s, the bulk
+                               ⚠ The `fetch_*.py` scripts in `dt_ukhsa/`, `dt_ons_variant/` and `dt_cog_uk/` are the
+                               ONLY things in this repo that touch the network. This one is Python because the API serves paginated JSON only (`?format=csv` 404s, the bulk
                                endpoint is 403) while `Project.toml` carries no HTTP/JSON package — adding one
                                would change `Manifest.toml` and force an HPC image rebuild. It re-runs its four
                                self-tests on every invocation, including against an unchanged cache.
                                ⚠ The single-year populations are emitted here because `inc2prev/data-raw/uk_pop.xls`
                                is a legacy OLE2 `.xls` that **XLSX.jl cannot read** at all.
+                               `fetch_ukhsa_lineage.py` (2026-10-21, 1j) → `ukhsa_lineage_percent_weekly.csv`: lineage %
+                               of SEQUENCED cases, England, MONDAY weeks, 2021-01-04 … 2024-05-06. ⚠ Assigned with
+                               today's classifier (not real-time; e.g. BA.1 1.22% in Oct 2021 is misassignment); "Other"
+                               absorbs failed sequences; the API publishes NO denominator (see `dt_cog_uk/`).
+dt_cog_uk/                   COG-UK England genome counts per Monday week by constellation group (`scorpio_call`, never
+                               Pango prefixes — aliases break those) — 1j (the sample size behind the UKHSA lineage %)
+                               and, since 2026-10-21, the `VariantNGM` renewal (`variant_data.jl`, 9j §V / 17j §6). `fetch_cog_uk_counts.py` aggregates the ~165 MB public `cog_metadata.csv.gz`
+                               (not kept) into the committed `cog_uk_england_weekly.csv`. Its shares reproduce UKHSA's to a
+                               median 0.00–0.18 pp (self-test 3, reported), which is the evidence it IS that denominator.
+dt_ons_variant/              ONS CIS England S-GENE-TARGET-FAILURE (variant-compatible) positivity for the releases
+                               inc2prev never parsed — 16j §2 ONLY. `fetch_ons_variant.py` (Python, as `dt_ukhsa/`)
+                               reads the 2021 England workbooks' table 6c (releases 2021-01-08 … 04-16) and the technical
+                               workbooks' table 1c (04-23 … 05-14) into the COMMITTED `ons_variant_england_daily.csv`
+                               (all vintages; workbooks are not kept). Series starts **2020-11-22**; `cis_variants.csv`
+                               starts 2021-04-04. Re-runs its self-tests every invocation (`--cache DIR` for dev only).
+                               ⚠ ons.gov.uk 403s urllib's default User-Agent and 429s rapid requests — the script
+                               pauses and backs off. ⚠ Table titles, header layouts, date formats AND units change
+                               release to release: the scale (fraction vs PERCENT — technical v2–v4 are percent, v1 is
+                               not) is DETECTED per file against `cis.csv` national positivity, never assumed.
+                               ⚠ The Jan-2021 releases have TWO measures, "new variant compatible" and "other" (S-positive
+                               and too-low LUMPED), kept as class `s_pos_or_undetermined` — never guessed apart.
+                               ⚠ Every ONS label is a TaqPath GENE PATTERN: "UK/new/Alpha variant compatible" = SGTF,
+                               "not compatible…"/`delta_variant_compatible` = S-positive (`_GENE_CLASS`, 16j).
+                               ⚠ **`inc2prev/data-processed/cis_variants.csv` releases 2021-06-11 and 2021-06-18 are
+                               100× TOO SMALL** (summed variant positivity / national = 0.0099, 0.0096; every other
+                               release 0.91–1.09). `ons_sgtf_share` scale-tests every release and fixes them
+                               (`scale_fixed`); a within-release SHARE is unaffected, absolute values are not.
+                               ⚠ inc2prev's `cis_variants.csv` repeats ONE frozen table (2021-06-06 … 07-17) in 20
+                               releases 2021-07-23 … 12-10: ONS stopped updating it from 30 Jul 2021 (its own note,
+                               "99% … Delta"). Correct rows, not a scrape bug — but no data for 18 Jul – 30 Oct 2021.
+                               ⚠ No ONS variant split BY AGE exists for 2021 (ONS's 2023 variant-by-age article
+                               defines the variant BY PERIOD: Alpha ≤ 17 May 2021, Delta from 18 May).
+                               `fetch_ons_sample_counts.py` (2026-10-21, 1j) → `ons_cis_england_sample_counts_14day.csv`:
+                               table 1d's UNWEIGHTED England counts per 14-day period (positives, swabbed). ONS gives NO
+                               count by gene pattern (6a is % only, and UK). ⚠ Never sum across periods (ONS's note).
+                               ⚠ "Closed" periods ARE revised (≤1.76% v12→v14), and adjacent releases put the periods
+                               a WEEK OUT OF PHASE (v13 shares none with v12) — the cross-check asserts its overlap.
+                               ⚠ 1d's period format changes (two date cells → one text cell); the table SUBTITLE has a
+                               period's shape, so parsing starts below the "Time period" header.
 inst/                        Spec markdown — 2_weekly_age_pair.md (→7j), 3_preliminary_model_struct.md (→8j+framework),
                                analysis_plan_heavy_tail_mean.md/.docx (overall plan, docx wins), pcbi.1011453.pdf (Munday 2023), media/
                                — read these for task source-of-truth
@@ -684,6 +860,8 @@ The "**four ways**" of the preliminary analysis is the 2×2 grid of the first tw
 
 - **no-interaction** `unweighted-negbin|mean-diagonal` = `NegBinAgePair × DiagonalMeanNGM`. Only `diag(C*)` enters the NGM, so age groups don't infect each other; age-dependent infectivity is pinned to `inf ≡ 1` because a diagonal NGM identifies only the product `susc_a·inf_a`. It **reuses the NegBin Stage-1 chains verbatim** (`8j_s1_*` carry no ngm token) ⇒ no extra Stage-1 fits. This is now `REF_MODEL`, the relative-skill reference in `9j_viz_utils.jl`.
 - **null** `no-contact|null` = `NoContactDegree × NullNGM`. No contact data at all: `C*` is a uniform constant `c̄` = roster-weighted mean *unweighted* contacts per participant-day over the origin's 8 focal fit weeks, ÷ A (`null_contact_level`), held fixed across horizons. Stage 1 is skipped entirely (`stage2_inputs` returns one `null_moment_draws` draw with the full 10 000 Stage-2 samples). Forecasts are **invariant** to `c̄` — it only sets γ_SAR's scale (verified: `c̄`×10 ⇒ γ_SAR ×0.105, R unchanged to 0.3%).
+
+**Variant-specific renewal** (`inst/3` §12, 2026-10-21) is a WRAPPER on Axis 2: `VariantNGM(base)`, label `"<base>-variant"`, so `no-contact|null-variant`, `weighted-hweibull|neighbourhood-variant`, … get their own `8j_s2_*` files while reusing the `8j_s1_*` chains verbatim. It forwards `contact_star` and `fix_infectivity` to `base`. It runs one renewal per COG-UK category chosen at t₀ (`variant_data.jl`), each with its own `log γ_SAR,v ~ N(log 0.1, 1.8²)` (independent, user's choice), while susc/inf/GI/σ_inf/C* are shared. The likelihood is fitted to `p_v·I_a` with the share's binomial variance added; `_transmission_model` dispatches `fit_stage2_pooled` to `model_transmission_variant`, and `two_stage_forecast` to `_two_stage_forecast_variant`. Each variant is propagated with its own median plug and the variants are summed, so scoring stays on total infections. The data ride on the new trailing `WindowData.variant` field (`nothing` by default; the 9-argument constructor is kept). ⚠ A variant pooled file's `gamma_sar` is **N × V** (columns in `pooled.variants` order), plus `variant_members`/`variant_rule`/`variant_share_t0`. Readers that assume a vector (`load_transmission_draws`, 9j `collect_transmission_structure`, 10j, 14j) must never be handed a `-variant` label. The likelihood is vectorised over variants (one γ-free NGM per week): the per-(v, t) form cost 3.7× the single fit, while the vectorised form matches it.
 
 **Two-stage cut inference** (`inst/4_cut_Bayes.md`, 2026-07-12): the former single joint `@model` was split. **Stage 1** `model_degree(dm, ds, pop, cfg)` fits the contact-degree GP alone and returns per-week raw moments `(; K1, K2, G)` — **NGM-independent**, so one fit serves both builders (the builder is applied downstream via `contact_star(nb,…)`). **Stage 2** `model_transmission(Cstar_weeks, wd, w, cfg, nb=MeanNGM())` fits the infection block conditioning on a *fixed* `Cstar_weeks` from one Stage-1 draw (the trailing `nb` is consulted **only** for `fix_infectivity`; the C* functional was already applied upstream). The cut Monte Carlo: `fit_stage1` → `stage1_moment_draws` (100 draws) → `fit_stage2_pooled` (100 Stage-2 draws each) → pool 100×100 = **10 000** infection draws for WIS. `dm`/`nb` remain fixed args. There is **no feedback** from infections to the contact GP, so μ is NGM-independent. `stage2_inputs(dm,…)` is the single fork between this path and the **null** bypass (no Stage 1; one constant-C* draw × 10 000 Stage-2 samples).
 
@@ -750,6 +928,30 @@ Why iid (`-lc0`, user request): the level was whitened through `Lc = chol(Qtᵀ�
   - **The `infections` estimates themselves differ** — the `_ab` file is a joint fit to prevalence *and* antibody data. Measured over 2020-10-01…2022-01-31: **median 8.6% relative difference in the mean, p90 76%**. Populations and the 7 CIS bins are identical; `estimates_age.csv` runs to 2023-01-31 vs 2022-03-26.
   - ⚠ **NOTHING DETECTS THE SWITCH.** `contacts_label` encodes only `constant_contacts`/`stage1_use_nuts`, every skip-check is `isfile`, and `assemble_or_load_forecasts` validates only `origins`/`labels` — and origins are **unchanged**, because `available_forecast_origins` uses a hard-coded `infection_start` plus the contact data. The 1512 `8j_s2_*` and the four `9j_assembly_*`/`9j_rt_*`/`9j_relrt_*`/`9j_obsrt_*` caches had to be **deleted by hand**. **Stage 1 is unaffected** — `model_degree` sees contacts and `pop`, and `pop` is `grid.POP` from `data-processed/populations.csv`, a different file. The 504 `8j_s1_*` chains were kept and reused verbatim.
 - **Turing + Weibull/exp over/underflow**: `κ = exp(log_kappa)` can go non-finite on aggressive Pathfinder/optim steps → `DomainError: Weibull α>0`. Log-parameters (`log_kappa`, `log_k`, `log μ` in `model_degree`; `log_gamma_sar` in `model_transmission`) are soft-**clamped** (`_softclamp`); the mode stays interior so gradients are unaffected. Keep those clamps when editing either model. **`_softclamp` must stay the Inf-safe nested form** `lo + softplus((hi − softplus(hi − x)) − lo)` — the naive `x − softplus(x−hi) + softplus(lo−x)` returns **NaN** at `x=±Inf` (`Inf − Inf`), so when a raw log-latent (`log_kappa`/`log_k`) or the GP field overflows to Inf, `κ=exp(softclamp(Inf))` becomes NaN and the Weibull throws (aborting the whole fit). This bit the **neighbourhood** NGM hardest (its `gamma(1+2/κ)` second moment pushes the optimiser to extremes); see `tasks/lessons.md` 2026-07-11. (`_softcap`, the upper-only sibling, went with the horseshoe's `lam` on 2026-08-02.)
+- **The frozen-contact (h0) artefacts SHARE THE TOKEN with the conditional grid** (2026-10-17). `8j_s1_*_h0` /
+  `8j_s2_*_h0` are fitted on `degree_window(o, FROZEN_H = 0, cfg)` and only the `_h0` suffix tells them apart. Every
+  horizon loop that reads `cfg.horizons` (`prefit_*!` defaults, `audit_stage1_grid`, 9j's guard) ignores them, so
+  reach them by passing `horizons = [FROZEN_H]` explicitly. Never set `cfg.horizons = 0:0` to get them:
+  `WeeklyWindow`, `load_window_data`'s `antibody_fc` and `available_forecast_origins` all read `cfg.horizons`.
+  Audit them SEPARATELY (`audit_stage1_grid(cfg; horizons = [FROZEN_H], audit_csv = …)`): they were fitted with
+  current code and so carry `phi_pf_max`, which the 504 conditional chains lack. The default
+  `prefit_stage1!` fan-out is per origin, so at h0 it is only 2 wide; pass `queue = true` (`_prefit_stage1_queue!`)
+  for ONE work queue over all origins.
+  ⚠ **THE h0 GRID IS COMPLETE (126 s1 + 378 s2, 2026-10-21) BUT NOT ONE-PASS.** 11 of 63 weighted-hurdle-Weibull
+  h0 chains first came out STUCK in a collapsed Pathfinder mode (`c` 120–332 vs ≤ 1.31 healthy, min ESS ≈ 4.5,
+  R̂ ≈ 2.1, depth at cap — and the audit's only divergences). That made 17j's hurdle-Weibull frozen penalty look
+  like 1.1–1.7× when the 52 healthy origins gave 0.99–1.06. Those 11 were REFITTED under the new
+  `stage1_pf_degenerate_z` guard (all mix: min ESS 241–517, 0 divergences) and carry `pf_fallback = true`; the
+  stuck originals, their 22 Stage-2 cells and the stale `17j_assembly_frozen_*` sit in
+  `dt_intermediate_h0_degenerate_20261021/`. The 504 conditional chains predate the guard (`:ABSENT`) and were
+  all healthy, so they were not refitted. Rounds of pooled origins were tried first and dropped: each round waits for its
+  slowest fit, and one 2 h 20 min hurdle-Weibull fit (vs ~30 min typical) idled the threads for 2 h.
+- **A stuck NUTS chain looks finished.** `diag` says `min_ess ≈ 4` and `frac_at_max_depth = 1.0` at the CAP, and
+  nothing else fails: the file exists, the structure audits clean, and 17j scores it. Since 2026-10-17
+  `_pf_mean_init` refuses a Pathfinder mean whose `log_eta`/`log_sigma_c`/`log_rho_*` (or `c` vs `c0`) sits more than
+  `cfg.stage1_pf_degenerate_z = 6` prior SDs out, and restarts from `_stage1_init` wholesale. It fires only when
+  triggered, so non-firing fits are bit-identical. Measured on 126 h0 chains: healthy ≤ 3.4σ, stuck ≥ 9.9σ.
+  Read `min_ess` in `audit_stage1_grid` before trusting any new grid.
 - **The forecast already uses FUTURE contacts.** For horizon `h`, `fit_or_load_stage2` fits Stage 1 on `WeeklyWindow(origin + 7h)` and the forecast NGM is frozen at `Cstar_end[m]` = the **origin+h** contact matrix, while infections/antibody stay at the origin. This is deliberate (the "contact-updated iterate", Munday's design), not a leak to fix — and it is why `inst/6`'s "the no-interaction model is allowed to use the future mean contacts" needed no forecast-path change. The **null** model is the sole exception: its `c̄` is computed from the origin's 8 focal weeks — which every horizon-`h` contact window contains in full under `-w8h` — and reused for every horizon.
 - **Per-model panel figures must derive their layout** (`panel_grid` in `9j_viz_utils.jl`). `plot_ratio` / `plot_ratio_bins` / `plot_lengthscales` were hard-coded `layout = (2, 2)` while there were exactly four models and silently lose panels at six.
 - **scoringutils v2 quantile levels**: keep the `round(q; digits=2)` in `to_quantile_long` — scoringutils matches interval endpoints by **exact Float64 equality**, and one drifted endpoint makes the whole set asymmetric. Measured 2026-07-30 (`verify_scoring.jl`): injecting `0.75 → 0.7500000000000001` drops **`wis`, `overprediction`, `underprediction`, `dispersion`, `ae_median` and *both* coverages** from `score_wis`'s frames — `by_model` comes back as just `["model","scale","bias"]`. The columns are **absent, not NA**, and R emits only *warnings*, so `score_wis` returns normally: a `nrow(sc) > 0` smoke test passes with every metric gone. Assert on the **columns and their values**, never on row count. (Two earlier claims here were wrong: `collect(0.05:0.05:0.95)` does **not** drift — Julia ranges use `TwicePrecision`, 0/19 levels off — the risk comes from constructions like `cumsum(fill(0.05,19))`; and the 90% endpoints do **not** survive.) Correct wiring reproduces nominal coverage: 0.498/0.896 vs 0.50/0.90 over 560 units.

@@ -2,7 +2,7 @@
 
 *Reverse-engineered specification of the model implemented in `src/8j_preliminary_forecast.ipynb`
 and the framework modules it loads (`forecast_utils.jl` → `framework.jl`, `infection_data.jl`,
-`degree_agepair.jl`, `renewal.jl`, `ngm.jl`, `joint_model.jl`, `scoring.jl`). This document
+`degree_agepair.jl`, `renewal.jl`, `ngm.jl`, `joint_model.jl`, `variant_data.jl`, `scoring.jl`). This document
 records the model exactly as coded; it is written to stand on its own as a methods description.*
 
 *It describes the model **as it is**, not how it got here. Superseded variants, reverted
@@ -983,6 +983,24 @@ This produces an $A \times H \times N$ array of posterior-predictive draws, wher
 $N = $ `n_stage1_post` $\times$ `n_stage2_draws` $= 10{,}000$ is the pooled predictive — fed
 directly to WIS (the draw axis is pooling-agnostic to `scoring.jl`).
 
+### 8.1 Frozen-contact (unconditional) variant — 2026-10-17
+
+The iterate above is **conditional on future contacts**: horizon $h$ is fitted on contacts to
+$t_0+h$, its Stage-2 likelihood pairs fit week $k$ with contacts from week $k+h$, and the NGM uses
+$C^\ast(t_0+h)$. Its unconditional counterpart, `two_stage_forecast(…; frozen = true)`, uses:
+
+- **one** Stage-1 chain per (degree, origin), on `degree_window(t₀, FROZEN_H = 0, cfg)`. These are
+  the bare $n_{\text{fit}}$ fit weeks, so $T_n = n_{\text{fit}}$ and there are 261 / 653 latents.
+- **one** Stage-2 pooled fit per (combo, origin), with same-week pairing (`off = 0`).
+- every horizon iterated with $C^\ast(t_0)$ and antibody $A(t_0)$ frozen.
+
+The per-draw GI, the `MersenneTwister(cfg.seed + h)` observation noise, the median lag plug and the
+draw alignment are the same code. **The two schemes therefore differ only in their contacts.**
+
+Artefacts are `8j_s1_*_h0` / `8j_s2_*_h0` (8j §2b), under the same token as the conditional grid.
+Assembly and scoring are in 17j. The null model's $C^\ast$ is the same constant under both schemes,
+so its frozen/conditional WIS ratio is the comparison's Monte-Carlo noise floor.
+
 ---
 
 ## 9. Scoring
@@ -1196,3 +1214,242 @@ interpretation of the fitted transmission parameters.**
 - **NGM lag index.** Munday Eq 1/6 places the NGM *inside* the lag sum,
   $\sum_s w(s)\,N(t-s)\,I(t-s)$ — the NGM at the infector's primary event. This implementation applies
   a single $N(t)$ outside the sum (§3.3). The deviation is unresolved.
+
+---
+
+## 12. Variant-specific renewal (`VariantNGM`) — 2026-10-21
+
+A Stage-2 alternative in which each variant category $v = 1,\dots,V$ has its **own renewal** and its
+**own** $\gamma_{\mathrm{SAR}}$, written $\gamma_v$. Everything else is **shared** across variants:
+$\text{susc}_a$, $\text{inf}_b$, $F$, $\sigma_{\text{inf}}$, the generation interval $w$ and $C^\ast$.
+
+It is a wrapper on the NGM axis, `VariantNGM(base)` (`framework.jl`), labelled `"<base>-variant"`
+(e.g. `weighted-hweibull|neighbourhood-variant`, `no-contact|null-variant`). The wrapper forwards
+`contact_star` and `fix_infectivity` to `base`. So the C\* functional, the diagonal C\* and
+$\text{inf}\equiv1$ of the no-interaction model, and the null model's constant C\* all carry over
+unchanged. Three things follow from the wrapper:
+
+- the label gives the model its own `8j_s2_*` filenames;
+- the `8j_s1_*` chains carry no NGM token, so they are reused verbatim and **Stage 1 is never refitted**;
+- the Stage-2 fit (`_transmission_model` → `model_transmission_variant`) and the forecast
+  (`two_stage_forecast` → `_two_stage_forecast_variant`) are dispatched on the type.
+
+The variant data ride on the trailing `WindowData.variant` field: a `VariantSplit`, attached with
+`with_variants(wd, variant_split(win, cc, cfg))` (`variant_data.jl`). It is `nothing` for every other
+model. It is fitted in **9j §V** and compared in **17j §6**.
+
+### 12.1 Variant categories (chosen once, at the origin $t_0$)
+
+**Data.** COG-UK England genomes per Monday sample-date week, by constellation group (`scorpio_call`):
+"Other", Alpha, Delta, Omicron BA.1, Omicron BA.2, Omicron other (`COG_GROUPS`;
+`dt_cog_uk/cog_uk_england_weekly.csv`, read by `load_cog_variant_counts`). A framework Sunday week
+$s$ is read from the COG-UK week starting $s+1$, i.e. 6 of its 7 days (`cog_week`, the one place
+that rule is written).
+
+**Inclusion.** A named group (anything but "Other") gets its own renewal at an origin when either:
+
+- its genomes over the origin week and the 3 weeks before total $\ge 50$, or
+- its origin-week share is $\ge 1\%$ (`cfg.variant_n_min/_n_weeks/_share_min`).
+
+**Dropping uses hysteresis** (user, 2026-10-21). Once included, a group keeps its own renewal until
+an origin at which its share was below $0.1\%$ (`cfg.variant_drop_share`) in **every one of the
+$n_{\text{fit}}=8$ fit weeks**. After that it re-enters only by passing the inclusion rule again.
+The state machine (`_variant_states`) is scanned over every COG-UK week from the start of the file,
+so the set at $t_0$ depends only on data up to $t_0$.
+
+**Residual.** "Other" and the named groups that are off form a pooled `residual`. It runs the same
+state machine on its pooled counts and starts on. When the residual is off, its members merge into
+the included group with the largest origin-week share. Categories are ordered residual first, then
+in `COG_GROUPS` order. `variant_split` asserts that they partition the COG-UK groups.
+
+The set is fixed at $t_0$ and used for every week of the window and every horizon. **No variant
+data after $t_0$ is used**, neither in the fit nor in the forecast.
+
+Over the 63 origins (`res/9j_variant_sets.csv`), the set changes at these origins:
+
+| From origin | Categories | Why |
+|---|---|---|
+| 2020-10-18 | residual, Alpha | Alpha passes the 4-week $n\ge50$ rule at 0.59% |
+| 2021-04-04 | residual, Alpha, Delta | Delta passes at 1.07% |
+| 2021-09-05 | Alpha, Delta | residual off ⇒ folded into Delta; Alpha kept by hysteresis at 0.03% |
+| 2021-09-26 | residual, Delta | Alpha dropped ⇒ its genomes lift the residual's 4-week count over 50 |
+| 2021-11-21 | Delta, Omicron BA.1 | residual off again; BA.1 included at 0.29% (137 genomes) |
+| 2021-12-05 | residual, Delta, Omicron BA.1 | residual back on |
+| 2021-12-12 | residual, Delta, Omicron BA.1, Omicron other | |
+| 2021-12-26 | residual, Delta, Omicron BA.1, Omicron BA.2, Omicron other | $V = 5$, the grid's maximum |
+
+So $V \in \{2,\dots,5\}$. Alpha keeps its own renewal through 2021-09-19, at shares of 0.02–0.06%
+over Aug–Sep 2021.
+
+### 12.2 Observations: splitting total infections by the variant share
+
+No source gives infections by variant, or variant by age. So the England-wide genome share
+$p_v(t)$ (`VariantSplit.share`, $V\times T$, summing to 1 each week) splits every age bin:
+
+$$
+I_{v,a,t} \;=\; p_v(t)\, I_{a,t}, \qquad t = 1,\dots,T,
+$$
+
+over the window's $T = 12$ weeks (4 lag + 8 fit), all of them at or before $t_0$.
+
+The observation variance has three terms:
+
+$$
+\sigma^2_{v,a,t} \;=\; \big(\sigma_{\text{inf}}\, I_{v,a,t}\big)^2 \;+\; \big(p_v(t)\, s^I_{a,t}\big)^2
+\;+\; I_{a,t}^2\, q_{v,t},
+\qquad
+q_{v,t} = \frac{\tilde p_{v,t}(1-\tilde p_{v,t})}{n(t)},\quad \tilde p_{v,t} = \frac{n_v(t)+\tfrac12}{n(t)+1}.
+$$
+
+The first two are §6's terms, applied to the split series. The process-noise term is multiplicative,
+and the inc2prev SD scales with the share. The third is the share's binomial sampling variance given
+the week's $n(t)$ genomes (`VariantSplit.se2`). It keeps a sub-percent share from a few genomes from
+being trusted like a majority share. Because $\tilde p > 0$, it also keeps $\sigma > 0$ when
+$n_v(t) = 0$.
+
+### 12.3 The variant-specific renewal equation
+
+**γ-free NGM.** `build_ngm` is linear in $\gamma_{\mathrm{SAR}}$. So every variant's NGM is a scalar
+multiple of one shared matrix:
+
+$$
+N_v(t) = \gamma_v\, N_0(t),\qquad
+N_{0,ab}(t) = \text{susc}_a\big(1+(F-1)A_a(t)\big)\, C^\ast_{ab,t}\, \text{inf}_b ,
+$$
+
+which is §3.2's NGM at $\gamma_{\mathrm{SAR}}=1$. $C^\ast_t$ is read at `Cstar_weeks[t − smax + h]`
+exactly as in §6, and $F\equiv1$ (§3.2).
+
+**Renewal per variant.** Each category runs §3.3's recursion on its own infections:
+
+$$
+\hat I_{v}(t) \;=\; \gamma_v\, N_0(t) \sum_{s=1}^{s_{\max}} w_s\, I_{v}(t-s),
+\qquad t = s_{\max}+1,\dots,T .
+$$
+
+As in §6 the fit is **one step ahead**: the lags $I_v(t-s) = p_v(t-s)\,I(t-s)$ are the observed
+split series (§12.2), not model states.
+
+**Likelihood and priors.**
+
+$$
+I_{v,a,t} \sim \mathcal N\!\big(\hat I_{v,a}(t),\ \sigma^2_{v,a,t}\big)\ \ \text{independently over } (v,a,t),
+\qquad
+\log\gamma_v \overset{\text{iid}}{\sim} \mathcal N(\log 0.1,\ 1.8^2),\ \ \text{soft-clamped to } [\log 0.001, \log 10].
+$$
+
+Each $\gamma_v$ has the single-γ prior, independently (user's choice). Every other latent has exactly
+§6's prior, clamp and name. The latent count is therefore $17 + V$ at $A = 7$ ($10 + V$ for the
+no-interaction twin, which samples no $\sigma_i, z_i$), against 18 for `model_transmission`. The
+split series is derived data, not a model argument, so the log-likelihood enters through
+`Turing.@addlogprob!`.
+
+The likelihood is **vectorised over variants**. Per week, $N_0$ is built once, the GI-weighted lag
+sum is formed as one $A\times V$ block, and the $A\times V$ prediction is $(N_0\cdot\text{acc})$ with
+column $v$ scaled by $\gamma_v$. A per-$(v,t)$ `build_ngm` with scalar `Normal`s is mathematically
+identical, but cost 3.7× the single-renewal fit under ReverseDiff. The vectorised form costs about
+the same as the single fit.
+
+**Relation to the single renewal.** Summing over variants gives
+
+$$
+\sum_v \hat I_v(t) \;=\; N_0(t) \sum_{s} w_s \sum_v \gamma_v\, I_v(t-s),
+$$
+
+i.e. §3.3's renewal in which the single $\gamma_{\mathrm{SAR}}$ is replaced, per infector age $b$,
+by the composition-weighted mean
+
+$$
+\bar\gamma_b(t) = \sum_v \gamma_v\, \pi_{v,b}(t),\qquad
+\pi_{v,b}(t) = \frac{\sum_s w_s\, p_v(t-s)\, I_b(t-s)}{\sum_s w_s\, I_b(t-s)} .
+$$
+
+So the total's effective attack rate drifts as the variant mix changes, with no change in contacts.
+That drift is the mechanism the single-γ model lacks. With $\gamma_v \equiv \gamma$ the total
+predictor is exactly `model_transmission`'s. The variant model still differs from the single-γ
+model in that case, because its likelihood is on the split series.
+
+**What identifies the $\gamma_v$.** Every variant shares $N_0$ and $w$, so the data on the **ratio**
+$\gamma_v/\gamma_u$ is the change in the share ratio over one generation. In the age-free case
+($A=1$) the noise-free predictor gives exactly
+
+$$
+\frac{\hat I_v(t)}{\hat I_u(t)} = \frac{\gamma_v}{\gamma_u}\cdot
+\frac{\sum_s w_s\, p_v(t-s)\, I(t-s)}{\sum_s w_s\, p_u(t-s)\, I(t-s)} ,
+$$
+
+and with age structure the same holds when the shares are constant over the $s_{\max}$ lag weeks.
+A category whose share holds steady gets $\gamma_v \approx \gamma_u$; a growing share gets
+$\gamma_v > \gamma_u$. The absolute level is set by total incidence, as for the single γ.
+
+**Reproduction number.** $R_v(t) = \rho(N_v(t)) = \gamma_v\,\rho(N_0(t))$, so
+$R_v/R_u = \gamma_v/\gamma_u$. This is a **multiplicative transmission advantage**, constant over
+the fit window and identical in every age group. Anything a variant does differently (higher
+transmissibility, immune escape, a different GI) is absorbed into that one ratio.
+
+**V = 1 reduction.** With one category ($p \equiv 1$) and $q \equiv 0$, the model is exactly
+`model_transmission`. Note that `variant_split` alone never produces $q \equiv 0$: with $V=1$,
+$\tilde p = (n+\tfrac12)/(n+1) < 1$. 9j §V's tripwire therefore builds the degenerate
+`VariantSplit` by hand, then asserts:
+
+1. the log-joint matches `model_transmission`'s at 20 random points, for an unconstrained builder
+   and for the no-interaction one (to rounding, $<10^{-10}$ relative, because of the vectorisation);
+2. the forecast on a one-column copy of a real pooled file is `isequal` to `two_stage_forecast`'s.
+
+### 12.4 Forecast
+
+`_two_stage_forecast_variant` keeps the §8 machinery: the same pooled loading per horizon, the
+same draw alignment ($m = $ `post_index[d]`, $C^\ast$ = `Cstar_end[m]` at $t_0+h$), antibody at
+$t_0+h$, the per-draw GI $w^{(d)}$, and the `MersenneTwister(cfg.seed + h)` noise. What changes is
+the **state**: one history per category instead of one total.
+
+- **History.** $I_v(t) = p_v(t)\,I(t)$ over the observed window, $t \le t_0$.
+- **One step per horizon and draw.**
+  $$
+  \hat I^{(d)}_v(t_0+h) = \gamma^{(d)}_v\, N^{(d)}_0 \sum_{s=1}^{s_{\max}} w^{(d)}_s\, I_v(t_0+h-s).
+  $$
+- **Forecast draw.** The **total** $\sum_v \hat I^{(d)}_v$, plus the usual noise
+  $\max(\sigma^{(d)}_{\text{inf}} \sum_v \hat I^{(d)}_v,\ 10^{-6})\cdot\varepsilon$. Non-finite totals
+  pass through as in §8.
+- **Lag plug.** Each $I_v(t_0+h)$ is set to the per-age **median over finite draws of its own**
+  noise-free $\hat I_v$. Each variant therefore propagates on its own, and the categories are summed
+  only at the end (user, 2026-10-21).
+
+Because no share after $t_0$ is used, the forecast composition evolves only through the renewal.
+A category with a larger $\gamma_v$ gains share every generation. This is how the model represents
+a takeover that is under way at $t_0$. A variant not yet in the set at $t_0$ cannot appear.
+
+**Scoring is on total infections by age**, as for every other model. The **frozen** scheme (§8.1)
+reuses one $h=0$ variant fit per (combo, origin) at every horizon, with $C^\ast(t_0)$ and $A(t_0)$,
+exactly as the single-renewal path does.
+
+### 12.5 Artefacts
+
+`8j_s2_<degree>_<ngm>-variant_<contacts>_<origin>_h<h>.jld2` exists for h = 1–4 (all six models)
+and h0 (the five contact models). It has the usual pooled keys, with these differences:
+
+- `gamma_sar` is **$N \times V$**, with columns in `variants` order;
+- `variants`, `variant_members`, `variant_rule` and `variant_share_t0` are added.
+
+The inclusion rule is **not in the cache token**; the artefact records it. The forecast asserts
+`pooled.variants` equals the window's categories. ⚠ Readers that assume a scalar γ per draw must
+never be handed a `-variant` label: `load_transmission_draws`, 9j `collect_transmission_structure`,
+10j and 14j. 9j §V's own `collect_variant_gamma` reads the matrix and writes
+`res/9j_variant_gamma.*`, including `frac_at_bound`, the share of draws on a $\gamma_v$ soft-clamp.
+
+### 12.6 Caveats
+
+- **The share is England-wide and not age-specific.** Every age bin gets the same composition.
+- **The GI is shared**, although Omicron's is shorter. Any GI difference is absorbed into $\gamma_v$.
+- **Immune escape is absorbed into $\gamma_v$**, because susceptibility is shared and $F$ is pinned.
+- **A just-included category is thinly identified.** It has 1–3 non-zero fit weeks and a wide
+  independent prior on its own $\gamma_v$. 9j §V reports how often a $\gamma_v$ parks on a
+  soft-clamp bound.
+- **The split observations are not independent.** The $V$ observations of one $(a,t)$ cell share
+  one inc2prev error, and their shares sum to 1, but they enter the likelihood independently. For
+  the total, this treats an error of variance $(s^I_{a,t})^2$ as $\sum_v p_v^2 (s^I_{a,t})^2 \le (s^I_{a,t})^2$.
+- **The forecast's implied total history is not the single-renewal one.** The lag plug is
+  $\sum_v \operatorname{median}(\hat I_v)$, not $\operatorname{median}(\sum_v \hat I_v)$. The two
+  coincide at $V = 1$.
+- **Week alignment.** A framework week is read from the COG-UK week starting one day later, so it
+  covers 6 of the 7 days.

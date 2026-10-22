@@ -2794,3 +2794,52 @@ check, do not delete it**. `scoringutils_semantics_check` is the only thing pinn
 `joint_across` means — the assumption the entire notebook rests on — and it was written against
 `joint_across = "horizon"`. It now runs `joint_across = "age_group"` on a `margin = "age"` group.
 A check is tied to the claim it tests, not to the data it happened to use.
+
+## 2026-10-16 — A label in a scraped file is a claim, not a fact (`ab_age.csv`)
+
+Plotting ONS antibody positivity by age (14j §6c cont.) showed the 800 ng/ml line ABOVE the 179 ng/ml
+one for ages 16-49 — impossible for a stricter cut-off. Two causes, both silent:
+1. The two thresholds' "latest" vintages differ (800: 2022-04-20, 179: 2023-03-29), so `:latest`
+   compares across publications. Within one vintage the order is right (590/621 cells).
+2. From vintage 2022-06-29 the rows labelled `standard` ARE the 800 ng/ml series: single cells drop
+   ~27 pp overnight, `higher` rows stop the same day, and the new series sits 2.9 pp from the old 800
+   series vs 7.7–14.9 pp from the old 179 one. `update_ab.R` selects `head(n = 1)` of the "by age
+   group" tables with a `standard` pattern of `""`, so a reorganised workbook switched tables silently.
+The existing `estimates_age_ab.csv` read 2021-12-23 (derived from its `est_ab` windows) and is
+unaffected; a refit on today's file would not be. Rule: when two series should be ordered, plot them
+from the SAME vintage, and when a value steps between vintages, trace the cell across all of them
+before calling it a revision.
+
+## 2026-10-16 — Units and glyphs are data too (16j §2)
+
+1. **Scale is a property of the FILE, not the source.** ONS CIS variant tables switch between
+   proportions and PERCENT from one release to the next (England workbooks Jan 2021: percent; Feb–Apr:
+   fraction; technical v1 fraction, v2–v4 percent), and inc2prev's own `cis_variants.csv` carries two
+   releases (2021-06-11, 06-18) that are 100× too small. Every reader now DETECTS the scale per
+   release against ONS's national positivity, which is the same survey's own total. A ratio within
+   one release (a variant share) survives a wrong scale; an absolute value does not — so a
+   share-only check would never have caught it.
+2. **Read every vintage-sensitive ratio from ONE release.** Taking SGTF from the latest release and
+   S-positive from another mixes revisions into one number. `ons_sgtf_share` picks, per day, the
+   latest release carrying BOTH classes.
+3. **A PDF can drop meaning without an error.** The export fonts have no glyph for ≥ ≤ ≈ ≡ ⚠ ◇ …;
+   "≤ 21%" printed as " 21%". Check a new PDF's text with `gs -sDEVICE=txtwrite` (count U+FFFF);
+   `export_notebook_pdf.py`'s `GLYPHS` table is the fix.
+
+## 2026-10-17 — A fan-out that barriers per group runs at the speed of its SLOWEST fit
+At h0 one origin has only 2 Stage-1 fits, so `prefit_stage1!`'s per-origin `@sync` runs 2-wide. Pooling
+origins into rounds of 4 still barriered per round: one hurdle-Weibull NUTS fit took 2 h 20 min against
+~30 min for the rest and held 7 of 8 threads idle for two hours. NUTS cost per fit is heavy-tailed, so
+any group barrier is wrong for it — use ONE work queue (`prefit_stage1!(…; queue = true)`), loading
+each origin's data on first use and freeing it after its last fit. Diagnose from artefact mtimes: a
+round's files land in a burst, and a lone late file followed by a new burst is the barrier.
+
+## 2026-10-21 — A NUTS chain that never left its start is "complete" by every check but one
+11 of 63 hurdle-Weibull h0 chains (Tn = 8) were handed a collapsed Pathfinder mean (`c` 120–332, `log_eta`
+down to −55) and NUTS sat there for 3000 iterations: min ESS ≈ 4.5, R̂ ≈ 2.1, every tree at the depth cap.
+File present, structure clean, provenance uniform, Stage 2 fitted, 17j scored it — and the scores read as
+"freezing contacts costs hurdle-Weibull 1.1–1.7×" when the healthy 52 origins said 0.99–1.06. Two rules:
+(1) before reading a comparison, split it by chain health — a gap concentrated in the bad chains is an
+artefact; (2) the start guard must test the WHOLE start, not one coordinate. The φ guard only reset φ. The
+z-score test on the scalar hyperparameters separated stuck (≥ 9.9σ) from healthy (≤ 3.4σ) chains cleanly,
+and restarting from `_stage1_init` fixed all 11 (min ESS 241–517, ~4× faster per fit).

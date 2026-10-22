@@ -114,8 +114,23 @@ rotated date ticks and the long y-labels. Mutates and returns `fig`.
 """
 pad_margins(fig; l = 8Plots.mm, b = 12Plots.mm) = plot!(fig; left_margin = l, bottom_margin = b)
 
-"Secure label margins (`pad_margins`), save `fig` to `path` and display it inline; returns `fig`."
-save_show(fig, path::AbstractString) = (pad_margins(fig); savefig(fig, path); display(fig); fig)
+"""Resolution of the file `save_show` WRITES, in dpi; `nothing` = Plots' default (100). Set it once per
+notebook (`SAVE_DPI[] = 300`) for high-resolution exports. Plots scales the pixel size AND the fonts/lines
+by `dpi/100`, so the layout is unchanged — only sharper. The inline display keeps the default."""
+const SAVE_DPI = Ref{Union{Nothing,Int}}(nothing)
+
+"Secure label margins (`pad_margins`), save `fig` to `path` (at `dpi`, see `SAVE_DPI`) and display it inline; returns `fig`."
+function save_show(fig, path::AbstractString; dpi = SAVE_DPI[])
+    pad_margins(fig)
+    if dpi === nothing
+        savefig(fig, path)
+    else
+        d0 = fig[:dpi]
+        plot!(fig; dpi = dpi); savefig(fig, path); plot!(fig; dpi = d0)   # restore for the inline display
+    end
+    display(fig)
+    return fig
+end
 
 "Relative WIS `wis[h] / wis_ref[h]` aligned to horizons `hz` (NaN where the ref is absent)."
 _relwis(wis, hz, ref_by_h) = wis ./ [get(ref_by_h, h, NaN) for h in hz]

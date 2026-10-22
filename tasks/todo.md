@@ -569,3 +569,33 @@ visualise the **age-stratified** incidence from the same three.
       `--refresh` is cheap; nothing detects staleness, as usual.
 - [ ] Reported cases are published for **England**, matching inc2prev. If the contact side is ever
       put on the same axis, it is **UK** — the mismatch §6c/§6d already flag in every caption.
+
+# 2026-10-17 — Frozen-contact (h0, unconditional) forecast + 17j comparison
+
+Plan: `.claude/plans/currently-the-forecasting-is-enchanted-flame.md`.
+
+- [x] `prefit_stage1!`/`prefit_stage2!`: `horizons` kwarg; `prefit_stage1!` gained `queue` (work queue over all origins; replaced the short-lived `origins_per_round` rounds)
+- [x] `two_stage_forecast(…; frozen)`, `const FROZEN_H = 0`; `assemble_or_load_forecasts(…; frozen)`
+- [x] 8j §2b (h0 fits, `FIT_H0`); `17j_viz_utils.jl` + `17j_frozen_vs_conditional.ipynb`
+- [x] 15j staleness glob excludes `_h0`; `audit_stage1_grid(…; horizons, audit_csv)`
+- [x] 3-origin smoke (8j → 6 s1 + 18 s2 `_h0`, 0 failed), then 17j smoke (all §5 checks pass); regression: conditional path == 9j cache bit-for-bit, frozen h=1 draw rebuilt exactly
+- [x] full local h0 grid: 126 s1 + 378 s2, 0 failed (2026-10-17 12:22 → 10-18 04:03, queue mode)
+- [x] audit h0 set separately → 11/63 hurdle-Weibull chains STUCK in a collapsed Pathfinder mode
+      (c 120–332 vs ≤1.31 healthy, min ESS ≈ 4.5, R̂ ≈ 2.1, depth at cap); 17j's hweibull gap was
+      almost entirely these 11 (good-52 ratio 0.99–1.06 vs 1.7–5.7 on the 11)
+- [x] `stage1_pf_degenerate_z = 6` guard in `_pf_mean_init` → `_stage1_init` start wholesale; keys
+      `pf_degenerate_z`/`pf_fallback`; audit tallies both. Old 33 files + 17j cache moved to
+      `dt_intermediate_h0_degenerate_20261021/`
+- [x] refit the 11 (+22 s2): all `pf_fallback = true`, min ESS 241–517, 0 divergences
+- [x] re-audit h0 (clean: 0 div, min ESS 162, depth ≤ 9), re-run 17j (all §5 checks pass)
+
+## 2026-10-21 Variant-specific renewal (VariantNGM) — 9j §V fit, 17j §6 six scenarios
+- [x] `variant_data.jl` (COG-UK counts, inclusion rule at t₀, `VariantSplit`, `with_variants`)
+- [x] `VariantNGM` wrapper (framework.jl), `contact_star` forward (ngm.jl), `WindowData.variant`
+- [x] `model_transmission_variant` (vectorised split likelihood), pooled `gamma_sar` N×V, `_two_stage_forecast_variant`
+- [x] scratch: rule reproduces the threshold table; V=1 log-joint identity (rel 4e-16) and forecast identity (exact)
+- [x] 9j §V cells (variant set CSV, tripwire, Stage-1 guard, prefit h1–4 + h0, γ_v diagnostic)
+- [x] 17j §6 cells + `17j_viz_utils.jl` scenario helpers
+- [x] HYSTERESIS drop rule (user): dropped only when all 8 fit weeks < 0.1%; sets change at 8 of 63 origins (Aug–Nov 2021)
+- [ ] 9j full run: 1827 `8j_s2_*-variant_*` artefacts — STOPPED by user at 50 (2020-10-18/25; sets identical under the new rule)
+- [ ] 17j full run: §6 checks pass; view figures
