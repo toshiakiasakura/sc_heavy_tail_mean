@@ -561,8 +561,9 @@ Contact df columns: `:part_id` (= `part_wave_uid`), `:cont_id`, `:date`,
 `:cnt_household`, `:phys_contact` (∈ {1, 2}), `:duration_multi` (∈ {1..5}).
 
 Participant df columns: `:part_id`, `:hh_id`, `:part_age` (age-group string),
-`:part_gender`, `:date`, `:wave`, plus the 9 `multiple_contacts_*` columns
-listed in `_MC_COLS_UK` (normalised to `Union{Missing, String}`).
+`:part_gender`, `:date`, `:wave`, `:area_3_name` (ITL1 region, `String`; see
+`england_only`), plus the 9 `multiple_contacts_*` columns listed in
+`_MC_COLS_UK` (normalised to `Union{Missing, String}`).
 """
 function read_comix_uk_raw_contacts_and_part()
 	df = read_arrow_df("../dt_comix_no_public/contacts_uk.arrow";
@@ -572,7 +573,7 @@ function read_comix_uk_raw_contacts_and_part()
 			:cnt_phys, :cnt_minutes_max, :cnt_total_time, :cnt_mass])
 	df_part = read_arrow_df("../dt_comix_no_public/part_uk.arrow";
 		cols = vcat([:part_wave_uid, :hhld_wave_uid,
-				:part_age_group, :part_gender_nb, :date, :wave],
+				:part_age_group, :part_gender_nb, :date, :wave, :area_3_name],
 			_MC_COLS_UK))
 
 	df = @select(df,
@@ -594,6 +595,7 @@ function read_comix_uk_raw_contacts_and_part()
 		:part_age = :part_age_group,
 		:part_gender = :part_gender_nb,
 		:date, :wave,
+		:area_3_name = String.(:area_3_name),   # dictionary-encoded in the arrow file
 	)
 	for c in _MC_COLS_UK
 		df_part_out[!, c] = _mc_to_str.(df_part[!, c])
@@ -792,6 +794,35 @@ function read_comix_uk_contact_raw()
     standardise_cnt_home_values!(df)
     rename_part_id_to_uid!(df, df_part)
     return (df, df_part)
+end
+
+# ITL1 regions of `part_uk.arrow`'s `area_3_name` (0 missing). England is the other nine.
+const NON_ENGLAND = ("Scotland", "Wales", "Northern Ireland")
+const ENGLAND_REGIONS = ("East Midlands", "East of England", "Greater London", "North East",
+                         "North West", "South East", "South West", "West Midlands",
+                         "Yorkshire and The Humber")
+
+"""
+    england_only(df_part) -> DataFrame
+
+The ENGLAND participant-days of a CoMix-UK participant table (one carrying `:area_3_name`), so that
+the contact side matches the England-only outcome (ONS CIS) and variant data (COG-UK England).
+Filtered PER ROW, not per person: 650 `part_uid`s report from different nations in different waves.
+
+Contacts need no filter of their own — every consumer inner-joins contacts onto the participant
+roster, so a participant-day's contacts and its zero-contact days drop together.
+
+⚠ Uses `area_3_name`, never `area_3_code`: the code is inconsistent (164 non-English rows carry
+code 1 = North East). ⚠ Asserts the region set is EXACTLY the 12 ITL1 names, so a renamed or newly
+null region fails loudly instead of silently leaking a nation into, or out of, "England".
+"""
+function england_only(df_part::AbstractDataFrame)
+    @assert hasproperty(df_part, :area_3_name) "england_only: participant table has no :area_3_name"
+    regs = Set(df_part.area_3_name)
+    @assert regs ⊆ union(Set(ENGLAND_REGIONS), Set(NON_ENGLAND)) "england_only: unexpected region(s) $(setdiff(regs, union(Set(ENGLAND_REGIONS), Set(NON_ENGLAND))))"
+    out = df_part[in(ENGLAND_REGIONS).(df_part.area_3_name), :]
+    @assert Set(out.area_3_name) ⊆ Set(ENGLAND_REGIONS)
+    return out
 end
 
 """

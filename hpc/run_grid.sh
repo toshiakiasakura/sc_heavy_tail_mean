@@ -5,6 +5,7 @@
 #
 #     0  did work, more remains for this slice  → relaunch in a FRESH process
 #    10  nothing pending for this PHASE         → this task's slice is complete
+#     3  s2 only: origins blocked on Stage 1    → stop (s1 not finished for this slice)
 #  else  crash (OOM, fit error)                 → stop, do not power through
 #
 # The relaunch is not decoration. A single process fitting origins back-to-back grows ~1.08 GiB per
@@ -14,27 +15,33 @@
 # the parallelism (each task owns a disjoint ORIGIN_OFFSET/ORIGIN_STRIDE slice) — the two are
 # independent and both are needed.
 #
-# Everything else — PHASE, the slice, concurrency, the token-defining STAGE1_USE_NUTS — arrives as
-# environment from the .slurm file, so this script is identical for Stage 1 and Stage 2.
+# Everything else — PHASE, SCENARIOS, the slice, concurrency, the token-defining STAGE1_USE_NUTS —
+# arrives as environment from the .slurm file, so this script is identical for Stage 1 and Stage 2.
+#
+# REPO (default /workdir, the container bind mount) is the checkout whose src/ is run. Override it
+# only to exercise this loop from another checkout, e.g. a git worktree:
+#   REPO=/worktrees/<name> PHASE=s1 ORIGIN_MIN=… FIT_END=… sh /worktrees/<name>/hpc/run_grid.sh
 #
 # /bin/sh on purpose: the docx invokes `/bin/sh -c` and the image's shell is not guaranteed to be
 # bash. No bashisms below.
 
 set -u
 
-echo "run_grid.sh: host $(hostname) | PHASE=${PHASE:-?} | slice ${ORIGIN_OFFSET:-0}/${ORIGIN_STRIDE:-1}"
+REPO="${REPO:-/workdir}"
+
+echo "run_grid.sh: host $(hostname) | PHASE=${PHASE:-?} | SCENARIOS=${SCENARIOS:-<all>} | slice ${ORIGIN_OFFSET:-0}/${ORIGIN_STRIDE:-1} | repo ${REPO}"
 echo "run_grid.sh: JULIA_DEPOT_PATH=${JULIA_DEPOT_PATH:-<unset>}"
 echo "run_grid.sh: JULIA_NUM_THREADS=${JULIA_NUM_THREADS:-<unset>}"
 
 # Relative paths in the framework assume cwd == src/ (the driver also cd's itself; this makes the
 # assumption visible from the outside).
-cd /workdir/src || exit 1
+cd "${REPO}/src" || exit 1
 
 pass=0
 while : ; do
     pass=$((pass + 1))
     echo "run_grid.sh: === pass ${pass} ==============================================="
-    julia --project=/workdir /workdir/src/8j_run_grid.jl
+    julia --project="${REPO}" "${REPO}/src/8j_run_grid.jl"
     rc=$?
     case "$rc" in
         0)  echo "run_grid.sh: pass ${pass} did work, more remains — fresh process"

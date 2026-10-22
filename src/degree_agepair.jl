@@ -68,12 +68,14 @@ end
     load_raw_contact_inputs(; arrow_path=_ARROW_PATH)
 
 Read the CoMix-UK participant roster and contact table **once** (the two full reads
-`prepare_degree_data` would otherwise repeat per window). Returns `(; df_part, craw)`
+`prepare_degree_data` would otherwise repeat per window). The roster is ENGLAND ONLY
+(`england_only`: 234 320 of 276 482 participant-days); `craw` stays UK-wide because every
+consumer inner-joins it onto the roster. Returns `(; df_part, craw)`
 to pass straight into `prepare_degree_data(...; df_part_raw=…, craw_raw=…)`. Also
 exposes the contact date span via `extrema(skipmissing(craw.date))`.
 """
 function load_raw_contact_inputs(; arrow_path::AbstractString = _ARROW_PATH)
-    _, df_part = read_comix_uk_contact_raw()
+    df_part = england_only(read_comix_uk_contact_raw()[2])   # England only; contacts follow by join
     craw = read_arrow_df(arrow_path;
         cols = [:part_wave_uid, :date, :cnt_home, :cnt_minutes_max, :cnt_total_time,
                 :cnt_mass, :cnt_age_est_min, :cnt_age_est_max])
@@ -82,15 +84,16 @@ end
 
 """
     available_forecast_origins(cfg; grid=cis_age_grid(), craw=nothing,
-                               infection_start=Date(2020,8,2), step_weeks=1,
+                               infection_start=Date(2020,8,17), step_weeks=1,
                                origin_max=nothing)
 
-Rolling Sunday-start forecast origins the current data support. Lower bound: the
-12-week fit/lag window (`origin−11wk … origin`) must lie within the INFECTION series
-(`infection_start` = first full inc2prev week) — the infection window is still
-`n_fit + smax` weeks even though the CONTACT window is only `n_fit` (`-w8`,
-2026-08-09: `prepare_degree_data` spans `win.fit_weeks`, so contacts are needed
-only back to `origin − n_fit + 1 + min(horizons)`, a weaker bound that never binds).
+Rolling MONDAY-start forecast origins the current data support. Lower bound: the
+12-week fit/lag window (`origin−11wk … origin`) must lie within the OUTCOME series
+(`infection_start` = first FULL Monday week of ONS CIS by age, `cis_age.csv`, whose first day
+is Fri 2020-08-14) ⇒ first origin **2020-11-02**. The infection window is still
+`n_fit + smax` weeks even though the CONTACT window is only `n_fit + h` (`-w8h`), a
+weaker bound that never binds. `weekly_cis_positives` asserts 7 days in every cell, so an
+earlier start fails loudly rather than averaging a part-week.
 Upper bound: the contact-updated iterate needs contact data out to
 `origin + max horizon` weeks, so the last origin is
 `last_contact_week − max(horizons)`. `craw` is the raw contact table
@@ -98,22 +101,18 @@ Upper bound: the contact-updated iterate needs contact data out to
 
 `origin_max` caps the last origin at `week_start(origin_max)` (`nothing` = data-derived
 bound only). The data-derived bound alone is **too generous** and callers should cap it:
-CoMix's main panel stops 2022-03-02, but a stray 2022-11-16…2022-11-28 block drags
-`last_contact_week` — and hence `tmax` — out to 2022-10-30, so origins from ~2022-03-06
-roll through a window with no contact data. inc2prev is a second, uncaught limit:
-`estimates_age.csv`'s `infections` end 2023-01-31 (the `_ab` variant used until 2026-09-16
-ended 2022-03-26, and carries no `gen_dab` at all now — see `infection_data.jl`), and
-`weekly_infections`/`weekly_antibody` skip unmatched weeks into pre-zeroed arrays, so later
-origins are silently zero-filled rather than erroring. 8j/9j pass `origin_max=Date(2021,12,31)`
-(⇒ last origin 2021-12-26), which is well inside both.
+CoMix's main panel stops Wed 2022-03-02, but a stray 2022-11-16…2022-11-28 block drags
+`last_contact_week` — and hence `tmax` — out to late 2022, so later origins roll through a
+window with no contact data. 8j/9j pass `origin_max = Date(2022, 1, 24)` (⇒ 65 origins,
+2020-11-02 … 2022-01-24): the last origin whose h=4 contact week (2022-02-21) is complete.
 
-⚠ `infection_start` is a HARD-CODED default, not read from the estimates file, so switching
-between inc2prev variants does NOT move the origin grid — which is exactly why the 9j assembly
+⚠ `infection_start` is a HARD-CODED default, not read from the outcome file, so switching
+outcome source does NOT move the origin grid — which is exactly why the 9j assembly
 cache (validated on `origins`/`labels` alone) cannot notice such a switch.
 """
 function available_forecast_origins(cfg::FrameworkConfig; grid = cis_age_grid(),
                                     craw = nothing,
-                                    infection_start::Date = Date(2020, 8, 2),
+                                    infection_start::Date = Date(2020, 8, 17),
                                     step_weeks::Int = 1,
                                     origin_max::Union{Nothing,Date} = nothing)
     craw === nothing && (craw = load_raw_contact_inputs().craw)
@@ -194,7 +193,7 @@ function prepare_degree_data(win::WeeklyWindow, cfg::FrameworkConfig;
     assign_bin(a, b) = assign_age_bin(a, b, grid, rng)
 
     # participant-day roster with a drawn participant bin (reuse cached read if given)
-    df_part = df_part_raw === nothing ? read_comix_uk_contact_raw()[2] : df_part_raw
+    df_part = df_part_raw === nothing ? england_only(read_comix_uk_contact_raw()[2]) : df_part_raw
     df_part = @subset(df_part, (:date .>= dmin) .& (:date .<= dmax))
     piv = parse_age_interval.(df_part.part_age)
     df_part[!, :part_bin] = [assign_bin(a, b) for (a, b) in piv]

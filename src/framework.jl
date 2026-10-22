@@ -69,17 +69,19 @@ is_variant(::NGMBuilder)        = false
 is_variant(::VariantNGM)        = true
 
 ##########################################################################
-# inc2prev-aligned weekly grid (Sunday-start, anchor 2021-03-21)
+# MONDAY-start weekly grid, anchor 2021-03-22 (2026-10-22, user request: matches the COG-UK genome
+# weeks and ONS's Mon–Sun weeks exactly). It was Sunday-start (anchor 2021-03-21, inc2prev's) until
+# then; the Sunday-grid artefacts are a different generation (`CONTACTS_TOKEN_SUN`).
 ##########################################################################
-const WEEK_ANCHOR = Date(2021, 3, 21)
+const WEEK_ANCHOR = Date(2021, 3, 22)
 week_index(d::Date) = fld((d - WEEK_ANCHOR).value, 7)
-week_start(d::Date) = WEEK_ANCHOR + Day(week_index(d) * 7)  # Sunday of the week
-week_mid(d::Date)   = week_start(d) + Day(3)                # Wednesday label
+week_start(d::Date) = WEEK_ANCHOR + Day(week_index(d) * 7)  # Monday of the week
+week_mid(d::Date)   = week_start(d) + Day(3)                # Thursday label
 
 """
     WeeklyWindow(origin; n_fit=8, smax=4, horizons=1:4)
 
-A single forecast window. `origin` is snapped to its Sunday-start week and becomes
+A single forecast window. `origin` is snapped to its Monday-start week and becomes
 the last fitting week. `fit_weeks` are the `n_fit` weeks ending at `origin`;
 `lag_weeks` are the `smax` weeks of renewal history immediately before them;
 `all_weeks = lag_weeks ++ fit_weeks` (chronological). `forecast_weeks` are the
@@ -638,9 +640,16 @@ artefacts keep their own token and remain readable.
 to reject the pre-`-m32` squared-exponential chains, which are parametrically identical to current
 ones and so invisible to any name-based check. That test now fails on the current token, which
 carries no `-m32`. Both were rewritten against `is_legacy_token` below — read its docstring before
-adding a third."""
+adding a third.
+
+⚠ **`-eng` (2026-10-22, user request) is a DATA generation, not a model change**: England-only
+CoMix (`england_only`), the ONS CIS outcome (`weekly_cis_positives`) and the Monday grid
+(`WEEK_ANCHOR`). Model, parameter names and dimensions are all UNCHANGED, so the token is the only
+evidence — the reason it was bumped rather than left to the directory. (Monday origins could not
+collide with the Sunday filenames anyway; the token makes the provenance explicit.) The UK /
+inc2prev / Sunday grid is `CONTACTS_TOKEN_SUN`."""
 contacts_label(cfg::FrameworkConfig) =
-    (cfg.constant_contacts ? "pooled" : "temporal") * "-w8h-lc0" *
+    (cfg.constant_contacts ? "pooled" : "temporal") * "-w8h-lc0-eng" *
     (cfg.stage1_use_nuts ? "-nuts" : "")
 
 """
@@ -744,6 +753,13 @@ const CONTACTS_TOKEN_AR1 = "temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1"
 matching the rest of the framework's `cwd == src/` convention."""
 const CONTACTS_SAVE_DIR_AR1 = joinpath(@__DIR__, "..", "dt_intermediate_ar1")
 
+"""The UK-contact / inc2prev-outcome / SUNDAY-grid NUTS generation — `dt_intermediate/` in the main
+checkout (504 `8j_s1_*` + 1512 `8j_s2_*`, plus the h0 and `-variant` sets), origins 2020-10-18 …
+2021-12-26. A LITERAL: since `-eng` no `cfg` reproduces it, and its chains sit on Sunday week starts
+that the current `WEEK_ANCHOR` cannot even name as origins (`week_start` snaps them to the Monday
+before). Read-only use only; never refit under it."""
+const CONTACTS_TOKEN_SUN = "temporal-w8h-lc0-nuts"
+
 ##########################################################################
 # Age grid — CIS "age_school" bins from inc2prev populations (England).
 # Matches src/7j_weekly_age_pair.ipynb §2 exactly.
@@ -817,8 +833,8 @@ end
 """Variant composition of one window (`variant_split`, variant_data.jl; inst/3 §12).
 
 `names` (V) — the categories given their own renewal at `origin`, residual first; `members[v]` — the
-COG-UK groups pooled into category `v`. Over `weeks` (= the window's `all_weeks`, Sunday weeks, each
-read from the COG-UK Monday week starting the next day): `share` (V × T) the England-wide genome share,
+COG-UK groups pooled into category `v`. Over `weeks` (= the window's `all_weeks`, Monday weeks, each
+read from the SAME COG-UK Monday week): `share` (V × T) the England-wide genome share,
 `n` (T) genomes sequenced, `se2` (V × T) the binomial sampling variance `p̃(1−p̃)/n` with
 `p̃ = (n_v+½)/(n+1)`. `rule = (; n_min, n_weeks, share_min)` and `origin` record how the set was chosen."""
 struct VariantSplit

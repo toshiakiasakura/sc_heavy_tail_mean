@@ -55,13 +55,13 @@ const _AB_SEGMENTS = ("lag", "fit", "forecast")
     antibody_window_frame(win, wd, obs; grid) -> DataFrame
 
 One row per (CIS bin, window week) over `win.all_weeks ++ win.forecast_weeks`:
-`segment ∈ _AB_SEGMENTS`, `week` (Sunday start), `week_mid`, `A_framework` (proportion, from `wd`)
+`segment ∈ _AB_SEGMENTS`, `week` (Monday start), `week_mid`, `A_framework` (proportion, from `wd`)
 and the matched ONS observation (`ons_value`/`ons_lo`/`ons_hi`, `ons_start_date`; `NaN`/`missing`
 where none) from `obs` (`ons_antibody_to_cis`).
 
-⚠ **THE TWO CALENDARS DIFFER BY ONE DAY.** ONS weeks run Monday–Sunday; the framework's run
-Sunday–Saturday (`WEEK_ANCHOR`). An ONS week is matched to the framework week containing its
-Thursday mid-date, i.e. the one starting the Sunday BEFORE its Monday — 6 of 7 days shared. Asserted
+ONS weeks run Monday–Sunday, and so do the framework's since 2026-10-22 (`WEEK_ANCHOR`), so an ONS
+week is matched to the framework week containing its Thursday mid-date — the SAME week, all 7 days.
+(On the old Sunday grid this was the week starting the day before, 6 of 7 days shared.) Asserted
 one-to-one, so a calendar change cannot silently pair two ONS weeks with one framework week.
 """
 function antibody_window_frame(win::WeeklyWindow, wd, obs::DataFrame; grid = cis_age_grid())
@@ -71,7 +71,7 @@ function antibody_window_frame(win::WeeklyWindow, wd, obs::DataFrame; grid = cis
     for (k, r) in enumerate(eachrow(obs))
         key = (r.bin, week_start(r.date_mid))
         @assert !haskey(onsix, key) "antibody_window_frame: two ONS weeks map to framework week \
-            $(key[2]) in bin $(key[1]) — the Mon–Sun ↔ Sun–Sat matching is no longer one-to-one"
+            $(key[2]) in bin $(key[1]) — the ONS ↔ framework week matching is no longer one-to-one"
         onsix[key] = k
     end
     seg = vcat(fill("lag", length(win.lag_weeks)), fill("fit", length(win.fit_weeks)),
@@ -116,9 +116,10 @@ end
     incidence_window_frame(win, wd, truth; grid) -> DataFrame (bin, bin_label, segment, week,
                                                                week_mid, observed)
 
-Observed weekly infections over the whole window: `wd.I_mean` over `win.all_weeks` (lag + fit) and
-`truth` (`load_forecast_truth`, `A × H`) at the forecast targets. `wd` must come from the SAME
-inc2prev file the forecasts were fitted to (`_EST_PATH`), not the `_ab` one the antibody uses.
+The observed OUTCOME over the whole window — ONS CIS positives × pop (`weekly_cis_positives`):
+`wd.I_mean` over `win.all_weeks` (lag + fit) and `truth` (`load_forecast_truth`, `A × H`) at the
+forecast targets. Both come from the same `_cis_frame()`, so they are the series the forecasts were
+fitted to and scored against.
 """
 function incidence_window_frame(win::WeeklyWindow, wd, truth::AbstractMatrix; grid = cis_age_grid())
     @assert wd.weeks == win.all_weeks "incidence_window_frame: `wd` was not built from `win`"
@@ -246,7 +247,7 @@ One panel per CIS bin (layout from `panel_grid`), x = the window's weeks only. B
 the three `WeeklyWindow` segments (renewal lag · fit · forecast); a dashed line marks where the
 forecast starts (the end of origin week t₀). Per panel:
 
-- **`A_a(t)` the framework builds** — one square per week at its Wednesday `week_mid`, joined;
+- **`A_a(t)` the framework builds** — one square per week at its Thursday `week_mid`, joined;
 - **`gen_dab`** — daily median and pointwise 90% band (daily quantiles, nothing averaged), plus the
   daily MEAN dashed. ⚠ `weekly_antibody` averages the posterior **mean** column, and the child-bin
   posteriors are right-skewed, so there the squares sit ~3 pp ABOVE the median — on the dashed line,
@@ -297,7 +298,7 @@ function make_antibody_window_fig(fr::DataFrame, gd::DataFrame, win::WeeklyWindo
         yl = (max(0.0, ylo - pad), min(100.0, yhi + 2.2pad))   # extra top room for the legend
         pnl = plot(; title = haso ? "age $(grid.LAB[b])" : "age $(grid.LAB[b]) — NO ONS data (<16)",
                      titlefontsize = 8, xrotation = 60, xtickfontsize = 5,
-                     xlabel = (b > np - nc) ? "week (Sun start)" : "",
+                     xlabel = (b > np - nc) ? "week (Mon start)" : "",
                      ylabel = (mod1(b, nc) == 1) ? "antibody positive (%)" : "",
                      legend = false)
         # Date series FIRST (a leading numeric overlay collapses the Date axis), bands after.
@@ -416,7 +417,7 @@ function make_variant_incidence_fig(inc_obs::DataFrame, inc_fc, inc_cal, var::Da
     panels = Any[]
     for b in 1:np
         pnl = plot(; title = "age $(grid.LAB[b])", titlefontsize = 8, xrotation = 60, xtickfontsize = 5,
-                     xlabel = (b > np - nc) ? "week (Sun start)" : "",
+                     xlabel = (b > np - nc) ? "week (Mon start)" : "",
                      ylabel = (mod1(b, nc) == 1) ? "infections / week" : "", legend = false)
         # Date series FIRST (a leading numeric overlay collapses the Date axis), then bands/lines.
         ymax = _incidence_overlay!(pnl, b, inc_obs, inc_fc, inc_cal, fc_labels, fc_cols)

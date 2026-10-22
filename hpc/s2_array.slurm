@@ -6,23 +6,27 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32gb
-#SBATCH --time=6:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/s2_%A_%a.log
 #
 # Stage 2 of the 8j grid: 100 Pathfinder fits of the 18-dimension transmission model per cell,
-# 6 combos × 4 horizons = 24 cells per origin, conditioning on the Stage-1 draws.
+# conditioning on the Stage-1 draws. With the default SCENARIOS (config.sh) an origin is 59 cells:
+# 6 combos × h1–4 (conditional) + 6 × h0 (frozen) + 6 VariantNGM combos × h1–4 (variant) + the 5
+# contact VariantNGM combos × h0 (variant + frozen).
 #
 # ⚠ RUN ONLY AFTER STAGE 1 IS COMPLETE. The driver holds back any origin whose Stage-1 chains are
 #   missing and names it in the log — because `stage2_inputs` would otherwise fall through to
 #   `fit_or_load_stage1`, which fits SERIALLY and does not error (CLAUDE.md's silent-refit trap).
 #   Under an array that also means the holding-back task would fit chains another task owns.
-# ⚠ ORIGIN_MIN/FIT_END/STAGE1_USE_NUTS must be IDENTICAL to the Stage-1 run — they select the
+# ⚠ ORIGIN_MIN/FIT_END/STAGE1_USE_NUTS/SCENARIOS must be IDENTICAL to the Stage-1 run — they select the
 #   generation. config.sh is shared precisely so they cannot drift.
 # ⚠ Same array rules as Stage 1: start at 0, contiguous, submit from $PROJECT_DIR with logs/ present.
 #
 # SIZING (measured, CLAUDE.md): ~0.2 min per pooled cell with the ReverseDiff Stage-2 backend at
-# max_concurrent=9 ⇒ the whole 1512-cell grid is ~5 h in one process; 16 tasks finish inside an
-# hour. 1 GiB per concurrent fit is generous, so 32 GB covers 16-way concurrency.
+# max_concurrent=9 (a variant cell costs about the same — its likelihood is vectorised over
+# variants) ⇒ the 3835-cell grid is ~13 h in one process; over 16 tasks ~1 h each plus per-origin
+# data loading. --time=12:00:00 leaves wide margin. 1 GiB per concurrent fit is generous, so 32 GB
+# covers 16-way concurrency.
 
 set -euo pipefail
 
@@ -70,6 +74,7 @@ echo "project    : ${PROJECT_DIR}"
 echo "depot      : ${DEPOT_HOST}"
 echo "slice      : ${SLURM_ARRAY_TASK_ID:-0}/${TASK_COUNT}"
 echo "sampler    : STAGE1_USE_NUTS=${STAGE1_USE_NUTS} (token selector), Stage 2 always Pathfinder"
+echo "scenarios  : ${SCENARIOS}"
 [ -f "${IMAGE}" ] || { echo "FATAL: image not found: ${IMAGE}" >&2; exit 1; }
 
 if ! command -v module >/dev/null 2>&1 && [ -f /etc/profile.d/modules.sh ]; then
@@ -86,6 +91,7 @@ singularity exec --bind "${PROJECT_DIR}:/workdir" \
     --env ORIGIN_STRIDE="${TASK_COUNT}" \
     --env ORIGIN_OFFSET="${SLURM_ARRAY_TASK_ID:-0}" \
     --env FIT_END="${FIT_END}" \
+    --env SCENARIOS="${SCENARIOS}" \
     ${ORIGIN_MIN:+--env ORIGIN_MIN="${ORIGIN_MIN}"} \
     --env S2_CONCURRENCY="${CPUS}" \
     --env MAX_ORIGINS="${MAX_ORIGINS}" \

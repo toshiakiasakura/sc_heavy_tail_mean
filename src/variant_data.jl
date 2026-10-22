@@ -5,8 +5,9 @@
 # MONDAY sample-date week by constellation group. No source gives infections by variant OR by age, so the
 # England-wide genome share is applied to every age bin (`I_v,a(t) = p_v(t)·I_a(t)`).
 #
-# ⚠ WEEK ALIGNMENT: a framework week is Sunday-start; it is read from the COG-UK Monday week starting the
-#   NEXT day (6 of its 7 days). `cog_week` is the one place that rule is written down.
+# ⚠ WEEK ALIGNMENT: framework weeks are MONDAY-start since 2026-10-22, so a framework week IS a COG-UK
+#   week (all 7 days). Until then they were Sunday-start and read the COG-UK week starting the next day
+#   (6 of 7 days). `cog_week` is the one place that rule is written down.
 # ⚠ The set of categories is chosen ONCE, at the origin (`variant_set`), and is used for every horizon and
 #   every week of the window: no variant data after t₀ enters a fit or a forecast (user, 2026-10-21).
 # ⚠ HYSTERESIS (user, 2026-10-21): inclusion by the 4-week-n / origin-share rule, exit only after all
@@ -41,10 +42,12 @@ function load_cog_variant_counts(path::AbstractString = COG_VARIANT_PATH)
     return (; weeks, groups = copy(COG_GROUPS), n)
 end
 
-"""`cog_week(d)` — the COG-UK Monday week a framework (Sunday-start) week `d` is read from: `d + 1 day`."""
+"""`cog_week(d)` — the COG-UK Monday week a framework (Monday-start) week `d` is read from: `d` itself.
+Kept as a function, and asserting, so a grid that drifts off Mondays fails here rather than reading the
+wrong week."""
 function cog_week(d::Date)
-    @assert dayofweek(d) == 7 "cog_week: $d is not a Sunday week start"
-    return d + Day(1)
+    @assert dayofweek(d) == 1 "cog_week: $d is not a Monday week start"
+    return d
 end
 
 _cog_row(cc, d::Date) = begin
@@ -99,7 +102,7 @@ end
 """
     variant_set(cc, origin, rule) -> (; names, members, n_window, share0)
 
-The categories at forecast origin `origin` (a Sunday week start), from `_variant_states`: every named
+The categories at forecast origin `origin` (a Monday week start), from `_variant_states`: every named
 COG-UK group whose state is ON gets its own renewal (inclusion: 4-week genomes ≥ `n_min` OR origin-week
 share ≥ `share_min`; drop, with HYSTERESIS, only after `drop_weeks` = `n_fit` fit weeks all below
 `drop_share`). "Other" + the groups that are off pool into `VARIANT_RESIDUAL`, which keeps its own

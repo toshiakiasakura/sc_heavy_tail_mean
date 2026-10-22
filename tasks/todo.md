@@ -599,3 +599,18 @@ Plan: `.claude/plans/currently-the-forecasting-is-enchanted-flame.md`.
 - [x] HYSTERESIS drop rule (user): dropped only when all 8 fit weeks < 0.1%; sets change at 8 of 63 origins (Aug–Nov 2021)
 - [ ] 9j full run: 1827 `8j_s2_*-variant_*` artefacts — STOPPED by user at 50 (2020-10-18/25; sets identical under the new rule)
 - [ ] 17j full run: §6 checks pass; view figures
+
+# 2026-10-22 — `refactor` branch: England CoMix, ONS CIS outcome, Monday weeks, all-scenario HPC run
+
+Plan: `.claude/plans/indexed-knitting-castle.md` (main checkout). Worktree `/worktrees/refactor`.
+
+- [x] data-source audit → `inst/7_data_sources.md`
+- [x] England-only roster (`england_only`, `area_3_name`) in `load_raw_contact_inputs` + `prepare_degree_data` fallback
+- [x] outcome = weekly mean CIS positivity × pop (`weekly_cis_positives`; `cis_weekly_positivity` moved from 14j)
+- [x] Monday grid (`WEEK_ANCHOR = 2021-03-22`, `inc2prev_week_anchor`, `cog_week` identity, 14j/16j docs)
+- [x] origins 2020-11-02 … 2022-01-24 (`infection_start = 2020-08-17`, `FIT_END` defaults), single origins +1 day
+- [x] token `temporal-w8h-lc0-eng` (+`-nuts`); `CONTACTS_TOKEN_SUN` literal for the old grid
+- [x] `8j_run_grid.jl` `SCENARIOS` (conditional, frozen, variant ⇒ 10 s1 + 59 s2 per origin); hpc/ scripts + README
+- [x] spot checks (grid, roster, 65 origins, CIS coverage, variant sets)
+- [ ] full 65-origin grid on the HPC (650 s1 NUTS + 3835 s2) — not started
+- [ ] then 9j/17j on the new grid; prose in 9j–17j that quotes 63-origin numbers is stale until re-run

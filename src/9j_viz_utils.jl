@@ -499,7 +499,7 @@ end
 """
     weekly_national_R(; region) -> Dict{Date,Float64}
 
-Weekly inc2prev national R keyed by `week_start` (Sunday grid key): the daily `national_R`
+Weekly inc2prev national R keyed by `week_start` (Monday grid key): the daily `national_R`
 median averaged over each week. Used by `plot_wis_vs_rt` to look up the Rt at a forecast
 target week. Reuses `national_R` (no second CSV path).
 """

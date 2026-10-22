@@ -4,12 +4,13 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,ARRAY_TASKS
 #SBATCH --mail-user=lsh2200567@lshtm.ac.uk
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64gb
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=80gb
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/s1_%A_%a.log
 #
-# Stage 1 of the 8j grid: the contact-degree GP, NUTS, 2 degree models × 4 horizons per origin.
+# Stage 1 of the 8j grid: the contact-degree GP, NUTS, 2 degree models × (h1–4 + the frozen h0) =
+# 10 chains per origin with the default SCENARIOS (config.sh).
 #
 # ⚠ #SBATCH lines are parsed BEFORE the script runs, so they cannot read hpc/config.sh. Change the
 #   array size / resources / mail address HERE (or override on the command line:
@@ -19,10 +20,11 @@
 # ⚠ Submit FROM $PROJECT_DIR with logs/ already created: --output cannot create its directory, and
 #   a missing one fails the task instantly with nothing written anywhere.
 #
-# SIZING (measured, CLAUDE.md): a Stage-1 NUTS fit takes 1692/2509/2806/3027 s at h=1..4, and an
-# origin is 8 such fits. --cpus-per-task=8 lets one origin's 8 fits run concurrently ⇒ ~1 h per
-# origin, bounded by the slowest. 63 origins over 16 tasks = 4 origins each ⇒ ~5 h, comfortably
-# inside 24 h. Memory: ~4 GiB per concurrent NUTS fit × 8 + the shared data ⇒ 64 GB.
+# SIZING (measured, CLAUDE.md): a Stage-1 NUTS fit takes 1692/2509/2806/3027 s at h=1..4 and
+# typically ~30 min at h0 (one h0 hurdle-Weibull fit took 2 h 20 min), and an origin is 10 such
+# fits, run in ONE fan-out. --cpus-per-task=10 lets all 10 run concurrently ⇒ ~1 h per origin,
+# bounded by the slowest. 65 origins over 16 tasks = 4–5 origins each ⇒ ~5–6 h (worst case ~10 h),
+# inside 24 h. Memory: ~4 GiB per concurrent NUTS fit × 10 + the shared data ⇒ 80 GB.
 
 set -euo pipefail
 
@@ -83,6 +85,7 @@ echo "project    : ${PROJECT_DIR}"
 echo "depot      : ${DEPOT_HOST}"
 echo "slice      : ${SLURM_ARRAY_TASK_ID:-0}/${TASK_COUNT}"
 echo "sampler    : STAGE1_USE_NUTS=${STAGE1_USE_NUTS}, AD_BACKEND=${AD_BACKEND}"
+echo "scenarios  : ${SCENARIOS}"
 [ -f "${IMAGE}" ] || { echo "FATAL: image not found: ${IMAGE}" >&2; exit 1; }
 
 # `module` is a shell function inherited from the submitting login shell (sbatch exports the
@@ -107,6 +110,7 @@ singularity exec --bind "${PROJECT_DIR}:/workdir" \
     --env ORIGIN_STRIDE="${TASK_COUNT}" \
     --env ORIGIN_OFFSET="${SLURM_ARRAY_TASK_ID:-0}" \
     --env FIT_END="${FIT_END}" \
+    --env SCENARIOS="${SCENARIOS}" \
     ${ORIGIN_MIN:+--env ORIGIN_MIN="${ORIGIN_MIN}"} \
     --env S1_CONCURRENCY="${CPUS}" \
     --env MAX_ORIGINS="${MAX_ORIGINS}" \

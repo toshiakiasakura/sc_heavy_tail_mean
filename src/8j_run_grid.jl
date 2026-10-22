@@ -1,10 +1,23 @@
 # 8j_run_grid.jl — headless, BOUNDED-BATCH, resumable driver for the 8j two-stage grid.
 #
-# Mirrors cells 2/4/5/7 of `8j_preliminary_forecast.ipynb`: same `FrameworkConfig`, same six
-# `combos`, same `build_origin_data`, same `prefit_stage1!`/`prefit_stage2!` calls. The one thing it
-# adds is the reason it exists — it processes a BOUNDED batch of origins and then EXITS, so a
-# supervisor (`tmp/run_grid_batched.sh` locally, `hpc/run_grid.sh` inside the Slurm/Singularity
-# job) can restart it in a FRESH PROCESS.
+# Mirrors cells 2/4/5/7/8 of `8j_preliminary_forecast.ipynb` and cell 27 of
+# `9j_forecast_diagnostics.ipynb`: same `FrameworkConfig`, same six `combos`, same data providers,
+# same `prefit_stage1!`/`prefit_stage2!` calls. Since 2026-10-22 ONE run fits EVERY scenario 17j §6
+# scores — the conditional grid, the frozen-contact h0 grid and the variant-specific renewal — so
+# a single HPC submission (s1 array, then s2 array) produces the whole set. The one thing it adds
+# is the reason it exists — it processes a BOUNDED batch of origins and then EXITS, so a
+# supervisor (`hpc/run_grid.sh`, locally or inside the Slurm/Singularity job) can restart it in a
+# FRESH PROCESS.
+#
+# FIT SETS (`SCENARIOS`, default all three), per origin:
+#   Stage 1  2 degree models × horizons 1:4 (conditional, variant)  +  × h0 (frozen)    = 10
+#   Stage 2  6 combos × 1:4 (conditional)                                              = 24
+#            6 combos × h0 (frozen)                                                    =  6
+#            6 VariantNGM combos × 1:4 (variant)                                       = 24
+#            5 contact VariantNGM combos × h0 (variant AND frozen)                     =  5
+# ⇒ 10 + 59 per origin; 650 + 3835 over the 65-origin grid. Stage 1 fits h1–4 and h0 in ONE
+# fan-out per origin (one `prefit_stage1!` call over `S1_HORIZONS`), so the two h0 chains never run
+# 2-wide on their own — the barrier problem `queue = true` was written for in 8j §2b.
 #
 # WHY. Measured 2026-08-07 (tasks/lessons.md §"The 63-origin grid OOMs a single process") and again
 # 2026-08-08: a single process fitting origins back-to-back grows ~1.08 GiB PER ORIGIN — the
@@ -25,11 +38,13 @@
 # EXIT CODES — the supervisor's protocol:
 #    0  did work, more remains          → relaunch in a fresh process
 #   10  nothing pending for this PHASE  → phase complete
+#    3  PHASE=s2 but every remaining origin is blocked on missing Stage-1 chains → stop (a failure)
 #  else crash (OOM, fit error)          → supervisor stops rather than powering through
 #
 # ENVIRONMENT (all optional):
 #   PHASE=s1|s2       which stage to advance                        (default s1)
-#   STAGE1_USE_NUTS   Stage-1 sampler                               (default "false" ⇒ PATHFINDER)
+#   SCENARIOS         comma list ⊆ conditional,frozen,variant       (default all three)
+#   STAGE1_USE_NUTS   Stage-1 sampler                               (default "true" ⇒ NUTS)
 #   AD_BACKEND        Stage-1 AD backend                            (default mooncake)
 #   MAX_ORIGINS       origins per PROCESS — the memory bound        (default 8)
 #   CHUNK             origins per prefit! call — memory checkpoint   (default 4)
@@ -45,11 +60,9 @@
 # concurrently and race each other's writes. Round-robin rather than contiguous blocks because
 # origins differ in cost and interleaving averages that out across tasks.
 #
-# ⚠ STAGE1_USE_NUTS DEFAULTS TO "false" HERE, INVERTING THE NOTEBOOK'S DEFAULT — on purpose. This
-# driver exists to finish the PATHFINDER generation already on disk (token ends `-ar1`, no `-nuts`).
-# 8j defaults to `true` because a fitting notebook should default to the generation it is about to
-# produce; this driver defaults to the generation it is about to RESUME. Getting it wrong does not
-# error — it starts a new generation and refits 504 chains from scratch.
+# STAGE1_USE_NUTS defaults to "true", as in 8j. (It defaulted to "false" until 2026-10-22, to RESUME
+# the Pathfinder `-ar1` generation; nothing is left to resume.) It is in the cache token, so getting
+# it wrong does not error — it starts a different generation and refits from scratch.
 #
 #   julia --project=/workdir /workdir/src/8j_run_grid.jl
 
@@ -63,7 +76,7 @@ say(args...) = (println("[", Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS"), "
                 flush(stdout); flush(stderr))
 
 # ───────────────────────────────────────────────────────────── config (notebook cells 2 and 4)
-STAGE1_USE_NUTS = get(ENV, "STAGE1_USE_NUTS", "false") == "true"
+STAGE1_USE_NUTS = get(ENV, "STAGE1_USE_NUTS", "true") == "true"
 AD_BACKEND      = Symbol(get(ENV, "AD_BACKEND", "mooncake"))
 PHASE           = get(ENV, "PHASE", "s1")
 MAX_ORIGINS     = parse(Int,     get(ENV, "MAX_ORIGINS",  "8"))
@@ -71,13 +84,29 @@ CHUNK           = parse(Int,     get(ENV, "CHUNK",        "4"))
 MEM_FLOOR       = parse(Float64, get(ENV, "MEM_FLOOR_GIB", "8.0"))
 PHASE in ("s1", "s2") || error("PHASE must be \"s1\" or \"s2\", got $(repr(PHASE))")
 
+const KNOWN_SCENARIOS = ("conditional", "frozen", "variant")
+SCENARIOS = Set(String.(strip.(split(get(ENV, "SCENARIOS", join(KNOWN_SCENARIOS, ",")), ","; keepempty = false))))
+isempty(SCENARIOS) && error("SCENARIOS selected nothing")
+for sc in SCENARIOS
+    sc in KNOWN_SCENARIOS || error("unknown scenario $(repr(sc)) in SCENARIOS — known: $(join(KNOWN_SCENARIOS, ", "))")
+end
+
 cfg  = FrameworkConfig(constant_contacts = false, stage1_use_nuts = STAGE1_USE_NUTS,
                        ad_backend = AD_BACKEND)
 grid = cis_age_grid()
 
-FIT_END = Date(get(ENV, "FIT_END", "2021-12-31"))
-raw = load_raw_contact_inputs()
-inf = load_raw_infection_inputs()            # (; df, tmap) — read estimates_age.csv once
+FIT_END = Date(get(ENV, "FIT_END", "2022-01-24"))   # ⇒ 65 Monday origins, 2020-11-02 … 2022-01-24
+raw = load_raw_contact_inputs()              # England-only roster (`england_only`)
+inf = load_raw_infection_inputs()            # (; df, tmap, cis) — antibody CSV + ONS CIS outcome, once
+# COG-UK variant composition — the variant sets need it, and it is an UNTRACKED file, so a cluster
+# copy of the repo lacks it unless it was uploaded alongside `dt_comix_no_public/`.
+cog = if "variant" in SCENARIOS
+    isfile(COG_VARIANT_PATH) || error("SCENARIOS includes \"variant\" but $(COG_VARIANT_PATH) is missing — " *
+                                      "upload dt_cog_uk/ with the repo (hpc/README.md)")
+    load_cog_variant_counts()
+else
+    nothing
+end
 FORECAST_ORIGINS = available_forecast_origins(cfg; grid = grid, craw = raw.craw,
                                               origin_max = FIT_END)
 haskey(ENV, "ORIGIN_MIN") && filter!(>=(Date(ENV["ORIGIN_MIN"])), FORECAST_ORIGINS)
@@ -97,11 +126,15 @@ ORIGIN_STRIDE >= 1 || error("ORIGIN_STRIDE must be >= 1, got $ORIGIN_STRIDE")
 wins = wins[(ORIGIN_OFFSET + 1):ORIGIN_STRIDE:end]
 @assert !isempty(wins) "slice $ORIGIN_OFFSET/$ORIGIN_STRIDE selected no origins"
 
-# ───────────────────────────────────────────────────────────── combos (notebook cell 5)
+# ───────────────────────────────────────────────────────────── combos (notebook cell 5, 9j cell 24)
 combos = vcat([(dm, nb) for dm in (NegBinAgePair(), HurdleWeibullAgePair())
                         for nb in (MeanNGM(), NeighbourhoodDegreeNGM())],
               [(NegBinAgePair(),   DiagonalMeanNGM()),      # no-interaction (inst/6)
                (NoContactDegree(), NullNGM())])             # null (inst/6)
+# The variant models wrap every combo (the wrapper forwards `contact_star`/`fix_infectivity`); the
+# frozen scheme needs C*, so its variant set drops the null model — exactly 9j §V.
+vcombos         = [(dm, VariantNGM(nb)) for (dm, nb) in combos]
+vcombos_contact = filter(c -> needs_stage1(c[1]), vcombos)
 
 # Stage 1 fans out whole (degree × horizon) FITS; Stage 2 fans out 100 fits of an 18-dimension
 # transmission model within one cell, so 1 GiB/fit is generous there and the CPU cap should bind.
@@ -112,13 +145,32 @@ S2_CONCURRENCY = parse(Int, get(ENV, "S2_CONCURRENCY", string(fit_concurrency())
 const SAVE_DIR = "../dt_intermediate"
 const TAG      = contacts_label(cfg)
 const DMS      = filter(needs_stage1, unique(first.(combos)))   # the NULL model has no Stage 1
-const N_S1     = length(DMS) * length(cfg.horizons)             # per origin: 2 × 4 = 8
-const N_S2     = length(combos) * length(cfg.horizons)          # per origin: 6 × 4 = 24
 
-s1_missing(w) = count(!isfile, [stage1_path(dm, w.origin, h; contacts = TAG, save_dir = SAVE_DIR)
-                                for dm in DMS, h in cfg.horizons])
-s2_missing(w) = count(!isfile, [stage2_path(dm, nb, w.origin, h; contacts = TAG, save_dir = SAVE_DIR)
-                                for (dm, nb) in combos, h in cfg.horizons])
+# ── FIT SETS ─────────────────────────────────────────────────────────────────────────────────────
+# Stage 1 serves BOTH h1–4 scenarios (conditional, variant) from the same chains, and the h0 ones
+# from the frozen chains, so its horizons are a union. Stage 2 is one set per scenario cell type.
+# Each set carries its own `horizons`, because a data provider's `apd_by_h` must be ALIGNED to the
+# horizons of the call it serves (`prefit_stage1!`'s docstring) — the h0 window is not `cfg.horizons`.
+const S1_HORIZONS = vcat(("conditional" in SCENARIOS || "variant" in SCENARIOS) ? collect(cfg.horizons) : Int[],
+                         "frozen" in SCENARIOS ? [FROZEN_H] : Int[])
+const S2_SETS = filter(st -> st.on, [
+    (name = "conditional",    combos = combos,          horizons = collect(cfg.horizons), variant = false,
+     on = "conditional" in SCENARIOS),
+    (name = "frozen",         combos = combos,          horizons = [FROZEN_H],            variant = false,
+     on = "frozen" in SCENARIOS),
+    (name = "variant",        combos = vcombos,         horizons = collect(cfg.horizons), variant = true,
+     on = "variant" in SCENARIOS),
+    (name = "variant-frozen", combos = vcombos_contact, horizons = [FROZEN_H],            variant = true,
+     on = "variant" in SCENARIOS && "frozen" in SCENARIOS)])
+
+s1_paths(w) = [stage1_path(dm, w.origin, h; contacts = TAG, save_dir = SAVE_DIR)
+               for dm in DMS, h in S1_HORIZONS]
+s2_paths(w, st) = [stage2_path(dm, nb, w.origin, h; contacts = TAG, save_dir = SAVE_DIR)
+                   for (dm, nb) in st.combos, h in st.horizons]
+s1_missing(w) = count(!isfile, s1_paths(w))
+s2_missing(w) = sum(st -> count(!isfile, s2_paths(w, st)), S2_SETS)
+const N_S1 = length(DMS) * length(S1_HORIZONS)                                  # 10 with all scenarios
+const N_S2 = sum(st -> length(st.combos) * length(st.horizons), S2_SETS)        # 59 with all scenarios
 
 say("8j_run_grid | PHASE=", PHASE, " | pid ", getpid(), " | threads ", Threads.nthreads())
 say("  sampler     : Stage 1 ", cfg.stage1_use_nuts ? "NUTS" : "Pathfinder", ", Stage 2 Pathfinder")
@@ -132,9 +184,15 @@ say("  slice       : ", ORIGIN_OFFSET, "/", ORIGIN_STRIDE, " ⇒ ", length(wins)
     join(string.(getfield.(wins, :origin)), ", "))
 say("  concurrency : s1 = ", S1_CONCURRENCY, ", s2 = ", S2_CONCURRENCY,
     " | batch = ", MAX_ORIGINS, " origins, chunk = ", CHUNK, ", mem floor = ", MEM_FLOOR, " GiB")
+say("  scenarios   : ", join(sort(collect(SCENARIOS)), ", "), " | s1 horizons ", S1_HORIZONS)
 say("  grid now    : s1 ", sum(w -> N_S1 - s1_missing(w), wins), "/", N_S1 * length(wins),
     ", s2 ", sum(w -> N_S2 - s2_missing(w), wins), "/", N_S2 * length(wins),
     " | MemAvailable ", round(_mem_available_gib(); digits = 1), " GiB")
+for st in S2_SETS   # per-set scope, so the preflight shows exactly what this run will produce
+    n = length(st.combos) * length(st.horizons) * length(wins)
+    say("    s2 ", rpad(st.name, 15), ": ", n - sum(w -> count(!isfile, s2_paths(w, st)), wins), "/", n,
+        "  (", length(st.combos), " models × h ", st.horizons, ")")
+end
 
 # ───────────────────────────────────────────────────────────── pick this process's batch
 pending = if PHASE == "s1"
@@ -153,6 +211,14 @@ else
 end
 
 if isempty(pending)
+    # s2 with origins held back is NOT complete: report it as a failure (exit 3), so `run_grid.sh`
+    # stops and Slurm marks the task FAILED, rather than an s2 job submitted before Stage 1 finished
+    # "completing" with nothing fitted.
+    if PHASE == "s2" && any(w -> s2_missing(w) > 0, wins) && get(ENV, "DRY_RUN", "0") != "1"
+        say("*** nothing READY for PHASE=s2, but ", count(w -> s2_missing(w) > 0, wins),
+            " origin(s) still need Stage 2 and are blocked on Stage 1 — run/finish s1 first")
+        exit(3)
+    end
     say("nothing pending for PHASE=", PHASE, " — phase complete")
     exit(10)
 end
@@ -172,16 +238,19 @@ if get(ENV, "DRY_RUN", "0") == "1"
     exit(10)
 end
 
-# ───────────────────────────────────────────────────────────── data provider (notebook cell 7)
-# One origin's datasets: window infection/antibody + the 4 contact/degree windows. Pure and
-# deterministic given the shared read-only `inf`/`raw` reads. `oi` is unused — `prefit_*!` pass it
-# as the index into the vector they were given, and nothing here depends on position.
-build_origin_data(oi, win_o) = (
-    load_window_data(win_o, inf.df, inf.tmap; grid = grid),                     # reuse the single CSV read
-    [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
-                         grid = grid, setting = :all,
-                         df_part_raw = raw.df_part, craw_raw = raw.craw)        # reuse the single Arrow read
-     for h in cfg.horizons])
+# ───────────────────────────────────────────────────────────── data providers (8j cells 7/8, 9j cell 27)
+# One origin's datasets: window infection/antibody (+ the origin's `VariantSplit` for the variant
+# sets) and one contact/degree window PER ENTRY of `horizons` — aligned to the horizons of the call
+# the provider serves. Pure and deterministic given the shared read-only `inf`/`raw`/`cog` reads.
+# `oi` is unused — `prefit_*!` pass it as the index into the vector they were given.
+make_provider(horizons; variant::Bool = false) = (oi, win_o) -> begin
+    wd = load_window_data(win_o, inf.df, inf.tmap; grid = grid)                  # reuse the single CSV reads
+    variant && (wd = with_variants(wd, variant_split(win_o, cog, cfg)))          # categories fixed at t₀
+    (wd, [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
+                              grid = grid, setting = :all,
+                              df_part_raw = raw.df_part, craw_raw = raw.craw)    # reuse the single Arrow read
+          for h in horizons])
+end
 
 # ───────────────────────────────────────────────────────────── run, chunk by chunk
 # Sub-chunking inside the process buys a memory checkpoint between groups of origins, so a process
@@ -204,16 +273,24 @@ for (ci, chunk) in enumerate(Iterators.partition(batch, CHUNK))
     say("chunk ", ci, ": origins ", first(chunk).origin, " … ", last(chunk).origin,
         " (", length(chunk), ")")
     t0 = time()
-    r = if PHASE == "s1"
-        prefit_stage1!(DMS, chunk, cfg; data_provider = build_origin_data,
-                       save_dir = SAVE_DIR, max_concurrent = S1_CONCURRENCY)
+    if PHASE == "s1"
+        # ONE call over h1–4 AND h0: every (degree × horizon) fit of an origin shares one fan-out.
+        r = prefit_stage1!(DMS, chunk, cfg; data_provider = make_provider(S1_HORIZONS),
+                           horizons = S1_HORIZONS, save_dir = SAVE_DIR, max_concurrent = S1_CONCURRENCY)
+        n_fitted[] += r.fitted
+        say("  s1 ", S1_HORIZONS, ": ", r.fitted, " fitted / ", r.skipped, " skipped / ", r.failed,
+            " FAILED in ", round(Int, time() - t0), "s")
     else
-        prefit_stage2!(combos, chunk, cfg; data_provider = build_origin_data,
-                       save_dir = SAVE_DIR, max_concurrent = S2_CONCURRENCY)
+        for st in S2_SETS
+            t1 = time()
+            r = prefit_stage2!(st.combos, chunk, cfg;
+                               data_provider = make_provider(st.horizons; variant = st.variant),
+                               horizons = st.horizons, save_dir = SAVE_DIR, max_concurrent = S2_CONCURRENCY)
+            n_fitted[] += r.fitted
+            say("  s2 ", rpad(st.name, 15), ": ", r.fitted, " fitted / ", r.skipped, " skipped / ",
+                r.failed, " FAILED in ", round(Int, time() - t1), "s")
+        end
     end
-    n_fitted[] += r.fitted
-    say("  ", PHASE, ": ", r.fitted, " fitted / ", r.skipped, " skipped / ", r.failed,
-        " FAILED in ", round(Int, time() - t0), "s")
 
     GC.gc(); GC.gc()   # second pass finalises what the first one queued
     avail = _mem_available_gib()
@@ -232,4 +309,7 @@ remaining = PHASE == "s1" ? count(w -> s1_missing(w) > 0, wins) :
                             count(w -> s2_missing(w) > 0 && s1_missing(w) == 0, wins)
 say("process done: ", n_fitted[], " artefact(s) in ", round(Int, time() - t_start),
     "s | origins still pending for PHASE=", PHASE, ": ", remaining)
-exit(remaining == 0 ? 10 : 0)
+blocked_left = PHASE == "s2" ? count(w -> s2_missing(w) > 0 && s1_missing(w) > 0, wins) : 0
+blocked_left > 0 && remaining == 0 &&
+    say("*** ", blocked_left, " origin(s) still blocked on Stage 1 — exiting 3, not 10")
+exit(remaining > 0 ? 0 : blocked_left > 0 ? 3 : 10)

@@ -7,8 +7,20 @@ depot**. Three places where this departs from the docx are marked ⚠ below — 
 choices (§"Departures") and one plain fix to the docx's build command, which no longer runs as
 written.
 
-Scope: **the 8j two-stage grid only** (Stage 1 contact-degree NUTS, Stage 2 pooled transmission).
-Scoring and diagnostics (9j–13j) stay on the devcontainer.
+Scope: **every fit the forecasts need, and nothing else** — Stage 1 contact-degree NUTS and Stage 2
+pooled transmission for all six scenarios 17j §6 scores (since 2026-10-22). Scoring and diagnostics
+(9j–17j) stay on the devcontainer; 9j §V's and 8j §2b's fit cells then find every artefact present
+and skip.
+
+| `SCENARIOS` entry | Stage 1 per origin | Stage 2 per origin | 17j §6 scenarios it serves |
+|---|---|---|---|
+| `conditional` | 2 degree models × h1–4 = 8 | 6 combos × h1–4 = 24 | *no contact*, *contact* |
+| `frozen` | 2 × h0 = 2 | 6 combos × h0 = 6 | *contact frozen* |
+| `variant` | (reuses the h1–4 chains) | 6 `VariantNGM` combos × h1–4 = 24, + 5 contact ones × h0 = 5 if `frozen` | *variant*, *variant + contact*, *variant + contact frozen* |
+| **all (default)** | **10** | **59** | all six — **650 s1 + 3 835 s2** over 65 origins |
+
+The grid is the `-eng` generation (token `temporal-w8h-lc0-eng-nuts`): England-only CoMix
+participants, the ONS CIS positivity-by-age outcome, MONDAY weeks, origins 2020-11-02 … 2022-01-24.
 
 | file | what it is |
 |---|---|
@@ -61,7 +73,8 @@ Into `/home/<user>/prj_sc_heavy_tail_mean/` (= `PROJECT_DIR` in `config.sh`):
 |---|---|
 | the repo (`src/`, `hpc/`, `Project.toml`, `Manifest.toml`, `inst/`, `tasks/`) | `git clone` on the login node is fine |
 | `dt_comix_no_public/part_uk.arrow`, `contacts_uk.arrow` | **gitignored — WinSCP only** |
-| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these two files are read by the fitting path. ⚠ **`estimates_age.csv`, not the `_ab` variant** — the source moved on 2026-09-16 and shipping the old file would refit the whole grid against different infection estimates with nothing detecting it |
+| `inc2prev/data-processed/populations.csv`, `inc2prev/data-processed/cis_age.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these three files are read by the fitting path. `cis_age.csv` is the OUTCOME (ONS CIS positivity by age); `estimates_age.csv` supplies only the (all-zero) antibody covariate — ⚠ **not the `_ab` variant**, which would silently change it |
+| `dt_cog_uk/cog_uk_england_weekly.csv` | **untracked — WinSCP it.** The variant sets (`SCENARIOS` containing `variant`); the driver refuses to start without it |
 | the `.simg` | ~3–5 GB (squashfs of the 12.6 GB image) |
 
 Then, on the login node:
@@ -80,8 +93,8 @@ happen; the `od -c` above is the one-second confirmation. (`dos2unix hpc/*.sh hp
 ever does.)
 
 ⚠ **Check the quota before you start.** A Stage-1 NUTS chain is ~28 MB (NegBin) / ~72 MB
-(hurdle-Weibull) at `nuts_draws = 2000`, and the grid is 4+4 of them per origin × 63 origins ≈
-**25 GB**, plus the Stage-2 pooled files and the ~4–5 GB image. `quota -s` / `df -h ~` first; a
+(hurdle-Weibull) at `nuts_draws = 2000` (h0 chains are smaller), and the grid is 5+5 of them per
+origin × 65 origins ≈ **32 GB**, plus the Stage-2 pooled files and the ~4–5 GB image. `quota -s` / `df -h ~` first; a
 full filesystem part-way through a 5 h array is an expensive way to find out. (Since artefacts are
 now written temp-then-rename, running out of space fails the *temp* write and the target path is
 never touched — a loud, resumable failure rather than a truncated file the next run would skip as
@@ -89,7 +102,7 @@ complete.)
 
 ⚠ **Check what is already in `dt_intermediate/` first.** `prefit_stage1!` **skips existing
 artefacts**, so a stale chain under the same token is silently kept, never overwritten. If any
-`8j_s1_*temporal-w8h-lc0-nuts*` predates the current φ-init, move it aside — see CLAUDE.md,
+`8j_s1_*temporal-w8h-lc0-eng-nuts*` predates the current φ-init, move it aside — see CLAUDE.md,
 "`stage1_phi_init_scale` is the SHARPER version of that hazard".
 
 ## 3. Preflight (login node, ~5 min) — docx §2-2 / §1-3-7
@@ -118,34 +131,38 @@ fit is *not*: an hour of NUTS on a shared login node is the docx's "Top 10 Mista
 ```bash
 cd /workdir/src
 DRY_RUN=1 PHASE=s1 STAGE1_USE_NUTS=true AD_BACKEND=mooncake \
-ORIGIN_STRIDE=16 ORIGIN_OFFSET=5 \
+SCENARIOS=conditional,frozen,variant ORIGIN_STRIDE=16 ORIGIN_OFFSET=5 \
 julia --project=/workdir /workdir/src/8j_run_grid.jl
 ```
 
-Check three lines: `cache token : temporal-w8h-lc0-nuts` (a different token = a different
+Check four things: `cache token : temporal-w8h-lc0-eng-nuts` (a different token = a different
 generation — fix `STAGE1_USE_NUTS` before launching), `sampler : Stage 1 NUTS, Stage 2 Pathfinder`,
-and `slice : 5/16 ⇒ … origin(s): …` listing the origins that task will own. Delete
+`slice : 5/16 ⇒ … origin(s): …` listing the origins that task will own, and `scenarios` / the
+per-set `s2 …` lines (`PHASE=s2` prints them too), which state exactly how many fits this run owns. Delete
 `.julia_preflight` afterwards.
 
 Then let the **first array task** be the real smoke — as a job, not on the login node:
 
 ```bash
-ORIGIN_MIN=2021-04-25 FIT_END=2021-04-25 sbatch --array=0-0 hpc/s1_array.slurm
+ORIGIN_MIN=2021-04-26 FIT_END=2021-04-26 sbatch --array=0-0 hpc/s1_array.slurm
 ```
 
-One origin, 8 Stage-1 chains, ~1 h. Confirm the artefacts and their provenance keys (§6) before
+One origin, 10 Stage-1 chains (h1–4 + h0), ~1 h. Confirm the artefacts and their provenance keys (§6) before
 submitting the full array.
 
 ## 4. Submit
 
 ```bash
 cd ~/prj_sc_heavy_tail_mean          # --output paths are relative to here, and logs/ must exist
-sbatch hpc/s1_array.slurm            # 16 tasks × ~4 origins ≈ 5 h
-# ... wait for Stage 1 to be COMPLETE, then:
-sbatch hpc/s2_array.slurm            # 16 tasks, under an hour
+jid=$(sbatch --parsable hpc/s1_array.slurm)                 # 16 tasks × 4–5 origins ≈ 6 h
+sbatch --dependency=afterok:"${jid}" hpc/s2_array.slurm      # starts only if EVERY s1 task succeeded
 ```
 
-Each task owns a **round-robin slice** of the 63 origins (`ORIGIN_OFFSET=$SLURM_ARRAY_TASK_ID`,
+`afterok` on an array job waits for all of its tasks and is cancelled if any of them fails, so a
+crashed Stage-1 slice never lets Stage 2 start against an incomplete grid (the s2 driver would hold
+those origins back anyway, and say so). Run them by hand in that order if you prefer.
+
+Each task owns a **round-robin slice** of the 65 origins (`ORIGIN_OFFSET=$SLURM_ARRAY_TASK_ID`,
 `ORIGIN_STRIDE=$SLURM_ARRAY_TASK_COUNT`), so no two tasks ever write the same artefact. The slice and
 its origin list are printed at the top of every task log — that print is the evidence the partition
 was disjoint.
@@ -167,7 +184,7 @@ fitted.
 
 Each task loops `8j_run_grid.jl` in **fresh processes** (`run_grid.sh`), `MAX_ORIGINS=2` at a time.
 That is not tidiness: a single process grows ~1.08 GiB per origin and only a process boundary resets
-it — the 63-origin run was OOM-killed twice for this.
+it — the 63-origin Sunday-grid run was OOM-killed twice for this.
 
 ## 5. Monitor
 
@@ -176,7 +193,7 @@ squeue --user=$USER                       # running / pending
 squeue --user=$USER --start                # expected start time
 sacct -j <jobid> --format=JobID,Elapsed,MaxRSS,State
 tail -f logs/s1_<jobid>_0.log
-ls dt_intermediate/8j_s1_*temporal-w8h-lc0-nuts* | wc -l    # target 504 (s1), 1512 for 8j_s2_*
+ls dt_intermediate/8j_s1_*temporal-w8h-lc0-eng-nuts* | wc -l    # target 650 (s1), 3835 for 8j_s2_*
 scancel <jobid>
 ```
 
@@ -189,11 +206,14 @@ part-refitted grid is mixed with nothing in the filename to show it):
 ```julia
 using Glob, JLD2, StatsBase
 key(p, k) = jldopen(f -> haskey(f, k) ? f[k] : :ABSENT, p)
-ps = glob("8j_s1_*temporal-w8h-lc0-nuts*", "dt_intermediate")
+ps = glob("8j_s1_*temporal-w8h-lc0-eng-nuts*", "dt_intermediate")
 countmap(key.(ps, "ad_backend"));  countmap(key.(ps, "phi_init_scale"));  countmap(key.(ps, "sampler"))
 ```
 
 Each must be a **single** value. `:ABSENT` means a pre-2026-08-10 file survived the clean-out.
+Locally, `audit_stage1_grid(cfg)` and `audit_stage1_grid(cfg; horizons = [FROZEN_H], audit_csv = …)`
+(14j §0) audit the conditional and h0 chains SEPARATELY, as CLAUDE.md requires — and read `min_ess`
+before trusting either (a stuck chain looks finished).
 
 ---
 
@@ -219,6 +239,8 @@ on a current Docker Desktop without `-e DOCKER_API_VERSION=1.41`.
 | where | why |
 |---|---|
 | `src/8j_run_grid.jl` — `ORIGIN_STRIDE`/`ORIGIN_OFFSET` | array tasks must own disjoint origins; without it every task takes `pending[1:MAX_ORIGINS]` from the same disk view and races. |
+| `src/8j_run_grid.jl` — `SCENARIOS` | one submission fits every scenario's artefacts (conditional, frozen h0, variant); before 2026-10-22 the h0 and variant fits lived only in 8j §2b / 9j §V notebook cells, which cannot run on the cluster |
+| `hpc/run_grid.sh` — `REPO` | the checkout to run (default `/workdir`, the bind mount), so the loop can be smoke-tested from a git worktree |
 | `src/8j_run_grid.jl` — `DRY_RUN=1` | the login-node preflight: resolve and print the token, slice and batch, then exit 10 before any fit. |
 | `src/joint_model.jl` — `_slurm_mem_available_gib` | `/proc/meminfo` reports the whole 768 GB node, not the job's cgroup, so `MEM_FLOOR_GIB` and `fit_concurrency`'s memory cap could never bind and the OOM guard was inert. |
 | `src/joint_model.jl` — `_atomic_jldsave` | a time-limit kill mid-`jldsave` leaves a truncated `.jld2` that every `isfile` skip-check counts as complete; write-then-rename makes the artefact appear atomically. |

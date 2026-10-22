@@ -78,7 +78,7 @@ end
 
 7-panel figure (one panel per contactor age i=1:A) of the weekly **mean** ⟨k⟩ and
 **neighbourhood-mean** ⟨k²⟩/⟨k⟩ contact degree for the fixed **contactee** column `j`, each with a
-90% CI ribbon over the Stage-1 posterior, on a Wednesday-mid-date x-axis. Mirrors
+90% CI ribbon over the Stage-1 posterior, on a Thursday-mid-date x-axis. Mirrors
 `make_mu_timeline_fig` (10j_viz_utils.jl) but plots the true moment functionals (route A:
 `stage1_moment_draws` → `contact_star`), not the raw μ draws — which matters for HurdleWeibull where
 `K1 = (1−p⁰)·μW ≠ μW`.

@@ -1,5 +1,11 @@
-# infection_data.jl — load age-stratified infection (+ antibody, where the source carries it)
-# estimates from inc2prev and aggregate to the inc2prev-aligned weekly grid.
+# infection_data.jl — the framework's infection-side inputs on the Monday-start weekly grid.
+#
+# OUTCOME (2026-10-22, user request): ONS CIS positivity by age (`inc2prev/data-processed/cis_age.csv`,
+# England, daily) × population — `weekly_cis_positives`. It REPLACED inc2prev's modelled infections
+# as `WindowData.I_mean` (renewal history, Stage-2 target, scoring truth). It is a PREVALENCE used
+# as-is where the renewal expects incidence; see `weekly_cis_positives`. Everything below about
+# `estimates_age.csv` now concerns ANTIBODY only (all zero, F pinned) and `weekly_infections`, which
+# the 14j/16j audits still read.
 #
 # SOURCE: `estimates_age.csv` since 2026-09-16 (user request — errors found in the use of the
 # `_ab` variant). The SCHEMA is identical in both files: `name` selects the quantity, `variable`
@@ -54,6 +60,188 @@ function _load_estimates(path::AbstractString = _EST_PATH)
 end
 
 _age_index_map(grid) = Dict(l => i for (i, l) in enumerate(grid.LAB))
+
+# ONS CIS modelled PCR positivity by age (England, daily, 118 stacked publication vintages): the
+# framework OUTCOME since 2026-10-22. See `cis_weekly_positivity` / `weekly_cis_positives`.
+const _CIS_AGE_PATH = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "cis_age.csv")
+
+"""
+    cis_weekly_positivity(weeks; grid, path, vintage=:latest, geography, level, cis_df)
+        -> (; P, LO, HI, n_days, n_vintages, vintage_range)
+
+Weekly ONS CIS PCR positivity by CIS age bin, `A × length(weeks)`, as a **proportion**. The
+`× population` happens once in `inc2prev_age_timeseries`, so the raw proportion stays inspectable.
+
+⚠ **THE FRAMEWORK OUTCOME IS BUILT FROM THIS** (2026-10-22): `weekly_cis_positives` multiplies `P` by
+`grid.POP` and feeds Stage 2 and scoring. It lived in `14j_viz_utils.jl` until then, as a §6c
+comparator, and was moved here verbatim.
+
+This is the genuinely OBSERVED series — `inc2prev/stan/inc2prev.stan:176` is
+`prev ~ normal(odcases, combined_sigma)`, i.e. `proportion_pos` is literally what both estimate files
+were fitted to. (For the REPORTED case counts that sit beside it in the incidence figure, see
+`ukhsa_weekly_cases`. An earlier version of this docstring said age-stratified reported counts "do
+not exist for this comparison, and UKHSA's live API carries `age: \"all\"` only" — that was true of
+the retired `api.coronavirus.data.gov.uk` and is FALSE of its replacement, where
+`COVID-19_cases_rateRollingMean` is published in 5-year bands. A note that data does not exist is a
+measurement with a date on it; this one had gone stale and closed off a figure.)
+
+⚠ **`cis_age.csv` IS NOT A SERIES — IT IS 118 STACKED PUBLICATION VINTAGES OF ONE.** 34 692
+England/`age_school` rows collapse to 6307 `(date, bin)` cells. Read without a collapse it silently
+averages first-release and revised estimates together, and the early ONS revisions are large.
+`vintage = :latest` keeps the maximum `publication_date` per `(start_date, lower_age_limit)`;
+`:first` gives the real-time view and is deliberately NOT the default, because inc2prev's own fit
+consumed the revised series.
+
+⚠ **`start_date == end_date` is ASSERTED, not assumed.** True on all 34 692 rows today, which is what
+makes this a DAILY series that a weekly mean is well defined over. The sibling files (`cis.csv`,
+`cis_variants.csv`) and future vintages can carry multi-day windows; averaging a windowed row as if
+it were a day double-counts with no error at all.
+
+⚠ **WEEKLY MEAN, NEVER SUM.** Positivity is a STOCK. This mirrors `weekly_antibody`'s aggregation and
+is the OPPOSITE of `weekly_infections`'. See the §G2 banner.
+
+⚠ **Empty cells are `NaN`, not `0.0` — deliberately the opposite of `weekly_antibody`.** That one
+zero-fills because a NaN would propagate into the NGM and poison every downstream draw, and it warns
+as the tripwire. Nothing downstream of *this* function is a model: it feeds a plot, where `NaN` is
+drawn as a gap and a zero would draw a line to the floor of a log axis.
+
+⚠ **`weeks` MUST BE MONDAY-ALIGNED** (week starts of the framework grid) — the lookup is
+`haskey(wkset, week_start(d))`, so a vector of Thursday `week_mid` labels matches nothing and returns all-NaN, silently (`incidence_age_shares`'
+trap verbatim).
+
+⚠ Bins key on `lower_age_limit` against `grid.LO`, NOT on a label against `grid.LAB` as
+`weekly_infections` does — `cis_age.csv` has no label column. Two join keys for the same seven bins,
+so the key set is asserted once here. Values parse through `_tofloat_safe`/`_todate_safe`: the column
+types are inferred over ALL geographies and levels, so one `"NA"` anywhere in the 7 MB file turns
+`proportion_pos` into a `String` column (measured: 0 missing in England/`age_school` today).
+
+`LO`/`HI` are the same weekly mean of the published `proportion_pos_low_95`/`_high_95`. They are
+carried for the agreement diagnostic and are NOT drawn — see `make_inc2prev_timeline_fig`.
+"""
+function cis_weekly_positivity(weeks::AbstractVector{Date}; grid = cis_age_grid(),
+                               path::AbstractString = _CIS_AGE_PATH,
+                               vintage::Symbol = :latest,
+                               geography::AbstractString = "England",
+                               level::AbstractString = "age_school",
+                               cis_df = nothing)
+    vintage in (:latest, :first) ||
+        throw(ArgumentError("cis_weekly_positivity: vintage must be :latest or :first, got :$vintage"))
+    df = cis_df
+    if df === nothing
+        isfile(path) || error("cis_weekly_positivity: no such file $path — is the inc2prev submodule " *
+                              "checked out? (`git submodule update --init`)")
+        df = CSV.read(path, DataFrame)
+    end
+    keep = [string(g) == geography && string(l) == level
+            for (g, l) in zip(df.geography, df.level)]
+    any(keep) || error("cis_weekly_positivity: no rows with geography=\"$geography\" level=\"$level\"")
+    sub = @view df[keep, :]
+
+    A = grid.N; T = length(weeks)
+    wkset = Dict(w => k for (k, w) in enumerate(weeks))
+    loidx = Dict(lo => i for (i, lo) in enumerate(grid.LO))
+
+    best  = Dict{Tuple{Date,Int}, Tuple{Date,Float64,Float64,Float64}}()
+    los   = Set{Int}()
+    vints = Set{Date}()
+    for r in eachrow(sub)
+        sd = _todate_safe(r.start_date); sd === nothing && continue
+        ed = _todate_safe(r.end_date)
+        @assert ed === nothing || ed == sd "cis_weekly_positivity: $path has a row spanning \
+            $sd…$ed. Every England/age_school row is a SINGLE day today (verified on all 34 692), \
+            which is what makes the weekly MEAN below well defined; averaging a multi-day window as \
+            if it were one day double-counts silently. Refusing."
+        lo = _toint_safe(r.lower_age_limit); push!(los, lo)
+        pub = _todate_safe(r.publication_date); pub === nothing && continue
+        push!(vints, pub)
+        k = (sd, lo)
+        prev = get(best, k, nothing)
+        newer = prev === nothing || (vintage === :latest ? pub > prev[1] : pub < prev[1])
+        newer || continue
+        best[k] = (pub, _tofloat_safe(r.proportion_pos),
+                        _tofloat_safe(r.proportion_pos_low_95),
+                        _tofloat_safe(r.proportion_pos_high_95))
+    end
+    @assert los == Set(grid.LO) "cis_weekly_positivity: $path carries lower_age_limit $(sort(collect(los))) \
+        but the CIS grid is $(grid.LO). These are joined by NUMBER, so a changed bin set would drop or \
+        mis-assign bins rather than error."
+    ndates = length(Set(k[1] for k in keys(best)))
+    @assert length(best) == ndates * A "cis_weekly_positivity: the $vintage-vintage collapse left \
+        $(length(best)) (date, bin) cells for $ndates dates × $A bins — the panel is ragged, so some \
+        date is missing a bin and the weekly mean there would be taken over fewer bins than it looks."
+
+    Ps = zeros(A, T); Ls = zeros(A, T); Hs = zeros(A, T); n_days = zeros(Int, A, T)
+    for ((d, lo), (_, p, l, h)) in best
+        w = week_start(d); haskey(wkset, w) || continue
+        a = get(loidx, lo, 0); a == 0 && continue
+        isfinite(p) || continue
+        t = wkset[w]
+        Ps[a, t] += p; Ls[a, t] += l; Hs[a, t] += h; n_days[a, t] += 1
+    end
+    P = fill(NaN, A, T); LOm = fill(NaN, A, T); HIm = fill(NaN, A, T)
+    for a in 1:A, t in 1:T
+        n_days[a, t] == 0 && continue
+        P[a, t]   = Ps[a, t] / n_days[a, t]
+        LOm[a, t] = Ls[a, t] / n_days[a, t]
+        HIm[a, t] = Hs[a, t] / n_days[a, t]
+    end
+    return (; P, LO = LOm, HI = HIm, n_days, n_vintages = length(vints),
+              vintage_range = (minimum(vints), maximum(vints)))
+end
+
+"""
+    weekly_cis_positives(cis, weeks, grid; vintage = :latest) -> (I_mean, I_sd)
+
+The framework OUTCOME (2026-10-22, user request): the number of people in England currently PCR
+positive, by CIS age bin and Monday week, `A × length(weeks)` — weekly MEAN ONS CIS positivity
+(`cis_weekly_positivity`) × `grid.POP`. It replaces inc2prev's modelled infections
+(`weekly_infections`) everywhere `WindowData.I_mean` is read: the renewal history, the Stage-2
+likelihood target and the scoring truth.
+
+⚠ **IT IS A PREVALENCE (a stock), USED AS-IS where the renewal expects incidence** (user's choice).
+Weekly positivity × pop is roughly (mean detectable duration ≈ 8.7 d)/7 ≈ 1.24 weekly incidences,
+lagged and smoothed; γ_SAR and the generation interval absorb that. Never read γ_SAR from these fits
+as a per-contact attack rate on the incidence scale.
+
+`I_sd` = weekly mean of the daily `(HI − LO)/(2·1.96)` × POP — inc2prev's own CrI → SD rule
+(`R/model.R`). Daily values come from one smooth ONS model, so the SDs are AVERAGED (perfect
+correlation), not added in quadrature as independent days would be.
+
+⚠ ASSERTS 7 days and a finite, positive value in EVERY cell. `cis_weekly_positivity` NaN-fills an
+empty cell and averages a part-week silently; here either is an error, because it is what the
+origin grid's lower bound (`available_forecast_origins`' `infection_start`, the first full Monday
+week 2020-08-17) exists to prevent.
+
+`cis` is the raw `cis_age.csv` frame (`load_raw_infection_inputs().cis`), read once per process.
+"""
+function weekly_cis_positives(cis::AbstractDataFrame, weeks::AbstractVector{Date}, grid;
+                              vintage::Symbol = :latest)
+    pos = cis_weekly_positivity(weeks; grid = grid, cis_df = cis, vintage = vintage)
+    bad = findall(pos.n_days .!= 7)
+    @assert isempty(bad) "weekly_cis_positives: $(length(bad)) (bin, week) cell(s) without 7 days of \
+        CIS data, first at week $(weeks[bad[1][2]]) (n_days = $(pos.n_days[bad[1]])). CIS by age \
+        covers 2020-08-14 … 2023-01-31; an origin needs all of `all_weeks`/`forecast_weeks` inside it."
+    @assert all(p -> isfinite(p) && p > 0, pos.P) "weekly_cis_positives: non-finite or zero positivity"
+    I_mean = pos.P .* grid.POP
+    I_sd   = (pos.HI .- pos.LO) ./ (2 * 1.96) .* grid.POP
+    @assert all(isfinite, I_sd) && all(>=(0), I_sd) "weekly_cis_positives: bad CrI-derived SD"
+    return I_mean, I_sd
+end
+
+"""Read `cis_age.csv` (raw; `cis_weekly_positivity` does the geography/level/vintage cut)."""
+_load_cis(path::AbstractString = _CIS_AGE_PATH) =
+    (isfile(path) || error("no such file $path — is the inc2prev submodule checked out?");
+     CSV.read(path, DataFrame))
+
+# ONE read of `cis_age.csv` per process, shared by every `load_window_data`/`load_forecast_truth`
+# call, so none of their ~25 call sites had to change signature when the outcome moved to the CIS.
+# Locked because `prefit_*!` call the data provider from concurrent tasks. Treated read-only.
+const _CIS_CACHE = Ref{Union{Nothing,DataFrame}}(nothing)
+const _CIS_LOCK  = ReentrantLock()
+_cis_frame() = lock(_CIS_LOCK) do
+    _CIS_CACHE[] === nothing && (_CIS_CACHE[] = _load_cis())
+    _CIS_CACHE[]
+end
 
 """Weekly infection counts and SDs (A × length(weeks)).
 
@@ -152,25 +340,29 @@ end
 """
     load_raw_infection_inputs(; path=_EST_PATH)
 
-Read the inc2prev estimates CSV **once** and build the `t_index → Date` map (the read
-`load_window_data` would otherwise repeat on every origin). Returns `(; df, tmap)` to pass
-straight into `load_window_data(win, inf.df, inf.tmap; grid)`, mirroring
-`load_raw_contact_inputs()`. The frame is treated read-only — `weekly_infections`/
-`weekly_antibody` `@subset` it into copies — so it is safe to reuse across origins and to
-read concurrently from a background prefetch task.
+Read the infection-side inputs **once**: the inc2prev estimates CSV with its `t_index → Date` map
+(now used for ANTIBODY only — `estimates_age.csv` carries none, so `A ≡ 0`), and the ONS CIS
+by-age frame `cis` that the OUTCOME comes from (`weekly_cis_positives`). Returns `(; df, tmap, cis)`;
+pass `inf.df, inf.tmap` straight into `load_window_data(win, inf.df, inf.tmap; grid)`, which reads
+the CIS from the same per-process cache (`_cis_frame`). Every frame is treated read-only, so it is
+safe to reuse across origins and to read concurrently from a background prefetch task.
 """
 function load_raw_infection_inputs(; path::AbstractString = _EST_PATH)
     df, tmap = _load_estimates(path)
-    return (; df, tmap)
+    return (; df, tmap, cis = _cis_frame())
 end
 
 """Assemble `WindowData` from a **pre-loaded** estimates frame `df` and `t_index → Date`
 map `tmap` (from `load_raw_infection_inputs()`), skipping the per-call CSV read. Byte-identical
-to the `path`-reading method; safe to call concurrently (read-only over `df`)."""
+to the `path`-reading method; safe to call concurrently (read-only over `df`/`cis`).
+
+`I_mean`/`I_sd` are the ONS CIS positives × population (`weekly_cis_positives`, 2026-10-22) — NOT
+inc2prev's modelled infections, which `weekly_infections` still reads for the 14j/16j audits. The
+field names are unchanged so no reader had to move; read them as "people currently positive"."""
 function load_window_data(win::WeeklyWindow, df::DataFrame, tmap::Dict{Int,Date};
-                          grid = cis_age_grid())
+                          grid = cis_age_grid(), cis::AbstractDataFrame = _cis_frame())
     weeks = win.all_weeks
-    I_mean, I_sd = weekly_infections(df, weeks, grid)
+    I_mean, I_sd = weekly_cis_positives(cis, weeks, grid)
     AB = weekly_antibody(df, tmap, weeks, grid; what = "window")
     # Antibody at the FORECAST TARGET weeks t₀+h, for the frozen forecast NGM (§3.2). A gap here
     # matters more than one in the fit window — it drives every horizon-h prediction — so it gets
@@ -189,10 +381,10 @@ function load_window_data(win::WeeklyWindow; path::AbstractString = _EST_PATH, g
     return load_window_data(win, df, tmap; grid = grid)
 end
 
-"""Realized weekly infection counts (A × n_horizons) for the forecast target weeks
-— the scoring `true_value`."""
-function load_forecast_truth(win::WeeklyWindow; path::AbstractString = _EST_PATH, grid = cis_age_grid())
-    df, _ = _load_estimates(path)
-    I_mean, _ = weekly_infections(df, win.forecast_weeks, grid)
+"""Realized weekly CIS positives × population (A × n_horizons) for the forecast target weeks
+— the scoring `true_value`. Same quantity as `load_window_data`'s `I_mean` (`weekly_cis_positives`)."""
+function load_forecast_truth(win::WeeklyWindow; grid = cis_age_grid(),
+                             cis::AbstractDataFrame = _cis_frame())
+    I_mean, _ = weekly_cis_positives(cis, win.forecast_weeks, grid)
     return I_mean
 end

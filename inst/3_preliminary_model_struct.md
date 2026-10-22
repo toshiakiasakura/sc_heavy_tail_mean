@@ -82,9 +82,11 @@ five **adult**; this two-level block structure indexes the degree-dispersion par
 
 ### 2.2 Weekly grid
 
-Weeks are Sunday-anchored to `WEEK_ANCHOR = 2021-03-21`. For a date $d$ the week index is
-$\lfloor (d - \text{anchor})/7 \rfloor$; the week is labelled by its Wednesday mid-date. A forecast
-is organised around a **`WeeklyWindow`** with origin $t_0$ (snapped to its Sunday week), comprising
+Weeks are **Monday**-anchored to `WEEK_ANCHOR = 2021-03-22` (since 2026-10-22, user request, so that
+a framework week IS a COG-UK genome week and an ONS Mon–Sun week; Sunday-anchored to 2021-03-21 until
+then). For a date $d$ the week index is $\lfloor (d - \text{anchor})/7 \rfloor$; the week is labelled
+by its Thursday mid-date. A forecast is organised around a **`WeeklyWindow`** with origin $t_0$
+(snapped to its Monday week), comprising
 
 - `fit_weeks`: the `n_fit = 8` weeks ending at $t_0$,
 - `lag_weeks`: the `smax = 4` weeks immediately preceding the fit weeks (renewal history),
@@ -123,16 +125,34 @@ column `n_fit` $= 8$ in *every* Stage-1 chain (10j asserts `t_o_est == cfg.n_fit
 
 ### 2.3 Infection and antibody series
 
-Age-stratified estimates are taken from the `inc2prev` output `estimates_age.csv`
-(`infection_data.jl`, `_EST_PATH`). ⚠ **This was `estimates_age_ab.csv` until 2026-09-16**, when the
-source was changed (errors were found in the use of the `_ab` variant). The schema is identical, the
-`infections` posterior is not (median 8.6% relative difference, p90 76%), and the antibody
-consequences are spelled out below:
+**Outcome (since 2026-10-22, user request): ONS CIS positivity by age, not a modelled incidence.**
+`weekly_cis_positives` (`infection_data.jl`) reads `inc2prev/data-processed/cis_age.csv` — ONS's
+modelled PCR positivity for England, daily, by the 7 CIS bins, 118 stacked publication vintages, of
+which the latest per (date, bin) is kept — and sets
 
-- **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$. The `name == "infections"` rows give
-  a *daily per-capita infection proportion* with mean and SD; the weekly count is the 7-day sum of
-  (proportion $\times$ age-group population), and weekly SDs are combined in quadrature across the
-  days of the week (a working independence approximation).
+$$I_{a,t} = N_a \cdot \overline{p}_{a,t}, \qquad
+s^{I}_{a,t} = N_a \cdot \overline{\left(\tfrac{p^{\mathrm{hi}} - p^{\mathrm{lo}}}{2\cdot 1.96}\right)}_{a,t},$$
+
+the weekly means of the daily positivity and of its 95% CrI half-width (inc2prev's CrI → SD rule).
+Every cell must have 7 days of data (asserted); CIS by age starts Fri 2020-08-14, so the first full
+Monday week is 2020-08-17 and the first origin whose 12 `all_weeks` are covered is **2020-11-02**.
+
+⚠ **$I_{a,t}$ is now a PREVALENCE (people currently positive), used AS-IS where the renewal expects
+incidence** (user's choice). Weekly mean positivity $\times N_a$ is about (mean detectable duration
+≈ 8.7 d)/7 ≈ 1.24 weekly incidences, lagged and smoothed. The renewal, the likelihood and the
+forecast are unchanged; $\gamma_{\text{SAR}}$ and the generation interval absorb the mismatch, so
+$\gamma_{\text{SAR}}$ from this generation is not a per-contact attack rate on the incidence scale.
+Forecasts and scores are on the same positives-× -population scale.
+
+The inc2prev estimates `estimates_age.csv` (`_EST_PATH`) were the outcome until then and now supply
+only the antibody covariate below. ⚠ That file was `estimates_age_ab.csv` until 2026-09-16 (errors
+were found in the use of the `_ab` variant); the schema is identical, the `infections` posterior is
+not (median 8.6% relative difference, p90 76%).
+
+- *(Until 2026-10-22)* **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$ came from the
+  `name == "infections"` rows: a *daily per-capita infection proportion* with mean and SD; the weekly
+  count was the 7-day sum of (proportion $\times$ age-group population), with weekly SDs combined in
+  quadrature (`weekly_infections`, still used by the 14j/16j audits).
 - **Weekly antibody prevalence** $A_{a,t} \in [0,1]$, the within-week mean of the `name == "gen_dab"`
   rows. Those rows carry no date column, so their dates are reconstructed from the `t_index` field
   via the `t_index → date` map built from the infection rows.
@@ -162,7 +182,10 @@ Populations $N_a$ and proportions $N_a / \sum_b N_b$ complete the `WindowData` c
 
 For each window, `prepare_degree_data` assembles per-cell $(t,i,j)$ contact data from the CoMix-UK
 participant roster (`part_uk`) and contact table (`contacts_uk.arrow`), reusing the age-pair
-binning of `7j_weekly_age_pair`:
+binning of `7j_weekly_age_pair`. **Since 2026-10-22 the roster is ENGLAND ONLY** (`england_only`,
+on the ITL1 `area_3_name`: 234 320 of 276 482 participant-days), matching the England outcome and
+variant data; contacts drop with their participant-day through the inner join. See
+`inst/7_data_sources.md`.
 
 - **Participant / contactee binning.** Each participant's reported age interval and each contact's
   estimated age interval $[\text{lo},\text{hi}]$ are mapped to a CIS bin. A single overlapping bin

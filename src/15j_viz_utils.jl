@@ -162,7 +162,7 @@ function load_9j_assembly(cfg::FrameworkConfig; labels::AbstractVector{<:Abstrac
     end
 
     # --- origins: validate the SHAPE rather than re-deriving (see docstring) --------------------
-    length(origins) == 63 || @warn "15j: expected the 63-origin grid" n = length(origins)
+    length(origins) == 65 || @warn "15j: expected the 65-origin grid" n = length(origins)
     issorted(origins) || error("15j: cache origins are not sorted")
     bad = findall(!=(Day(7)), diff(origins))
     isempty(bad) || error("15j: cache origins are not a contiguous weekly grid; gaps after " *

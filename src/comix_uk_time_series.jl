@@ -50,10 +50,12 @@ function create_chunk_df(df_part::DataFrame; chunk_days::Int = 14, anchor_date::
 end
 
 """
-Anchor date for inc2prev-style 7-day weeks (Sunday-start), as used by
-`/workdir/inc2prev/scripts/read.R` (`seq(as.Date("2021-03-21"), ..., by = 7)`).
+Anchor date for the 7-day week grid — MONDAY-start since 2026-10-22, equal to `framework.jl`'s
+`WEEK_ANCHOR` (kept as a separate literal: this file is included before `framework.jl`). It was
+inc2prev's Sunday anchor 2021-03-21 (`/workdir/inc2prev/scripts/read.R`) until then; the function
+keeps its name so the descriptive notebooks need no edit.
 """
-inc2prev_week_anchor() = Date(2021, 3, 21)
+inc2prev_week_anchor() = Date(2021, 3, 22)
 
 """
 Build inc2prev-aligned 7-day week labels covering `[start_date, end_date]`.
@@ -67,11 +69,11 @@ end
 """
     inc2prev_week_start(d) / inc2prev_week_mid(d)
 
-Snap a date onto the inc2prev-aligned 7-day week grid (Sunday-start, anchored at
-`inc2prev_week_anchor()` = 2021-03-21). `inc2prev_week_start` returns the Sunday
+Snap a date onto the 7-day week grid (Monday-start, anchored at
+`inc2prev_week_anchor()` = 2021-03-22). `inc2prev_week_start` returns the Monday
 of the week (the canonical week key that `framework.jl::week_start` /
 `infection_data.jl` bucket inc2prev estimates onto); `inc2prev_week_mid` returns
-the Wednesday label (`week_start + 3`, matching `framework.jl::week_mid`).
+the Thursday label (`week_start + 3`, matching `framework.jl::week_mid`).
 """
 inc2prev_week_start(d::Date) = (a = inc2prev_week_anchor(); a + Day(fld((d - a).value, 7) * 7))
 inc2prev_week_start(::Missing) = missing
@@ -83,7 +85,7 @@ inc2prev_week_mid(::Missing) = missing
 
 Annotate the contact table `df` and participant table `df_part` (as returned by
 `read_comix_uk_raw_contacts_and_part`) with inc2prev-aligned 7-day week columns
-`:chunk_start` (Sunday), `:chunk_end` (Saturday) and `:mid_date` (Wednesday label,
+`:chunk_start` (Monday), `:chunk_end` (Sunday) and `:mid_date` (Thursday label,
 coinciding 1:1 with the inc2prev / framework week grid). Each row's chunk is a
 pure function of its own `:date`, so both tables share identical week labels
 without a join. Downstream `create_df_dds_chunk` / `create_df_dds_chunk_by_settings`
