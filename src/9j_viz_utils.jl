@@ -148,25 +148,38 @@ so the result is **cached to `cache_path`** (JLD2) and reused. The cache stores 
 alongside the products and is treated as **stale** (rebuilt) if either changed; `rebuild=true`
 forces a fresh reload. Missing artefacts fall through to `two_stage_forecast`'s own re-fit — run
 8j first so the Stage-1/Stage-2 files exist.
+
+`frozen = true` (2026-10-17) assembles the FROZEN-CONTACT forecast instead (`two_stage_forecast(…;
+frozen = true)`, one `h = FROZEN_H` window per origin). The scheme is stored in the cache and checked
+like `origins`/`labels` (a cache without the key reads as conditional). ⚠ Give a frozen caller its
+OWN `cache_path` (17j uses `frozen_cache_path(cfg)`): the default is 9j's conditional cache, and a
+frozen call against it would find it stale and overwrite it.
+
+`variant_counts` (2026-10-21) — the `load_cog_variant_counts()` table, REQUIRED when any combo is a
+`VariantNGM`: each origin's `wd_o` then carries `variant_split(win_o, variant_counts, cfg)` (categories
+chosen at the origin). Non-variant combos ignore the field, so mixing both kinds in one call is safe.
 """
 function assemble_or_load_forecasts(wins, combos, cfg;
                                     grid = cis_age_grid(), raw,
                                     save_dir::AbstractString = "../dt_intermediate",
                                     cache_path::AbstractString =
                                         joinpath(save_dir, "9j_assembly_$(contacts_label(cfg)).jld2"),
-                                    rebuild::Bool = false)
+                                    rebuild::Bool = false, frozen::Bool = false,
+                                    variant_counts = nothing)
     labels  = [string(degree_label(dm), "|", ngm_label(nb)) for (dm, nb) in combos]
+    any_variant = any(is_variant(nb) for (_, nb) in combos)
+    @assert !any_variant || variant_counts !== nothing "assemble_or_load_forecasts: a VariantNGM combo needs `variant_counts = load_cog_variant_counts()`"
     origins = [w.origin for w in wins]
     if !rebuild && isfile(cache_path)
         c = load(cache_path)
         # Caches written 2026-07-30..2026-08-13 also carry a `truth_store` key (it existed only for
         # the since-removed log score); `load` returns it and nothing reads it, so they stay valid.
-        if c["origins"] == origins && c["labels"] == labels
+        if c["origins"] == origins && c["labels"] == labels && get(c, "frozen", false) == frozen
             println("assembly: loaded cache ", cache_path, " (", size(c["qall"], 1), " quantile rows)")
             return (; qall = c["qall"], fc_store = c["fc_store"],
                       crps = c["crps"], skipped = c["skipped"])
         end
-        @warn "assembly cache stale (origins/labels changed) — rebuilding" cache_path
+        @warn "assembly cache stale (origins/labels/scheme changed) — rebuilding" cache_path frozen
     end
 
     qtabs       = DataFrame[]
@@ -176,18 +189,20 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     t0 = time()
     for (oi, win_o) in enumerate(wins)
         wd_o    = load_window_data(win_o; grid = grid)
+        any_variant && (wd_o = with_variants(wd_o, variant_split(win_o, variant_counts, cfg)))
         truth_o = load_forecast_truth(win_o; grid = grid)
         # this origin's 4 contact/degree windows (reuse the single raw read); discarded after.
+        # Frozen: the single h0 window (contacts up to the origin only).
         apd_o = [prepare_degree_data(degree_window(win_o.origin, h, cfg), cfg;
                                      grid = grid, setting = :all,
                                      df_part_raw = raw.df_part, craw_raw = raw.craw)
-                 for h in cfg.horizons]
+                 for h in (frozen ? [FROZEN_H] : cfg.horizons)]
         for (dm, nb) in combos
             lbl = string(degree_label(dm), "|", ngm_label(nb))
             try   # keep the multi-origin run alive if a single origin×combo reload is pathological
                 fc = two_stage_forecast(dm, nb, wd_o, cfg, win_o;
                                         grid = grid, setting = :all,
-                                        save_dir = save_dir, apd_by_h = apd_o)
+                                        save_dir = save_dir, apd_by_h = apd_o, frozen = frozen)
                 fc_store[(win_o.origin, lbl)] = fc
                 push!(qtabs, to_quantile_long(fc, truth_o, lbl, win_o, cfg, grid.LAB))
                 push!(crps_rows, (origin = win_o.origin, model = lbl, mean_crps = mean_crps(fc, truth_o)))
@@ -205,7 +220,7 @@ function assemble_or_load_forecasts(wins, combos, cfg;
     crps = DataFrame(crps_rows)
     println("quantile rows: ", size(qall), "   (", length(wins), " origins × ", length(combos),
             " combos; skipped ", length(skipped), ")")
-    jldsave(cache_path; qall, fc_store, crps, skipped, origins, labels)
+    jldsave(cache_path; qall, fc_store, crps, skipped, origins, labels, frozen)
     println("assembly: wrote cache ", cache_path)
     return (; qall, fc_store, crps, skipped)
 end
@@ -788,34 +803,34 @@ function plot_wis_over_time(scores; scale::AbstractString = WIS_SCALE)
 end
 
 """
-    plot_wis_by_horizon_over_time(scores, labels4, model_cols, cfg; ref, scale) -> Plot
+    plot_wis_by_horizon_over_time(scores, labels4, model_cols, cfg; scale) -> Plot
 
-Relative WIS as a time series (one line per config), faceted by horizon (2×2): within each
-horizon × forecast_date the log-scale WIS is ratioed to the reference model `ref`, so the
-reference sits on the 1.0 line and values < 1 beat it.
+ABSOLUTE WIS as a time series (one line per config), faceted by horizon: each model's per-origin
+WIS on `scale` (default the log-scale headline), straight from `by_model_dt_h`. CHANGED 2026-10-21
+(user request): this used to divide by `REF_MODEL`'s WIS at the same origin × horizon. That ratio
+amplified the reference's quiet weeks into spikes (hence the old `ylim = [0, 3]` clip) and hid
+when every model did badly at once. Relative skill over time is still in `plot_wis_diff_over_time`
+(cumulative difference) and in the `plot_rwis_*` figures. The layout is derived via `panel_grid`.
 """
 function plot_wis_by_horizon_over_time(scores, labels4, model_cols, cfg;
-                                       ref::AbstractString = REF_MODEL, scale::AbstractString = WIS_SCALE)
+                                       scale::AbstractString = WIS_SCALE)
     bdth = @subset(scores.by_model_dt_h, :scale .== scale)
     panels = Plots.Plot[]
     for (k, h) in enumerate(cfg.horizons)
         sub_h = @subset(bdth, :horizon .== h)
-        ref_by_date = Dict(r.forecast_date => r.wis for r in eachrow(@subset(sub_h, :model .== ref)))
         p = plot(; title = "horizon $h (wk ahead)", titlefontsize = 8, xlabel = "forecast origin",
-                 ylabel = "relative WIS (vs $(ref))", legend = (k == 1 ? :topleft : false),
-                 legendfontsize = 6, xrotation = 45)
+                 ylabel = "WIS ($(scale) scale)", legend = (k == 1 ? :topleft : false),
+                 legendfontsize = 6, xrotation = 45, ylim = (0, Inf))
         for (ci, m) in enumerate(labels4)
             s = sort(@subset(sub_h, :model .== m), :forecast_date)
-            rel = [ (haskey(ref_by_date, d) && ref_by_date[d] != 0) ? w / ref_by_date[d] : NaN
-                    for (w, d) in zip(s.wis, s.forecast_date) ]
-            plot!(p, s.forecast_date, rel; color = model_cols[ci], lw = 1.5,
-                  marker = :circle, ms = 2, label = m, ylim=[0,3.0])
+            plot!(p, s.forecast_date, s.wis; color = model_cols[ci], lw = 1.5,
+                  marker = :circle, ms = 2, label = m)
         end
-        hline!(p, [1.0]; color = :gray, ls = :dash, label = "")  # ref = 1, after dates set
         push!(panels, p)
     end
-    return plot(panels...; layout = (2, 2), size = (1150, 780),
-                plot_title = "8j — relative WIS over time, by horizon (log scale, vs $(ref))",
+    nr, nc = panel_grid(length(panels))
+    return plot(panels...; layout = (nr, nc), size = (1150, 780),
+                plot_title = "WIS over time, by horizon ($(scale) scale)",
                 plot_titlefontsize = 11)
 end
 
@@ -830,8 +845,8 @@ below 0 beat `ref` cumulatively; a steadily-rising line loses a little every wee
 `ref` WIS is absent are skipped (they contribute 0 to the running sum). The `ref` line itself is
 omitted (identically 0). `models` restricts which lines are drawn (default the two mean-NGM
 configs); each keeps its colour from its index in the full `labels` list, so colours stay
-consistent with the other figures. Contrast `plot_wis_by_horizon_over_time`, which ratios per-date
-against the global `REF_MODEL`. The named UK COVID `PERIODS` (the same Table-2 bands
+consistent with the other figures. Contrast `plot_wis_by_horizon_over_time`, which plots each
+model's absolute per-date WIS. The named UK COVID `PERIODS` (the same Table-2 bands
 `plot_rwis_by_period` facets on) are overlaid as translucent shaded spans with labels via
 `shade_periods!`, to read the cumulative gap against the epidemic timeline.
 """
@@ -1662,4 +1677,67 @@ function plot_F(store, labels4, model_cols, origins; h::Integer = 1, pinned = no
               ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
     end
     return fig
+end
+
+# ── §V Variant-specific renewal (VariantNGM, inst/3 §12; 2026-10-21) ─────────────────────
+const VARIANT_COLS = Dict(VARIANT_RESIDUAL => :grey45, "Alpha" => :steelblue, "Delta" => :seagreen,
+                          "Omicron BA.1" => :darkorange, "Omicron BA.2" => :firebrick,
+                          "Omicron other" => :purple)
+
+"""
+    collect_variant_gamma(vcombos, wins, cfg; h, save_dir) -> DataFrame
+
+READ-ONLY (`stage2_path` → `isfile` → `load`; a missing file is skipped and counted, never fitted):
+per variant model × origin × category, the pooled γ_SAR,v posterior (median, 5/95%), the category's
+origin-week share, and `frac_at_bound` — the fraction of draws within 1% (log) of either softclamp
+bound [0.001, 10], where a wide independent prior and a thinly observed category can park.
+"""
+function collect_variant_gamma(vcombos, wins, cfg::FrameworkConfig; h::Integer = 1,
+                               save_dir::AbstractString = "../dt_intermediate")
+    tag = contacts_label(cfg)
+    rows = NamedTuple[]; n_missing = 0
+    lo_b, hi_b = log(0.001), log(10.0)
+    for (dm, nb) in vcombos, w in wins
+        p = stage2_path(dm, nb, w.origin, h; contacts = tag, save_dir = save_dir)
+        isfile(p) || (n_missing += 1; continue)
+        pooled = load(p, "pooled")
+        for (v, nm) in enumerate(pooled.variants)
+            g = pooled.gamma_sar[:, v]
+            lg = log.(g)
+            push!(rows, (; model = string(degree_label(dm), "|", ngm_label(nb)), origin = w.origin, h = h,
+                           variant = nm, share_t0 = pooled.variant_share_t0[v], n_categories = length(pooled.variants),
+                           gamma_med = median(g), gamma_lo = quantile(g, 0.05), gamma_hi = quantile(g, 0.95),
+                           frac_at_bound = mean((lg .< lo_b + 0.01 * abs(lo_b)) .| (lg .> hi_b - 0.01))))
+        end
+    end
+    n_missing > 0 && @warn "collect_variant_gamma: $(n_missing) Stage-2 variant artefact(s) absent at h=$h — skipped"
+    return DataFrame(rows)
+end
+
+"""
+    plot_variant_gamma(df, labels) -> Plot
+
+One panel per variant model: γ_SAR,v (median and 90% band, log axis) over origins, one colour per
+category. Gaps are origins at which the category had no renewal of its own.
+"""
+function plot_variant_gamma(df::DataFrame, labels)
+    panels = Plots.Plot[]
+    yl = (max(minimum(df.gamma_lo), 1e-3) / 1.3, min(maximum(df.gamma_hi), 10.0) * 1.3)
+    for (k, m) in enumerate(labels)
+        p = plot(; title = m, titlefontsize = 8, yscale = :log10, ylim = yl, ylabel = "γ_SAR,v",
+                 legend = (k == 1 ? :topleft : false), legendfontsize = 6, xrotation = 45)
+        for nm in vcat([VARIANT_RESIDUAL], COG_GROUPS[2:end])
+            s = sort(@subset(df, :model .== m, :variant .== nm), :origin)
+            nrow(s) == 0 && continue
+            plot!(p, s.origin, s.gamma_med; ribbon = (s.gamma_med .- s.gamma_lo, s.gamma_hi .- s.gamma_med),
+                  fillalpha = 0.15, color = get(VARIANT_COLS, nm, :black), lw = 1.6, marker = :circle,
+                  ms = 2, label = nm)
+        end
+        hline!(p, [0.001, 10.0]; color = :gray, ls = :dot, label = "")
+        push!(panels, p)
+    end
+    nr, nc = panel_grid(length(panels))
+    return plot(panels...; layout = (nr, nc), size = (520 * nc, 360 * nr),
+                plot_title = "9j §V — variant-specific γ_SAR (h = 1, median + 90%; dotted = softclamp bounds)",
+                plot_titlefontsize = 10)
 end

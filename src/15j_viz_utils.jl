@@ -198,7 +198,9 @@ function load_9j_assembly(cfg::FrameworkConfig; labels::AbstractVector{<:Abstrac
     if isfile(est_path) && mtime(est_path) > cache_mt
         push!(stale, "$(basename(est_path)) ($(Dates.unix2datetime(mtime(est_path))))")
     end
-    s2 = glob("8j_s2_*", save_dir)
+    # The frozen-contact `_h0` cells (17j, 2026-10-17) are not inputs to 9j's CONDITIONAL cache —
+    # counting them would raise this staleness warning every time the h0 grid is (re)fitted.
+    s2 = filter(p -> !endswith(p, "_h$(FROZEN_H).jld2"), glob("8j_s2_*", save_dir))
     if !isempty(s2)
         newest = maximum(mtime, s2)
         newest > cache_mt && push!(stale, "the newest 8j_s2_* artefact " *

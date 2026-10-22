@@ -86,13 +86,15 @@ const _NO_ANTIBODY_NOTIFIED = Ref(false)
 function _notify_no_antibody()
     _NO_ANTIBODY_NOTIFIED[] && return nothing
     _NO_ANTIBODY_NOTIFIED[] = true
-    @info """weekly_antibody: the estimates source carries NO `gen_dab` rows — antibody is \
-             all-zero for every week and every age bin. This is `estimates_age.csv`, which has no \
-             antibody at all (only the `_ab` variants do), and it is HARMLESS while the leaky \
-             term is disabled: `model_transmission` pins `F = 1.0`, so the NGM's antibody factor \
+    # Real line breaks, not `\` continuations: joined, this was ONE 387-character line, which
+    # `export_notebook_pdf.py` refuses rather than wrap (14j cell "§6 NGM" prints it).
+    @info """weekly_antibody: the estimates source carries NO `gen_dab` rows — antibody is
+             all-zero for every week and every age bin. This is `estimates_age.csv`, which has no
+             antibody at all (only the `_ab` variants do), and it is HARMLESS while the leaky
+             term is disabled: `model_transmission` pins `F = 1.0`, so the NGM's antibody factor
              `(1 + (F-1)*A)` is exactly 1 whatever `A` contains.
-             ⚠ RE-ENABLING `F ~ Beta(5, 1)` (joint_model.jl) against this source would mean ZERO \
-             antibody protection everywhere, silently — F would be inferred from a covariate that \
+             ⚠ RE-ENABLING `F ~ Beta(5, 1)` (joint_model.jl) against this source would mean ZERO
+             antibody protection everywhere, silently — F would be inferred from a covariate that
              is identically 0. Point `_EST_PATH` back at an `_ab` variant first.""" source = _EST_PATH
     return nothing
 end

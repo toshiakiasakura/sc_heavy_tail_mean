@@ -826,6 +826,89 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
     return (; susc, inf, F, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
 end
 
+# ======================================================================================
+# VARIANT-SPECIFIC transmission model (`VariantNGM`, inst/3 §12; 2026-10-21, user request).
+#
+# One renewal per variant category v (chosen at the origin, `variant_split`), each with its OWN
+# γ_SAR,v; susc, inf, F, σ_inf and the GI are SHARED and sampled exactly as in `model_transmission`
+# (same priors, same clamps, same names — only `log_gamma_sar` becomes a length-V vector with the
+# same independent prior per element, user's choice). No source gives infections by variant, so the
+# England-wide COG-UK share splits every age bin:  I_v,a(t) = p_v(t)·I_a(t), and
+#     σ²_v,a,t = (σ_inf·I_v,a(t))² + (p_v(t)·I_sd,a(t))² + I_a(t)²·se²_v(t),
+# the last term the share's binomial sampling variance from the week's genome count. Each variant's
+# renewal is one step ahead from ITS OWN observed split lags, as the total is in `model_transmission`.
+# With V = 1 (share ≡ 1) and se² ≡ 0 this IS `model_transmission` (to rounding) — 9j §V checks it.
+# The split series is DERIVED (not a model argument), so the likelihood goes through `@addlogprob!`.
+# ======================================================================================
+@model function model_transmission_variant(Cstar_weeks, wd::WindowData, cfg::FrameworkConfig,
+                                           nb::VariantNGM)
+    A = wd.A
+    Tn = length(wd.weeks)
+    vs = wd.variant
+    @assert vs !== nothing && vs.weeks == wd.weeks "model_transmission_variant: wd carries no VariantSplit \
+for its weeks — attach one with `with_variants(wd, variant_split(win, cc, cfg))`"
+    V = length(vs.names)
+    off = length(Cstar_weeks) - cfg.n_fit
+    @assert 0 <= off <= maximum(cfg.horizons) "model_transmission_variant: Cstar_weeks has \
+$(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(cfg.horizons)"
+
+    log_gamma_sar ~ filldist(Normal(cfg.gamma_sar_prior[1], cfg.gamma_sar_prior[2]), V)
+    gamma_sar = exp.(_softclamp.(log_gamma_sar, log(0.001), log(10.0)))
+
+    sig_s ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
+    z_s ~ filldist(Normal(0, 1), A - 1)
+    offs_s = exp.(_softclamp.(sig_s .* z_s, log(0.05), log(20.0)))
+    susc = vcat(offs_s[1:cfg.ref_bin-1], one(sig_s), offs_s[cfg.ref_bin:end])
+    if fix_infectivity(nb)
+        inf = ones(A)
+    else
+        sig_i ~ truncated(Normal(cfg.susc_inf_sd_prior[1], cfg.susc_inf_sd_prior[2]); lower = 0)
+        z_i ~ filldist(Normal(0, 1), A - 1)
+        offs_i = exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0)))
+        inf = vcat(offs_i[1:cfg.ref_bin-1], one(sig_i), offs_i[cfg.ref_bin:end])
+    end
+    F = 1.0                                            # antibody term off, as in model_transmission
+    sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
+
+    wmu0, wv0 = gen_interval_logparams(cfg.gen_mean_days, cfg.gen_sd_days)
+    r = cfg.gen_prior_rel_sd
+    w_mu ~ Normal(wmu0, abs(wmu0) * r)
+    w_sigma ~ truncated(Normal(wv0, abs(wv0) * r); lower = 0)
+    w_mu_e    = _softclamp(w_mu,    W_MU_BOUNDS...,    W_GI_SOFT)
+    w_sigma_e = _softclamp(w_sigma, W_SIGMA_BOUNDS..., W_GI_SOFT)
+    w = gen_interval_pmf_log(w_mu_e, w_sigma_e; smax = cfg.smax)
+
+    # VECTORISED over variants (one A×V block per week): `build_ngm` is linear in γ_SAR, so the
+    # γ-free NGM is built ONCE per week and `pred_v = γ_v·N₀·Σ_s w_s I_v(t−s)`. The per-variant
+    # loop with one `build_ngm` per (v, t) and a scalar `Normal` per cell cost 3.7× the single-renewal
+    # fit under ReverseDiff; this form taping one matmul per week is what made the grid affordable.
+    # Mathematically identical; numerically equal to rounding (the 9j §V tripwire uses a tolerance).
+    Iw = [reduce(hcat, (vs.share[v, t] .* wd.I_mean[:, t] for v in 1:V)) for t in 1:Tn]   # A×V data
+    Vc = [reduce(hcat, ((vs.share[v, t] .* wd.I_sd[:, t]) .^ 2 .+ wd.I_mean[:, t] .^ 2 .* vs.se2[v, t]
+                        for v in 1:V)) for t in 1:Tn]                                      # A×V data
+    ll = zero(sigma_inf)
+    for t in (cfg.smax + 1):Tn
+        N0  = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf, F, wd.antibody[:, t]; gamma_sar = 1.0)
+        acc = w[1] .* Iw[t - 1]
+        for s in 2:cfg.smax
+            acc = acc .+ w[s] .* Iw[t - s]
+        end
+        P = (N0 * acc) .* gamma_sar'                  # A × V predicted split infections
+        σ = sqrt.((sigma_inf .* Iw[t]) .^ 2 .+ Vc[t])
+        ll += -sum(abs2.((Iw[t] .- P) ./ σ)) / 2 - sum(log.(σ)) - length(σ) * log(2π) / 2
+    end
+    Turing.@addlogprob! ll
+
+    return (; susc, inf, F, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
+end
+
+"""`_transmission_model(Cstar_weeks, wd, cfg, nb)` — the Stage-2 model for builder `nb`:
+`model_transmission` for every builder, `model_transmission_variant` for a `VariantNGM`."""
+_transmission_model(Cstar_weeks, wd::WindowData, cfg::FrameworkConfig, nb::NGMBuilder) =
+    model_transmission(Cstar_weeks, wd, cfg, nb)
+_transmission_model(Cstar_weeks, wd::WindowData, cfg::FrameworkConfig, nb::VariantNGM) =
+    model_transmission_variant(Cstar_weeks, wd, cfg, nb)
+
 # --------------------------------------------------------------------------------------
 # Cache filenames. Stage-1 chains carry NO ngm token (NGM-independent ⇒ one fit serves both
 # builders); Stage-2 pooled results carry both degree and ngm.
@@ -837,6 +920,19 @@ stage1_path(dm::ContactDegreeModel, origin::Date, h::Integer; contacts::Abstract
 stage2_path(dm::ContactDegreeModel, nb::NGMBuilder, origin::Date, h::Integer;
             contacts::AbstractString, save_dir::AbstractString) =
     joinpath(save_dir, "8j_s2_$(degree_label(dm))_$(ngm_label(nb))_$(contacts)_$(origin)_h$(h).jld2")
+
+"""
+    FROZEN_H = 0
+
+The contact-window "horizon" of the FROZEN-CONTACT (unconditional) forecast (2026-10-17, user
+request). Its Stage-1 chain is fitted on `degree_window(origin, FROZEN_H, cfg)` = the bare `n_fit`
+fit weeks `[t₀−n_fit+1 … t₀]`, so nothing after the origin enters; its ONE Stage-2 fit per
+(combo, origin) pairs fit week k with contacts from week k (`off = 0` in `model_transmission`), and
+`two_stage_forecast(…; frozen = true)` iterates every horizon with `Cstar_end` = the t₀ matrix.
+Artefacts are `8j_s1_*_h0` / `8j_s2_*_h0` under the SAME token as the conditional grid — the `_h0`
+suffix is the only thing distinguishing them.
+"""
+const FROZEN_H = 0
 
 """
     _atomic_jldsave(path; kwargs...)
@@ -998,7 +1094,7 @@ function _fit_pathfinder(model, ndraws::Int, nruns::Int, rng, adtype; init = not
 end
 
 """
-    _pf_mean_init(model, pf, rng, cfg) -> (; init::DynamicPPL.InitFromParams, phi_override::Bool)
+    _pf_mean_init(model, pf, rng, cfg) -> (; init::DynamicPPL.InitFromParams, phi_override::Bool, pf_fallback::Bool)
 
 Starting point for Stage-1 NUTS: the Pathfinder mean, as a **structured** `InitFromParams`.
 
@@ -1071,6 +1167,36 @@ function _pf_mean_init(model, pf, rng, cfg::FrameworkConfig)
     # `_stage1_init` does. `>=` and not `isapprox`: the threshold IS the tolerance. Written as
     # `!(φ < max)` rather than `φ >= max` so a NaN φ — which would otherwise sail through both the
     # comparison and, being non-finite, straight into the `isfinite(lj)` error below — also fires.
+    # DEGENERATE-MEAN guard (2026-10-17, `cfg.stage1_pf_degenerate_z`). Checked FIRST: a collapsed
+    # Pathfinder mean is replaced wholesale, so the φ guard below has nothing left to fix. The prior
+    # centres are read from `cfg` and, for `c`, recomputed from the model's own data exactly as
+    # `model_degree` does (`c0 = mean(ds.log_emp .- logpop')`), so the test cannot drift from the prior.
+    zthr = cfg.stage1_pf_degenerate_z
+    if zthr > 0
+        ds, pop = model.args.ds, model.args.pop
+        c0 = mean(ds.log_emp .- log.(pop ./ pop[1])')
+        pri = ((:log_eta, cfg.gp_scale_prior...), (:log_sigma_c, cfg.gp_level_scale_prior...),
+               (:log_rho_diag, cfg.gp_len_prior...), (:log_rho_gap, cfg.gp_len_prior...),
+               (:c, c0, 3.0))
+        zs = [(k, abs(nt[k] - m) / sd) for (k, m, sd) in pri if haskey(nt, k)]
+        # `!(z <= zthr)` so a NaN coordinate also fires (cf. the φ guard's `!(φ < max)`).
+        bad = filter(t -> !(t[2] <= zthr), zs)
+        if !isempty(bad)
+            vi = DynamicPPL.VarInfo(rng, model)
+            nt0 = DynamicPPL.values_as(vi, NamedTuple)
+            zk = filter(k -> startswith(string(k), "z"), keys(nt0))
+            vals = NamedTuple{Tuple(zk)}(Tuple(cfg.stage1_z_init_scale .* randn(rng, size(nt0[k]))
+                                               for k in zk))
+            if haskey(nt0, :phi_time) && cfg.stage1_phi_init_scale > 0
+                vals = merge(vals, (; phi_time = 1 / (1 + exp(-cfg.stage1_phi_init_scale * randn(rng)))))
+            end
+            nt_new = merge(nt0, vals)
+            lj = DynamicPPL.logjoint(model, nt_new)
+            isfinite(lj) || error("_pf_mean_init: fallback start has non-finite logjoint ($lj)")
+            @warn "Stage-1 NUTS init: Pathfinder mean is DEGENERATE — falling back to the `_stage1_init` start wholesale" offending=[(k, round(z; digits = 1)) for (k, z) in bad] threshold=zthr
+            return (; init = DynamicPPL.InitFromParams(nt_new), phi_override = false, pf_fallback = true)
+        end
+    end
     phi_override = false
     if haskey(nt, :phi_time) && cfg.stage1_phi_pf_max < 1 && !(nt.phi_time < cfg.stage1_phi_pf_max)
         φ_pf = nt.phi_time
@@ -1082,7 +1208,7 @@ function _pf_mean_init(model, pf, rng, cfg::FrameworkConfig)
     end
     lj = DynamicPPL.logjoint(model, nt)
     isfinite(lj) || error("_pf_mean_init: Pathfinder mean has non-finite logjoint ($lj)")
-    return (; init = DynamicPPL.InitFromParams(nt), phi_override)
+    return (; init = DynamicPPL.InitFromParams(nt), phi_override, pf_fallback = false)
 end
 
 """
@@ -1177,7 +1303,7 @@ function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
         # carries the same key set and `fit_or_load_stage1` needs no branch.
         return (; chn = pf.draws_transformed, model, pf, ad_backend = cfg.ad_backend,
                   sampler = :pathfinder, diag = _nuts_diagnostics(pf.draws_transformed),
-                  phi_pf_override = false)
+                  phi_pf_override = false, pf_fallback = false)
     end
     pfi = _pf_mean_init(model, pf, rng, cfg)
     nuts_init = pfi.init
@@ -1195,7 +1321,7 @@ function fit_stage1(dm::ContactDegreeModel, ds, pop, cfg::FrameworkConfig;
         @warn "Stage-1 NUTS: tree saturating at max_depth" frac=diag.frac_at_max_depth depth=diag.max_tree_depth
     end
     return (; chn, model, pf, sampler = :nuts, diag, ad_backend = cfg.ad_backend,
-              phi_pf_override = pfi.phi_override)
+              phi_pf_override = pfi.phi_override, pf_fallback = pfi.pf_fallback)
 end
 
 """
@@ -1203,7 +1329,7 @@ end
 
 Reload the Stage-1 chain at `path` if present, else fit (`fit_stage1`) and save
 (`_atomic_jldsave(path; result=chn, sampler, diag, ad_backend, target_accept, nuts_adapts,
-nuts_draws, phi_init_scale, phi_pf_max, phi_pf_override)` — temp file then rename, so a killed
+nuts_draws, phi_init_scale, phi_pf_max, phi_pf_override, pf_degenerate_z, pf_fallback)` — temp file then rename, so a killed
 process cannot leave a truncated artefact that the `isfile` skip counts as done). Idempotent
 skip ⇒ resumable prefit.
 
@@ -1263,7 +1389,9 @@ function fit_or_load_stage1(path::AbstractString, dm::ContactDegreeModel, ds, po
                           nuts_draws  = cfg.stage1_nuts_draws,
                           phi_init_scale = cfg.stage1_phi_init_scale,
                           phi_pf_max = cfg.stage1_phi_pf_max,
-                          phi_pf_override = res.phi_pf_override)
+                          phi_pf_override = res.phi_pf_override,
+                          pf_degenerate_z = cfg.stage1_pf_degenerate_z,   # setting (2026-10-17)
+                          pf_fallback = res.pf_fallback)                  # per-cell outcome; tally only
     return (; chn = res.chn)
 end
 
@@ -1409,18 +1537,21 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         # (= t₀) is comparing two different weeks.
         Cstar_end[m] = Cstar_m[end]                    # last contact week = origin + h
         # GI is sampled INSIDE the model (no `w` arg); `nb` only selects `fix_infectivity`
-        model = model_transmission(Cstar_m, wd, cfg, nb)
+        model = _transmission_model(Cstar_m, wd, cfg, nb)
         rng = Random.Xoshiro(base_seed + m)
         pf = adtype === nothing ? pathfinder(model; ndraws = n_draw, rng = rng) :
                                   pathfinder(model; ndraws = n_draw, rng = rng, adtype = adtype)
         gq = vec(generated_quantities(model, pf.draws_transformed))
         nd = min(n_draw, length(gq))
-        gs = Vector{Float64}(undef, nd); Fv = Vector{Float64}(undef, nd); sg = Vector{Float64}(undef, nd)
+        # `gamma_sar` is a scalar per draw, or a length-V vector for `VariantNGM` (⇒ an nd × V matrix)
+        gs = is_variant(nb) ? Matrix{Float64}(undef, nd, length(gq[1].gamma_sar)) : Vector{Float64}(undef, nd)
+        Fv = Vector{Float64}(undef, nd); sg = Vector{Float64}(undef, nd)
         wm = Vector{Float64}(undef, nd); wv = Vector{Float64}(undef, nd)
         su = Matrix{Float64}(undef, nd, A); infm = Matrix{Float64}(undef, nd, A)
         for d in 1:nd
             q = gq[d]
-            gs[d] = q.gamma_sar; Fv[d] = q.F; sg[d] = q.sigma_inf
+            is_variant(nb) ? (gs[d, :] = q.gamma_sar) : (gs[d] = q.gamma_sar)
+            Fv[d] = q.F; sg[d] = q.sigma_inf
             wm[d] = q.w_mu; wv[d] = q.w_sigma          # per-draw GI log-parameters
             su[d, :] = q.susc; infm[d, :] = q.inf
         end
@@ -1455,9 +1586,15 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
     inf        = reduce(vcat, (per_m[m].inf        for m in 1:M))
     w_mu       = reduce(vcat, (per_m[m].w_mu       for m in 1:M))
     w_sigma    = reduce(vcat, (per_m[m].w_sigma    for m in 1:M))
-    post_index = reduce(vcat, (fill(m, length(per_m[m].gamma_sar)) for m in 1:M))
-    return (; gamma_sar, susc, inf, F, sigma_inf, w_mu, w_sigma, post_index, Cstar_end,
+    post_index = reduce(vcat, (fill(m, length(per_m[m].F)) for m in 1:M))
+    base = (; gamma_sar, susc, inf, F, sigma_inf, w_mu, w_sigma, post_index, Cstar_end,
               n_post = M, n_draw = n_draw)
+    is_variant(nb) || return base
+    # `VariantNGM`: `gamma_sar` is N × V, columns in `variants` order; the rule and the categories'
+    # origin-week shares are recorded because neither is in the filename or the cache token.
+    vs = wd.variant
+    return merge(base, (; variants = copy(vs.names), variant_members = deepcopy(vs.members),
+                          variant_rule = vs.rule, variant_share_t0 = vs.share[:, end]))
 end
 
 # ---- parallel pre-fitting of the (origin × combo × horizon) two-stage artefacts -------
@@ -1651,10 +1788,22 @@ memory: one origin's data held at a time via `data_provider(oi, win) → (wd0, a
 origin the (degree × horizon) fits fan out under `Semaphore(max_concurrent)`. Each fit gets its own
 RNG and writes a distinct file, and BLAS is pinned to one thread during the parallel region. Cached
 chains are skipped ⇒ resumable. Returns `(; fitted, failed, skipped, concurrency)`.
+
+`horizons` (default `cfg.horizons`) picks the contact-window horizons, e.g. `[FROZEN_H]` for the
+frozen-contact h0 chains. `queue = true` replaces the per-origin fan-out with ONE work queue over
+every (origin × degree × horizon) fit — see `_prefit_stage1_queue!`. Both defaults reproduce the
+original behaviour exactly.
 """
 function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg))
+                        max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg),
+                        horizons = cfg.horizons, queue::Bool = false)
+    # `horizons` (2026-10-17): the contact-window horizons to fit, defaulting to the forecast ones.
+    # `[FROZEN_H]` fits the frozen-contact h0 chains; `data_provider` must then return `apd_by_h`
+    # ALIGNED TO `horizons` (one window per entry), not to `cfg.horizons`. Never pass a `cfg` with
+    # `horizons = 0:0` instead — `WeeklyWindow`/`load_window_data`/the origin list all read it.
+    queue && return _prefit_stage1_queue!(dms, wins, cfg; data_provider, save_dir,
+                                          max_concurrent, adtype, horizons)
     mkpath(save_dir)
     dms = filter(needs_stage1, collect(dms))   # the NULL degree model has no Stage 1 to fit
     isempty(dms) && return (; fitted = 0, failed = 0, skipped = 0, concurrency = 1)
@@ -1669,7 +1818,7 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
     try
         for (oi, win_o) in enumerate(wins)
             specs = NamedTuple[]
-            for dm in dms, (hi, h) in enumerate(cfg.horizons)
+            for dm in dms, (hi, h) in enumerate(horizons)
                 path = stage1_path(dm, win_o.origin, h; contacts = tag, save_dir = save_dir)
                 isfile(path) ? Threads.atomic_add!(skipped, 1) : push!(specs, (; dm, hi, h, path))
             end
@@ -1738,6 +1887,106 @@ function prefit_stage1!(dms, wins, cfg::FrameworkConfig; data_provider,
 end
 
 """
+    _prefit_stage1_queue!(dms, wins, cfg; data_provider, save_dir, max_concurrent, adtype, horizons)
+
+The `queue = true` path of `prefit_stage1!` (2026-10-17). Every missing (origin × degree × horizon)
+fit goes into ONE work queue drained by `max_concurrent` workers, so a slow fit ties up only its own
+slot. The per-origin path cannot do that: it barriers on `@sync` per origin, which at h0 (2 fits per
+origin) idles almost every thread. Pooling origins into rounds still barriers per round, and one
+hurdle-Weibull fit that took 2 h 20 min against ~30 min for the rest idled the threads for over two
+hours on 2026-10-17.
+
+An origin's data is loaded on first use, under one lock (calls to `data_provider` are serialised),
+and freed (followed by `GC.gc()`) once its last fit finishes. Specs are queued in origin order and
+the workers take them in that order, so only about `max_concurrent` origins' data are live at once.
+The serial warm fit per degree-model TYPE is unchanged (see `prefit_stage1!`). Same files, RNGs and
+return value as the per-origin path.
+"""
+function _prefit_stage1_queue!(dms, wins, cfg::FrameworkConfig; data_provider,
+                               save_dir::AbstractString, max_concurrent::Int, adtype, horizons)
+    mkpath(save_dir)
+    dms = filter(needs_stage1, collect(dms))
+    isempty(dms) && return (; fitted = 0, failed = 0, skipped = 0, concurrency = 1)
+    K   = clamp(max_concurrent, 1, Threads.nthreads())
+    tag = contacts_label(cfg)
+    fitted  = Threads.Atomic{Int}(0)
+    failed  = Threads.Atomic{Int}(0)
+    skipped = 0
+    specs = NamedTuple[]
+    for (oi, win_o) in enumerate(wins), dm in dms, (hi, h) in enumerate(horizons)
+        path = stage1_path(dm, win_o.origin, h; contacts = tag, save_dir = save_dir)
+        isfile(path) ? (skipped += 1) : push!(specs, (; oi, win_o, dm, hi, h, path))
+    end
+    isempty(specs) && return (; fitted = 0, failed = 0, skipped, concurrency = K)
+    # Per-origin data: loaded once, reference-counted by the fits still pending on it.
+    lk      = ReentrantLock()
+    data    = Dict{Int,Any}()
+    pending = Dict{Int,Int}()
+    for s in specs
+        pending[s.oi] = get(pending, s.oi, 0) + 1
+    end
+    n_orig = length(pending)
+    done_o = Threads.Atomic{Int}(0)
+    t0 = time()
+    get_data(s) = lock(lk) do
+        get!(() -> data_provider(s.oi, s.win_o), data, s.oi)
+    end
+    release!(s) = begin
+        last_one = lock(lk) do
+            pending[s.oi] -= 1
+            pending[s.oi] == 0 && (delete!(data, s.oi); true)
+        end
+        if last_one === true
+            GC.gc()   # the same per-origin full collection as `prefit_stage1!` (see the note there)
+            Threads.atomic_add!(done_o, 1)
+            @info "prefit_stage1!(queue): origin $(s.win_o.origin) done ($(done_o[])/$(n_orig) origins, $(fitted[]) fitted / $(failed[]) failed, $(round(time() - t0; digits = 1)) s, RSS $(round(Sys.maxrss() / 2^30; digits = 1)) GiB)"
+        end
+    end
+    do_fit(s) = begin
+        try
+            wd0, apd_by_h = get_data(s)
+            ds_h = build_degree_stats(s.dm, apd_by_h[s.hi], cfg)
+            fit_or_load_stage1(s.path, s.dm, ds_h, wd0.pop, cfg;
+                               adtype = adtype, rng = Random.Xoshiro(cfg.seed))
+            Threads.atomic_add!(fitted, 1)
+        catch err
+            Threads.atomic_add!(failed, 1)
+            @warn "stage1 fit failed" origin=s.win_o.origin degree=degree_label(s.dm) h=s.h exception=(err, catch_backtrace())
+        finally
+            release!(s)
+        end
+    end
+    old_blas = LinearAlgebra.BLAS.get_num_threads()
+    LinearAlgebra.BLAS.set_num_threads(1)
+    try
+        # Serial warm fit per degree-model TYPE before the fan-out (Mooncake rule build; see
+        # `prefit_stage1!`). The rule cache is per process, so this happens once per call here.
+        warm_idx = Int[]; seen = Set{DataType}()
+        for (k, s) in enumerate(specs)
+            typeof(s.dm) in seen && continue
+            push!(seen, typeof(s.dm)); push!(warm_idx, k)
+        end
+        for k in warm_idx
+            dt = @elapsed do_fit(specs[k])
+            @info "prefit_stage1!(queue): warm fit (AD rule built)" degree=degree_label(specs[k].dm) backend=cfg.ad_backend seconds=round(dt; digits = 1)
+        end
+        rest = specs[setdiff(1:length(specs), warm_idx)]
+        # A Channel in origin order IS the queue: each worker takes the next spec when it is free.
+        ch = Channel{NamedTuple}(length(rest))
+        foreach(s -> put!(ch, s), rest); close(ch)
+        @sync for _ in 1:K
+            Threads.@spawn for s in ch
+                do_fit(s)
+            end
+        end
+    finally
+        LinearAlgebra.BLAS.set_num_threads(old_blas)
+    end
+    @info "prefit_stage1!(queue): $(fitted[]) fitted, $(skipped) skipped, $(failed[]) failed (concurrency=$K)"
+    return (; fitted = fitted[], failed = failed[], skipped, concurrency = K)
+end
+
+"""
     prefit_stage2!(combos, wins, cfg; data_provider, save_dir, max_concurrent, adtype)
 
 Fit every MISSING Stage-2 pooled result (`8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`) for
@@ -1747,11 +1996,13 @@ the transmission fits use) — except for the NULL model, which has no Stage 1 a
 constant C* from `stage2_inputs`. Origins are processed sequentially; within an origin the (combo ×
 horizon) cells run sequentially, each `fit_stage2_pooled` fanning out its `n_stage1_post` per-draw
 fits under `Semaphore(max_concurrent)`. Cached pooled files are skipped ⇒ resumable.
+`horizons` (default `cfg.horizons`; `[FROZEN_H]` for the frozen-contact h0 fits) is as in
+`prefit_stage1!` — `data_provider`'s `apd_by_h` must be aligned to it.
 """
 function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
                         save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
                         max_concurrent::Int = fit_concurrency(), adtype = ad_type(cfg),
-                        s2_adtype = stage2_ad_type(cfg))
+                        s2_adtype = stage2_ad_type(cfg), horizons = cfg.horizons)
     # `adtype` is the STAGE-1 backend: `stage2_inputs` may have to fit a missing Stage-1 chain, and
     # that leg must match how the rest of the Stage-1 grid was fitted. `s2_adtype` is the one the
     # 100 per-draw transmission fits actually use, and it is a DIFFERENT backend by default — see
@@ -1762,7 +2013,7 @@ function prefit_stage2!(combos, wins, cfg::FrameworkConfig; data_provider,
     fitted = 0; failed = 0; skipped = 0
     for (oi, win_o) in enumerate(wins)
         todo = NamedTuple[]
-        for (dm, nb) in combos, (hi, h) in enumerate(cfg.horizons)
+        for (dm, nb) in combos, (hi, h) in enumerate(horizons)
             path = stage2_path(dm, nb, win_o.origin, h; contacts = tag, save_dir = save_dir)
             isfile(path) ? (skipped += 1) : push!(todo, (; dm, nb, hi, h, path))
         end
@@ -1858,19 +2109,40 @@ Two things changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
 - **The generation interval is per draw**, so the renewal-weighted lag sum `acc` is computed INSIDE
   the draw loop from that draw's `(w_mu, w_sigma)`. It can no longer be hoisted per horizon; hoisting
   it would silently apply one draw's GI to all of them.
+
+**`frozen = true`** (2026-10-17) is the FROZEN-CONTACT, unconditional counterpart: ONE Stage-2 pooled
+fit at `h = FROZEN_H` (contacts up to t₀ only, `off = 0`) is loaded/built before the loop and reused
+at EVERY horizon, so `Cstar_end[m]` is the **t₀** matrix throughout; antibody is frozen at t₀ too
+(`wd0.antibody[:, end]` — inert while `F ≡ 1`). `apd_by_h`, if given, is then the one-element
+`[h0 window]`. Everything else — per-draw GI, `MersenneTwister(cfg.seed + h)` noise, the median lag
+plug, the draw alignment — is the SAME code path, so the two schemes differ only in their contacts
+and fit, never in the iterator. (Proper per-draw iteration would be possible here, since every
+horizon shares one pooled set; it is deliberately not used, to keep that parity.)
 """
 function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0::WeeklyWindow;
                             apd_by_h = nothing, grid = cis_age_grid(), setting::Symbol = :all,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
-                            adtype = ad_type(cfg))
+                            adtype = ad_type(cfg), frozen::Bool = false)
+    is_variant(nb) && return _two_stage_forecast_variant(dm, nb, wd0, cfg, win0; apd_by_h, grid,
+                                                         setting, save_dir, adtype, frozen)
     A = wd0.A; H = length(cfg.horizons)
     mkpath(save_dir)
+    frozen && apd_by_h !== nothing && @assert length(apd_by_h) == 1 "two_stage_forecast(frozen): \
+apd_by_h must be the single h=$(FROZEN_H) window, got $(length(apd_by_h))"
+    pooled0 = frozen ?
+        fit_or_load_stage2(dm, nb, wd0, cfg, win0, FROZEN_H;
+                           apd_h = apd_by_h === nothing ? nothing : apd_by_h[1], grid = grid,
+                           setting = setting, save_dir = save_dir, adtype = adtype) : nothing
     hist = collect(float.(wd0.I_mean))                 # A × Tn0, last col = origin (t₀)
     cols = Vector{Matrix{Float64}}(undef, H)
     for (hi, h) in enumerate(cfg.horizons)
-        apd_h  = apd_by_h === nothing ? nothing : apd_by_h[hi]
-        pooled = fit_or_load_stage2(dm, nb, wd0, cfg, win0, h; apd_h = apd_h, grid = grid,
-                                    setting = setting, save_dir = save_dir, adtype = adtype)
+        pooled = if frozen
+            pooled0
+        else
+            apd_h = apd_by_h === nothing ? nothing : apd_by_h[hi]
+            fit_or_load_stage2(dm, nb, wd0, cfg, win0, h; apd_h = apd_h, grid = grid,
+                               setting = setting, save_dir = save_dir, adtype = adtype)
+        end
         Np  = length(pooled.gamma_sar)
         rng = MersenneTwister(cfg.seed + h)
         # The renewal-weighted history is now PER DRAW: the generation interval is estimated
@@ -1878,7 +2150,7 @@ function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
         # longer be hoisted out of the loop as one horizon-constant `acc`.
         # Antibody comes from the TARGET week t₀+h (2026-07-30, §3.2), matching the contact
         # window that already ends at t₀+h — not from the origin.
-        ab_h = wd0.antibody_fc[:, hi]
+        ab_h = frozen ? wd0.antibody[:, end] : wd0.antibody_fc[:, hi]   # frozen ⇒ t₀
         draws_h = Array{Float64}(undef, A, Np)
         preds   = Array{Float64}(undef, A, Np)         # deterministic renewal mean per draw
         for d in 1:Np
@@ -1916,6 +2188,94 @@ function two_stage_forecast(dm, nb, wd0::WindowData, cfg::FrameworkConfig, win0:
         hist = hcat(hist, step_plug)                   # robust deterministic lag for the next horizon
     end
     K = minimum(size(c, 2) for c in cols)              # align draw count across horizons
+    out = Array{Float64}(undef, A, H, K)
+    for hi in 1:H, a in 1:A, d in 1:K
+        out[a, hi, d] = cols[hi][a, d]
+    end
+    return out
+end
+
+"""
+    _two_stage_forecast_variant(dm, nb::VariantNGM, wd0, cfg, win0; …) -> A × H × N
+
+`two_stage_forecast` for the VARIANT-SPECIFIC renewal (inst/3 §12). Same pooled loading (per horizon,
+or one `FROZEN_H` set when `frozen`), the same per-draw GI, `MersenneTwister(cfg.seed + h)` noise and
+antibody column as the single-renewal path; what differs is the state: one history per variant
+category, `hist_v = p_v·I` over the observed window (shares up to t₀ only — the categories and every
+share are fixed at the origin), each stepped with its own `γ_SAR,v`:
+`pred_v = N_v · Σ_s w_s hist_v[:, end−s+1]`. The forecast draw is the TOTAL `Σ_v pred_v` plus the
+usual `σ_inf` noise (scoring stays on total infections), and each `hist_v` is plugged with the per-age
+MEDIAN of its own noise-free `pred_v` — so each variant propagates on its own and they are summed only
+at the end (user, 2026-10-21). With one category this reduces exactly to `two_stage_forecast`.
+"""
+function _two_stage_forecast_variant(dm, nb::VariantNGM, wd0::WindowData, cfg::FrameworkConfig,
+                                     win0::WeeklyWindow; apd_by_h = nothing, grid = cis_age_grid(),
+                                     setting::Symbol = :all,
+                                     save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"),
+                                     adtype = ad_type(cfg), frozen::Bool = false)
+    vs = wd0.variant
+    @assert vs !== nothing && vs.weeks == wd0.weeks "two_stage_forecast(VariantNGM): wd0 carries no VariantSplit for its weeks"
+    A = wd0.A; H = length(cfg.horizons); V = length(vs.names)
+    mkpath(save_dir)
+    frozen && apd_by_h !== nothing && @assert length(apd_by_h) == 1 "two_stage_forecast(frozen): \
+apd_by_h must be the single h=$(FROZEN_H) window, got $(length(apd_by_h))"
+    pooled0 = frozen ?
+        fit_or_load_stage2(dm, nb, wd0, cfg, win0, FROZEN_H;
+                           apd_h = apd_by_h === nothing ? nothing : apd_by_h[1], grid = grid,
+                           setting = setting, save_dir = save_dir, adtype = adtype) : nothing
+    hist = [vs.share[v:v, :] .* float.(wd0.I_mean) for v in 1:V]   # V × (A × Tn0), last col = t₀
+    cols = Vector{Matrix{Float64}}(undef, H)
+    for (hi, h) in enumerate(cfg.horizons)
+        pooled = if frozen
+            pooled0
+        else
+            apd_h = apd_by_h === nothing ? nothing : apd_by_h[hi]
+            fit_or_load_stage2(dm, nb, wd0, cfg, win0, h; apd_h = apd_h, grid = grid,
+                               setting = setting, save_dir = save_dir, adtype = adtype)
+        end
+        @assert pooled.variants == vs.names "two_stage_forecast(VariantNGM): artefact categories \
+$(pooled.variants) ≠ the window's $(vs.names) at origin $(win0.origin), h=$h"
+        Np  = size(pooled.gamma_sar, 1)
+        rng = MersenneTwister(cfg.seed + h)
+        ab_h = frozen ? wd0.antibody[:, end] : wd0.antibody_fc[:, hi]
+        draws_h = Array{Float64}(undef, A, Np)
+        preds   = Array{Float64}(undef, A, Np, V)      # deterministic per-variant renewal mean per draw
+        acc = zeros(A)
+        for d in 1:Np
+            m = pooled.post_index[d]
+            w_d = gen_interval_pmf_log(pooled.w_mu[d], pooled.w_sigma[d]; smax = cfg.smax)
+            tot = zeros(A)
+            for v in 1:V
+                fill!(acc, 0.0)
+                for s in 1:cfg.smax
+                    acc .+= w_d[s] .* hist[v][:, end - s + 1]
+                end
+                N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
+                              pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d, v])
+                pv = N * acc
+                preds[:, d, v] = pv
+                tot .+= pv
+            end
+            for a in 1:A
+                p = tot[a]
+                if isfinite(p)
+                    σ = max(pooled.sigma_inf[d] * p, 1e-6)
+                    draws_h[a, d] = p + σ * randn(rng)
+                else
+                    draws_h[a, d] = p
+                end
+            end
+        end
+        cols[hi] = draws_h
+        for v in 1:V                                    # robust per-variant lag plug (see two_stage_forecast)
+            plug = [begin
+                        f = filter(isfinite, @view preds[a, :, v])
+                        isempty(f) ? 0.0 : median(f)
+                    end for a in 1:A]
+            hist[v] = hcat(hist[v], plug)
+        end
+    end
+    K = minimum(size(c, 2) for c in cols)
     out = Array{Float64}(undef, A, H, K)
     for hi in 1:H, a in 1:A, d in 1:K
         out[a, hi, d] = cols[hi][a, d]

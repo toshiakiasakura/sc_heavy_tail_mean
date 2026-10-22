@@ -34,7 +34,11 @@ import argparse, json, os, re, shutil, subprocess, sys, tempfile
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # landscape A4, 0.5in margins -> 773pt of text width; see the module docstring for the arithmetic.
 TEXT_WIDTH_PT = 773.0
-CHAR_PT = 9 * 0.86 * 0.602
+# Monospace output font size in pt on the 11pt base, per LaTeX size command. `--fontsize` picks one;
+# footnotesize is the default. 9j's score tables print 177 characters wide since 2026-10-21, which
+# needs `scriptsize` (186 chars per line); footnotesize holds 165.
+FONT_PT = {"footnotesize": 9.0, "scriptsize": 8.0, "tiny": 6.0}
+CHAR_EM = 0.86 * 0.602   # nbconvert's Scale=0.86 × DejaVu Sans Mono's 0.602 em advance
 
 
 def strip_ansi(nb):
@@ -56,6 +60,50 @@ def strip_ansi(nb):
     return n
 
 
+# Characters the xelatex body/monospace fonts here have NO glyph for: each renders as an EMPTY
+# box, silently (measured 2026-10-16 on 16j by extracting the PDF's text — every one came back as
+# U+FFFF, while → × — – § · … − Δ ÷ survived). Several carry MEANING: "≤ 21%" read " 21%", "A ≡ 0"
+# read "A  0", and the legend key "dashed ◇" lost its marker. So they are substituted in the COPY
+# being exported — cell sources and text outputs only, never images, never the notebook on disk.
+# Add to this table when a new symbol shows up as a box; check with `gs -sDEVICE=txtwrite`.
+GLYPHS = {
+    "≥": ">=", "≤": "<=", "≈": "~", "≡": "==", "≠": "!=", "∈": " in ", "⇒": "=>", "⟹": "=>",
+    "⚠": "(!)", "◇": "<>", "○": "o", "₀": "0", "─": "-", "⟨": "<", "⟩": ">", "✓": "ok",
+    "┌": "+", "│": "|", "└": "+",          # the frame Julia's logging draws around @warn/@info
+    "┼": "+", "⋯": "~",                    # DataFrames' header junction and column-truncation mark (17j)
+    "⋮": ":", "⋱": "\\",                   # DataFrames' row-elision marks
+    # Lowercase Greek and the sub/superscript letters and digits: NONE of them has a glyph (measured
+    # 2026-10-21 by exporting a test notebook, both in prose and in code). 9j's code comments are full
+    # of them (ρ_diag, φ_time, cₜ, Kᵀ), and 66 rendered as empty boxes. Σ ² ¹ · × — → • … − – é § are fine.
+    "α": "alpha", "β": "beta", "γ": "gamma", "δ": "delta", "ε": "eps", "ϵ": "eps", "η": "eta",
+    "θ": "theta", "κ": "kappa", "λ": "lambda", "μ": "mu", "ν": "nu", "ξ": "xi", "π": "pi",
+    "ρ": "rho", "σ": "sigma", "τ": "tau", "φ": "phi", "ω": "omega",
+    "ᵀ": "^T", "⁰": "^0", "⁺": "^+", "⁻": "^-", "ᵢ": "_i", "ⱼ": "_j", "ₜ": "_t", "₁": "_1", "₂": "_2",
+}
+
+
+def substitute_glyphs(nb):
+    n = 0
+    def sub(t):
+        nonlocal n
+        for k, v in GLYPHS.items():
+            if k in t:
+                n += t.count(k)
+                t = t.replace(k, v)
+        return t
+    for cell in nb["cells"]:
+        cell["source"] = sub("".join(cell["source"]))
+        for out in cell.get("outputs", []):
+            if out.get("output_type") == "stream":
+                out["text"] = sub("".join(out["text"]))
+            elif out.get("output_type") in ("execute_result", "display_data"):
+                d = out.get("data", {})
+                for k in ("text/plain", "text/markdown"):
+                    if k in d:
+                        d[k] = sub("".join(d[k]))
+    return n
+
+
 def widest_output_line(nb):
     w = 0
     for cell in nb["cells"]:
@@ -71,7 +119,7 @@ def widest_output_line(nb):
     return w
 
 
-def patch_preamble(tex, title=None):
+def patch_preamble(tex, title=None, fontsize="footnotesize"):
     tex = tex.replace(
         r"\geometry{verbose,tmargin=1in,bmargin=1in,lmargin=1in,rmargin=1in}",
         r"\geometry{a4paper,landscape,verbose,tmargin=0.5in,bmargin=0.5in,"
@@ -82,8 +130,8 @@ def patch_preamble(tex, title=None):
     # defined — "LaTeX Error: No counter 'none' defined" plus a knock-on "Missing number". The PDF
     # still builds, which is exactly why it is worth fixing rather than ignoring.
     tex = tex[:i] + "\n% --- export_notebook_pdf.py: fit wide DataFrame output ---\n" \
-                    r"\fvset{fontsize=\footnotesize}" + "\n" \
-                    r"\newcounter{none}" + "\n\n" + tex[i:]
+                  + r"\fvset{fontsize=" + "\\" + fontsize + "}\n" \
+                  + r"\newcounter{none}" + "\n\n" + tex[i:]
     if title:
         tex = re.sub(r"\\title\{[^}]*\}", r"\\title{%s}" % title, tex, count=1)
     return tex
@@ -95,6 +143,8 @@ def main():
     ap.add_argument("output")
     ap.add_argument("--title", default=None)
     ap.add_argument("--keep-tex", action="store_true")
+    ap.add_argument("--fontsize", default="footnotesize", choices=sorted(FONT_PT),
+                    help="output font size; drop to scriptsize when the width check fails")
     a = ap.parse_args()
 
     nb = json.load(open(a.notebook))
@@ -103,15 +153,17 @@ def main():
         sys.exit("export_notebook_pdf: %s has no cell outputs — run it first "
                  "(jupyter nbconvert --to notebook --execute ..., never --inplace)" % a.notebook)
     n_ansi = strip_ansi(nb)
+    n_glyph = substitute_glyphs(nb)      # BEFORE the width check: ">=" is wider than "≥"
     widest = widest_output_line(nb)
-    capacity = int(TEXT_WIDTH_PT / CHAR_PT)
+    capacity = int(TEXT_WIDTH_PT / (FONT_PT[a.fontsize] * CHAR_EM))
     print("cells with output : %d" % n_exec)
     print("ANSI stripped from: %d outputs" % n_ansi)
-    print("widest output line: %d chars   page holds %d at \\footnotesize landscape A4"
-          % (widest, capacity))
+    print("glyphs substituted: %d (no font glyph; see GLYPHS)" % n_glyph)
+    print("widest output line: %d chars   page holds %d at \\%s landscape A4"
+          % (widest, capacity, a.fontsize))
     if widest > capacity:
         sys.exit("export_notebook_pdf: the widest line (%d) exceeds what the page can hold (%d). "
-                 "Narrow the printed tables or drop the font a step further; emitting a silently "
+                 "Narrow the printed tables or pass a smaller --fontsize; emitting a silently "
                  "wrapped table is worse than failing here." % (widest, capacity))
 
     # Register a no-op `wrap_text`. This is the fix that the template route could not deliver.
@@ -129,7 +181,7 @@ def main():
 
     node = nbformat.reads(json.dumps(nb), as_version=4)
     body, resources = exporter.from_notebook_node(node)
-    body = patch_preamble(body, a.title)
+    body = patch_preamble(body, a.title, a.fontsize)
 
     with tempfile.TemporaryDirectory() as d:
         stem = "nb"

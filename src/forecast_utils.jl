@@ -13,6 +13,7 @@
 # After this include the full API of inst/1a/1b is in scope, notably:
 #   FrameworkConfig, WeeklyWindow, cis_age_grid                         (framework.jl)
 #   load_window_data, load_forecast_truth                              (infection_data.jl)
+#   load_cog_variant_counts, variant_set, variant_split, with_variants (variant_data.jl)
 #   prepare_degree_data, pool_over_time                                (degree_agepair.jl)
 #   gen_interval_logparams, gen_interval_pmf_log, gen_interval_pmf,
 #   gi_moments_days, renewal_next, forecast_forward                    (renewal.jl)
@@ -36,6 +37,7 @@ include("comix_uk_time_series.jl")  # inc2prev-aligned weekly helpers
 # --- forecasting framework (dependency order) --------------------------------
 include("framework.jl")             # swap-axis types, WeeklyWindow, FrameworkConfig, containers, age grid
 include("infection_data.jl")        # weekly infections (rolling-sum × pop) + gen_dab antibody
+include("variant_data.jl")          # COG-UK variant composition for the VariantNGM renewal (inst/3 §12)
 include("degree_agepair.jl")        # age-pair binning + per-cell weekly degree assembly
 include("renewal.jl")               # generation-interval PMF + renewal iteration/forecast
 include("ngm.jl")                   # NGM builders (mean / neighbourhood) + reciprocity + susceptibility

@@ -65,6 +65,7 @@ function _s1_meta(path::AbstractString)
            target_accept = g("target_accept"), nuts_adapts = g("nuts_adapts"),
            nuts_draws = g("nuts_draws"), phi_init_scale = g("phi_init_scale"),
            phi_pf_max = g("phi_pf_max"), phi_pf_override = g("phi_pf_override"),
+           pf_degenerate_z = g("pf_degenerate_z"), pf_fallback = g("pf_fallback"),
            divergences  = d === :ABSENT ? missing : d.divergences,
            min_ess      = d === :ABSENT ? missing : d.min_ess,
            max_depth    = d === :ABSENT ? missing : d.max_tree_depth,
@@ -144,6 +145,11 @@ the rest of `tmp/`. Three separate questions, answered separately because they f
    cache token, so that a partially-refitted grid is detectable. `sampler`, `ad_backend`,
    `target_accept`, `nuts_adapts`, `nuts_draws`, `phi_init_scale` and `phi_pf_max` are audited
    for UNIFORMITY; a split here means chains that are not interchangeable.
+   ⚠ **`pf_degenerate_z` / `pf_fallback` (2026-10-17) are TALLIED ONLY too.** The guard draws its
+   replacement only when it fires, so a chain it did NOT fire on is bit-identical to one fitted before
+   the guard existed — the setting's absence (`:ABSENT`) on such a file is not a provenance split. The
+   caveat is that the audit cannot tell whether the guard WOULD have fired on an older file; read a
+   stuck chain (min ESS ≈ 4, depth at cap) as the signature of one that should have.
    ⚠ **`phi_pf_override` is TALLIED ONLY, never audited for uniformity** — it is a per-cell
    OUTCOME (did this fit's Pathfinder φ sit at the boundary?) and is expected to be `true` on a
    handful of weighted-path cells. A large count is a modelling signal, not a provenance failure.
@@ -158,7 +164,13 @@ condition, and it is easy to misread: `_nuts_diagnostics` computes it at the cha
 maximum depth, so `1.0` at depth 7 under a cap of 10 means the sampler settled at a constant
 tree depth — healthy — and not that it saturated.
 
-Writes `res_dir/14j_grid_audit.csv`. `verdict` is true when every present file passes its
+`horizons` (default `cfg.horizons`) selects which `_h<h>` chains to audit; pass `[FROZEN_H]` for
+the frozen-contact h0 set (2026-10-17) — audit it SEPARATELY, because it was fitted with current
+code and so carries `phi_pf_max`/`phi_pf_override`, which the 504 conditional chains lack: pooled
+into one audit the provenance check would (correctly) report a mixed grid. Give that call its own
+`audit_csv` so it does not overwrite 14j's.
+
+Writes `res_dir/<audit_csv>` (default `14j_grid_audit.csv`). `verdict` is true when every present file passes its
 structural check, provenance is uniform, and no chain has a divergence.
 """
 function audit_stage1_grid(cfg::FrameworkConfig;
@@ -169,13 +181,15 @@ function audit_stage1_grid(cfg::FrameworkConfig;
                            craw = nothing,
                            origin_max::Date = Date(2021, 12, 31),
                            structural::Symbol = :sample,
-                           res_dir::AbstractString = "../res")
+                           res_dir::AbstractString = "../res",
+                           horizons = cfg.horizons,
+                           audit_csv::AbstractString = "14j_grid_audit.csv")
     structural in (:none, :sample, :all) ||
         error("structural must be :none, :sample or :all (got $structural)")
     origins === nothing && (origins = available_forecast_origins(cfg; grid = grid, craw = craw,
                                                                  origin_max = origin_max))
     A  = grid.N
-    hs = collect(cfg.horizons)
+    hs = collect(horizons)
 
     rows = NamedTuple[]
     # One structural probe per (degree, horizon) under :sample — the first PRESENT file, so the
@@ -188,6 +202,7 @@ function audit_stage1_grid(cfg::FrameworkConfig;
                            sampler = missing, ad_backend = missing, target_accept = missing,
                            nuts_adapts = missing, nuts_draws = missing, phi_init_scale = missing,
                            phi_pf_max = missing, phi_pf_override = missing,
+                           pf_degenerate_z = missing, pf_fallback = missing,
                            divergences = missing, min_ess = missing, max_depth = missing,
                            frac_at_max = missing, struct_ok = missing, struct_note = "absent"))
             continue
@@ -204,6 +219,7 @@ function audit_stage1_grid(cfg::FrameworkConfig;
         push!(rows, (; degree = deg, origin = o, h = h, present = true,
                        m.sampler, m.ad_backend, m.target_accept, m.nuts_adapts, m.nuts_draws,
                        m.phi_init_scale, m.phi_pf_max, m.phi_pf_override,
+                       m.pf_degenerate_z, m.pf_fallback,
                        m.divergences, m.min_ess, m.max_depth, m.frac_at_max,
                        struct_ok = s.ok, struct_note = s.note))
     end
@@ -221,6 +237,8 @@ function audit_stage1_grid(cfg::FrameworkConfig;
                  :phi_init_scale, :phi_pf_max)
     meta = Dict{Symbol,Any}(k => countmap(have[!, k]) for k in prov_keys)
     meta[:phi_pf_override] = countmap(have.phi_pf_override)          # TALLY ONLY — see docstring
+    meta[:pf_degenerate_z] = countmap(have.pf_degenerate_z)          # TALLY ONLY — see docstring
+    meta[:pf_fallback]     = countmap(have.pf_fallback)              # TALLY ONLY — per-cell outcome
     prov_uniform = all(length(meta[k]) <= 1 for k in prov_keys)
 
     struct_checked = @subset(have, .!ismissing.(:struct_ok))
@@ -229,7 +247,7 @@ function audit_stage1_grid(cfg::FrameworkConfig;
     verdict = struct_ok && prov_uniform && ndiv == 0 && nrow(have) > 0
 
     mkpath(res_dir)
-    CSV.write(joinpath(res_dir, "14j_grid_audit.csv"), files)
+    CSV.write(joinpath(res_dir, audit_csv), files)
 
     println("=== 14j Stage-1 grid audit — token `", contacts, "` in ", save_dir, " ===")
     println("present ", nrow(have), " / ", nrow(files), " cells over ", length(origins),
@@ -243,6 +261,8 @@ function audit_stage1_grid(cfg::FrameworkConfig;
         println("  ", rpad(string(k), 16), meta[k], length(meta[k]) > 1 ? "   ⚠ MIXED" : "")
     end
     println("  ", rpad("phi_pf_override", 16), meta[:phi_pf_override], "   (per-cell outcome; tally only)")
+    println("  ", rpad("pf_degenerate_z", 16), meta[:pf_degenerate_z], "   (setting; tally only — see docstring)")
+    println("  ", rpad("pf_fallback", 16), meta[:pf_fallback], "   (per-cell outcome; tally only)")
     if nrow(have) > 0
         println("health: divergences=", ndiv,
                 "  min_ess=", round(minimum(skipmissing(have.min_ess)); digits = 1),
@@ -1844,6 +1864,9 @@ second place to keep in sync."
 _i2p_est_path(stem::AbstractString) = joinpath(@__DIR__, "..", "inc2prev", "outputs", stem * ".csv")
 
 const _CIS_AGE_PATH = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "cis_age.csv")
+# The ONS "COVID-19 antibody data for the UK" by age, as scraped by inc2prev's `data-raw/update_ab.R`
+# — what `estimate.R --ab` fits (via `read_ab()`). See `ons_antibody_age`.
+const _AB_AGE_PATH  = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "ab_age.csv")
 
 # The UKHSA reported-case caches. ⚠ These are the FIRST data in §6c that are not an inc2prev file,
 # which is why `"ukhsa-reported"` is deliberately NOT in `_I2P_SOURCES` (that tuple drives the
@@ -2756,6 +2779,522 @@ make_inc2prev_incidence_fig(ts::DataFrame; kw...) =
 "§6c's like-for-like twin — all three lines a weekly MEAN of PCR-detectable prevalence."
 make_inc2prev_prevalence_fig(ts::DataFrame; kw...) =
     make_inc2prev_timeline_fig(ts; kind = :prevalence, kw...)
+
+##########################################################################
+# §G2b — the ONS antibody observation, in its ORIGINAL form
+##########################################################################
+#
+# `estimates_age_ab.csv` is a joint fit to CIS PCR positivity AND the ONS "COVID-19 antibody data
+# for the UK" series. §6c plots the first; this block plots the second exactly as ONS published it:
+# its own 9 age bands (16-24 … 80+) and its own Monday-start weeks, NOT rebinned to the CIS grid or
+# the Sunday grid. inc2prev's `read_ab()` does that rebinning (population-weighted onto the CIS
+# lower limits 16/25/35/50/70) before fitting; drawing the rebinned series would hide it.
+
+"""
+    ons_antibody_age(; path, vintage=:latest, thresholds=("standard", "higher"), partial=:error)
+        -> DataFrame (threshold, lower_age_limit, band, start_date, end_date, date_mid,
+                      value, value_lo, value_hi, publication_date)
+
+The ONS antibody-positivity series by age (England, proportion ∈ [0,1] with its published 95% CI),
+one row per `(threshold, start_date, lower_age_limit)`.
+
+`threshold` is the file's `threshold_level` LABEL, which is not always the cut-off it names:
+`"standard"` should be 179 ng/ml (every vintage 2021-06 … 2023-03) and `"higher"` 800 ng/ml (vintages
+2022-01-13 … 2022-04-20 only). `estimate.R --ab` fits `"standard"` (its `read_ab` call overrides
+`read_ab`'s own default of `"higher"`).
+
+⚠ **FROM VINTAGE 2022-06-29 ON, `"standard"` IS THE 800 ng/ml SERIES, MISLABELLED.** The value of
+one cell drops overnight at that vintage (80+, week of 2021-03-01: 63.5% → 36.6%; 50-59, week of
+2021-06-07: 87.9% → 64.4%) and `"higher"` rows stop at the same time. Against the 2022-04-20 vintage,
+2022-06-29's `"standard"` sits a median 2.9 pp from that vintage's 800 ng/ml series and 7.7 pp from
+its 179 ng/ml one (2023-03-29: 2.9 vs 14.9 pp). `update_ab.R` takes `head(n = 1)` of the
+"…by age group" contents entries and its `"standard"` pattern is `""`, which matches any title, so
+when the ONS workbook changed its tables it silently picked the other one. **`:latest` — what
+`read_ab()` hands a refit — is therefore the 800 ng/ml series under the 179 label.** The existing
+`estimates_age_ab.csv` is NOT affected: its `est_ab` spans exactly the 2021-12-23 vintage (see
+`ons_antibody_fit_vintage`), a genuine 179 ng/ml release.
+
+⚠ **NEVER COMPARE THE TWO THRESHOLDS ACROSS VINTAGES.** Under `:latest` (which mixes 2023-03-29
+`"standard"` with 2022-04-20 `"higher"`) the 800 line sits ABOVE the 179 one for ages 16-49 — the
+mislabelling above plus ordinary revision. Within one vintage the order is right (800 < 179 on 590
+of 621 cells at 2022-04-20). Pass `vintage = <that Date>`; `make_ons_antibody_age_fig`'s `pair`
+does exactly that.
+
+⚠ **A vintage's last row is often a PARTIAL week** (3–5 days, 90 rows today) that a later vintage
+replaces with the full week. The collapse is what removes them, so a full 7-day window is ASSERTED
+on every kept row: under `:first` the assert fires by design, which is the honest answer — a
+partial-week first release is not comparable to its neighbours. A single-vintage read
+(`vintage = <Date>`) can hit its OWN trailing partial week (2022-10-05 today); `partial = :drop`
+removes those rows explicitly, which a sweep over vintages needs. The default stays `:error`.
+
+⚠ **Vintage 2023-01-18 appears TWICE** (two source xlsx files, 936 cells each). The copies are
+identical today; a conflicting duplicate within one vintage would make "latest" ill defined, so it
+is asserted rather than resolved by row order.
+
+⚠ **No band below 16.** ONS published no antibody estimates for children, so the `_ab` fit's
+2-10/11-15 antibody curves come from sharing 16-24's seroconversion/waning parameters, not data.
+
+Values are asserted in [0,1] with `lo ≤ value ≤ hi`: `update_ab.R` divides by 100 for every vintage
+except two (2021-06-09/22), so a new vintage on the wrong side of that rule would arrive ×100 or
+÷100 with no error.
+"""
+function ons_antibody_age(; path::AbstractString = _AB_AGE_PATH,
+                          vintage::Union{Symbol,Date} = :latest,
+                          thresholds = ("standard", "higher"), partial::Symbol = :error)
+    partial in (:error, :drop) ||
+        throw(ArgumentError("ons_antibody_age: partial must be :error or :drop, got :$partial"))
+    vintage isa Date || vintage in (:latest, :first) ||
+        throw(ArgumentError("ons_antibody_age: vintage must be :latest, :first or a publication Date, got :$vintage"))
+    isfile(path) || error("ons_antibody_age: no such file $path — is the inc2prev submodule checked " *
+                          "out? (`git submodule update --init`)")
+    df = CSV.read(path, DataFrame)
+    @assert all(string.(df.geography) .== "England") && all(string.(df.level) .== "age_school") "\
+        ons_antibody_age: $path carries rows that are not England/age_school — the bands below \
+        would mix geographies."
+
+    # (threshold, start, lo) => (pub, end, value, lo95, hi95); conflicting duplicates inside ONE
+    # vintage are collected and refused below.
+    best = Dict{Tuple{String,Date,Int}, Tuple{Date,Date,Float64,Float64,Float64}}()
+    seen = Dict{Tuple{String,Date,Int,Date}, NTuple{3,Float64}}()
+    conflicts = 0
+    for r in eachrow(df)
+        thr = string(r.threshold_level); thr in thresholds || continue
+        sd  = _todate_safe(r.start_date); sd === nothing && continue
+        ed  = _todate_safe(r.end_date)
+        pub = _todate_safe(r.publication_date)
+        vintage isa Date && pub != vintage && continue
+        lo  = _toint_safe(r.lower_age_limit)
+        v   = (_tofloat_safe(r.proportion_pos), _tofloat_safe(r.proportion_pos_low_95),
+               _tofloat_safe(r.proportion_pos_high_95))
+        sk = (thr, sd, lo, pub)
+        prev_v = get(seen, sk, nothing)
+        if prev_v !== nothing
+            isequal(prev_v, v) || (conflicts += 1)
+            continue
+        end
+        seen[sk] = v
+        k = (thr, sd, lo)
+        cur = get(best, k, nothing)
+        newer = cur === nothing || (vintage === :first ? pub < cur[1] : pub > cur[1])
+        newer && (best[k] = (pub, ed, v...))
+    end
+    @assert conflicts == 0 "ons_antibody_age: $conflicts cells carry DIFFERENT values twice within \
+        one publication vintage — 'the $vintage vintage' is then ill defined. Refusing."
+    isempty(best) && error("ons_antibody_age: no rows for thresholds $(thresholds) at vintage $vintage")
+
+    # Band labels DERIVED from the limits present — never a literal list.
+    los = sort(unique(k[3] for k in keys(best)))
+    lab = Dict(lo => (i < length(los) ? "$(lo)-$(los[i+1]-1)" : "$(lo)+") for (i, lo) in enumerate(los))
+
+    rows = [(threshold = k[1], lower_age_limit = k[3], band = lab[k[3]],
+             start_date = k[2], end_date = b[2], date_mid = k[2] + Day(3),
+             value = b[3], value_lo = b[4], value_hi = b[5], publication_date = b[1])
+            for (k, b) in best]
+    out = sort(DataFrame(rows), [:threshold, :lower_age_limit, :start_date])
+    partial === :drop && (out = out[Dates.value.(out.end_date .- out.start_date) .== 6, :])
+
+    @assert all(Dates.value.(out.end_date .- out.start_date) .== 6) "ons_antibody_age: the \
+        $vintage-vintage collapse kept a PARTIAL week (end − start ≠ 6 days) — a vintage's trailing \
+        row that no later vintage replaced. Its value is not comparable to its full-week neighbours."
+    @assert all(0 .<= out.value .<= 1) && all(out.value_lo .<= out.value .<= out.value_hi) "\
+        ons_antibody_age: a value outside [0,1] or outside its own 95% CI — check `update_ab.R`'s \
+        per-vintage /100 rule."
+    for g in groupby(out, :threshold)
+        nw = length(unique(g.start_date))
+        @assert nrow(g) == nw * length(unique(g.lower_age_limit)) "ons_antibody_age: threshold \
+            $(first(g.threshold)) is ragged — $(nrow(g)) rows for $nw weeks × \
+            $(length(unique(g.lower_age_limit))) bands."
+    end
+    return out
+end
+
+"""
+    ons_antibody_fit_vintage(; ab_path, est_stem="estimates_age_ab") -> Date
+
+The `ab_age.csv` publication vintage an inc2prev `--ab` fit consumed, DERIVED rather than assumed:
+the vintage whose `"standard"` series ends exactly where the fit's `est_ab` (its modelled antibody
+at each observation window, one per window mid-date) ends. `read_ab()` keeps only the latest
+publication available at fit time, so the fit's windows ARE one vintage's windows.
+
+Measured today: `est_ab` covers 52 windows, 2020-12-10 … 2021-12-02 ⇒ **2021-12-23**, which is also
+the vintage closest to the fitted values (median |Δ| 3.1 / 3.9 / 3.0 pp at 16-24 / 25-34 / 35-49).
+Asserted unique: a second vintage with the same end would make the answer a guess.
+"""
+function ons_antibody_fit_vintage(; ab_path::AbstractString = _AB_AGE_PATH,
+                                  est_stem::AbstractString = "estimates_age_ab")
+    est = CSV.read(_i2p_est_path(est_stem), DataFrame; select = [:name, :date])
+    d = [_todate_safe(x) for (n, x) in zip(est.name, est.date) if string(n) == "est_ab"]
+    d = filter(!isnothing, d)
+    isempty(d) && error("ons_antibody_fit_vintage: $(est_stem).csv carries no `est_ab` rows — " *
+                        "not an --ab fit")
+    last_mid = maximum(d)
+    df = CSV.read(ab_path, DataFrame; select = [:threshold_level, :publication_date, :start_date])
+    ends = Dict{Date,Date}()
+    for r in eachrow(df)
+        string(r.threshold_level) == "standard" || continue
+        pub = _todate_safe(r.publication_date); sd = _todate_safe(r.start_date)
+        (pub === nothing || sd === nothing) && continue
+        ends[pub] = max(get(ends, pub, sd), sd)
+    end
+    hits = sort([p for (p, e) in ends if e + Day(3) == last_mid])
+    @assert length(hits) == 1 "ons_antibody_fit_vintage: $(length(hits)) vintages end at the fit's \
+        last est_ab window $last_mid ($hits) — cannot tell which one the fit read."
+    return only(hits)
+end
+
+"""
+    _origin_span_xaxis!(pnl, span; fmt="u yy") -> pnl
+
+Focus a Date-axis panel on `span = (lo, hi)` (from `_origin_span(origins)`) with a tick on the 1st of
+every month inside it. Limits and ticks are set TOGETHER, from the same span, so no tick label can
+fall outside the panel (the stray-label failure `_i2p_log_ylims` documents for the y-axis).
+
+⚠ Call it AFTER the Date-bearing series (a leading numeric overlay collapses the Date axis — the
+`shade_periods!` rule), and pass the SAME `span` to `shade_periods!` so the phase bands are clipped
+to the axis rather than drawn past it.
+"""
+function _origin_span_xaxis!(pnl, span::Tuple{Date,Date}; fmt::AbstractString = "u yy")
+    lo, hi = span
+    ticks = [d for d in firstdayofmonth(lo):Month(1):hi if lo <= d <= hi]
+    plot!(pnl; xlims = (Dates.value(lo), Dates.value(hi)),
+          xticks = (Dates.value.(ticks), Dates.format.(ticks, fmt)), xtickfontsize = 6)
+    return pnl
+end
+
+"The CoMix origin span as an x-range: first to last origin's `week_mid`, padded by `pad` each side."
+_origin_span(origins; pad::Period = Day(7)) =
+    (week_mid(minimum(origins)) - pad, week_mid(maximum(origins)) + pad)
+
+"""
+    make_ons_antibody_age_fig(; fitted, pair=nothing, latest=nothing, ts=nothing, origins=nothing,
+                              res_dir="../res", fname="14j_ons_antibody_age.png") -> Plots.Plot
+
+One panel per ONS age band (layout from `panel_grid`), antibody positivity in % on a LINEAR axis —
+a bounded proportion, not a count, so §6c's log₁₀ convention does not apply. Each argument is an
+`ons_antibody_age(vintage = <Date>)` frame for ONE publication, and every line is labelled by its
+vintage and its ACTUAL cut-off (not the file's label):
+
+- `fitted` — the vintage the `--ab` fit read (`ons_antibody_fit_vintage`), 179 ng/ml, solid with
+  its PUBLISHED 95% CI as a ribbon.
+- `pair` — one vintage carrying both thresholds: 179 thin grey, 800 dashed black. The like-for-like
+  threshold comparison (see `ons_antibody_age`: never across vintages).
+- `latest` — the newest vintage, labelled `"standard"` in the file but ≈ the 800 ng/ml series (see
+  `ons_antibody_age`), dotted. It is what `read_ab()` would hand a REFIT today.
+
+The ribbon is legitimate here where §6c refuses one: each row is a native weekly ONS estimate with
+its own interval, so nothing is averaged into a pseudo-quantile.
+
+`ts` (§6c's `inc2prev_age_timeseries` frame) adds the "`estimates_age_ab.csv` ends" vline, derived
+from the frame as `make_inc2prev_timeline_fig` derives it; `origins` the CoMix origin span.
+`focus = true` (with `origins`) crops the x-axis to that span with MONTHLY ticks
+(`_origin_span_xaxis!`); a marker outside it is dropped with its legend entry rather than left as a
+label for a line nobody can see. `shade_periods!` is called LAST (it reads the y-limits and a
+leading overlay collapses the Date axis).
+"""
+function make_ons_antibody_age_fig(; fitted::DataFrame, pair = nothing, latest = nothing,
+                                   ts = nothing, origins = nothing, focus::Bool = true,
+                                   res_dir::AbstractString = "../res",
+                                   fname::AbstractString = "14j_ons_antibody_age.png")
+    _onevint(f, nm) = (v = unique(f.publication_date);
+        @assert length(v) == 1 "make_ons_antibody_age_fig: `$nm` spans vintages $v — pass ONE \
+            publication (`ons_antibody_age(vintage = d)`)"; only(v))
+    fitted = fitted[fitted.threshold .== "standard", :]
+    nrow(fitted) > 0 || error("make_ons_antibody_age_fig: `fitted` has no standard-threshold rows")
+    vfit = _onevint(fitted, "fitted")
+    # (frame, threshold label in the file, colour, style, width, legend)
+    lines = Any[]
+    if pair !== nothing
+        vp = _onevint(pair, "pair")
+        @assert Set(pair.threshold) == Set(["standard", "higher"]) "make_ons_antibody_age_fig: \
+            `pair` must carry both thresholds, got $(unique(pair.threshold))"
+        push!(lines, (pair, "standard", :gray40, :solid, 1.0, "179 ng/ml, vintage $vp"))
+        push!(lines, (pair, "higher",   :black,  :dash,  1.2, "800 ng/ml, vintage $vp"))
+    end
+    if latest !== nothing
+        vl = _onevint(latest, "latest")
+        push!(lines, (latest, "standard", :purple, :dot, 1.6,
+                      "vintage $vl — labelled 179, IS ≈800 ng/ml (what a refit reads)"))
+    end
+
+    bands = sort(unique(select(fitted, [:lower_age_limit, :band])), :lower_age_limit)
+    np = nrow(bands); nr, nc = panel_grid(np)              # DERIVED — never a literal
+    col = _model_cols(1)[1]
+    alld = vcat(fitted.date_mid, [l[1].date_mid for l in lines]...)
+    span = (focus && origins !== nothing && !isempty(origins)) ? _origin_span(origins) : nothing
+    dmin, dmax = span === nothing ? extrema(alld) : span
+
+    ab_end = nothing
+    if ts !== nothing
+        r = ts[(ts.source .== "estimates_age_ab") .& ts.complete .& isfinite.(ts.value), :]
+        nrow(r) > 0 && (ab_end = week_mid(maximum(r.week)))
+        # Off a focused axis the marker is invisible but its legend entry is not — drop both.
+        ab_end !== nothing && !(dmin <= ab_end <= dmax) && (ab_end = nothing)
+    end
+
+    panels = Any[]
+    for (pi, b) in enumerate(eachrow(bands))
+        pnl = plot(; title = "age $(b.band)", titlefontsize = 8, xrotation = 45,
+                     xlabel = (pi > np - nc) ? "week (ONS Mon–Sun, mid-date)" : "",
+                     ylabel = (mod1(pi, nc) == 1) ? "antibody positive (%)" : "",
+                     # top-left: on the origin-span axis 16-24 is still below ~40% there, while
+                     # bottom-right would sit on its Jan–Mar 2021 data.
+                     legend = pi == 1 ? :topleft : false, legendfontsize = 5)
+        s = sort(fitted[fitted.lower_age_limit .== b.lower_age_limit, :], :start_date)
+        y = 100 .* s.value
+        plot!(pnl, s.date_mid, y; ribbon = (y .- 100 .* s.value_lo, 100 .* s.value_hi .- y),
+              fillalpha = 0.25, color = col, lw = 2.0,
+              label = pi == 1 ? "179 ng/ml, vintage $vfit (95% CI) — what estimates_age_ab fitted" : "")
+        for (f, thr, c, ls, lw, lbl) in lines
+            q = sort(f[(f.threshold .== thr) .& (f.lower_age_limit .== b.lower_age_limit), :], :start_date)
+            nrow(q) == 0 && continue
+            plot!(pnl, q.date_mid, 100 .* q.value; color = c, ls = ls, lw = lw,
+                  label = pi == 1 ? lbl : "")
+        end
+        # Headroom above 100% for `shade_periods!`'s rotated names (written at 93% of the range).
+        plot!(pnl; ylims = (0, 125), yticks = 0:20:100)
+        span === nothing || _origin_span_xaxis!(pnl, span)
+        ab_end === nothing || vline!(pnl, [ab_end]; color = :darkorange, ls = :dot, lw = 1,
+                                     label = pi == 1 ? "estimates_age_ab.csv ends" : "")
+        if origins !== nothing && !isempty(origins)
+            vline!(pnl, [week_mid(minimum(origins)), week_mid(maximum(origins))];
+                   color = :gray45, ls = :dot, lw = 1, alpha = 0.8,
+                   label = pi == 1 ? "CoMix origin span (§4–§7)" : "")
+        end
+        shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = pi == np)
+        push!(panels, pnl)
+    end
+    ptitle = "ONS 'COVID-19 antibody data for the UK' — antibody positivity by age, ENGLAND, " *
+             "as published (native ONS bands and Mon–Sun weeks, one line per publication vintage)\n" *
+             (span === nothing ? "" : "x-axis: CoMix origin span $(span[1]) … $(span[2])   ·   ") *
+             "⚠ thresholds compared WITHIN one vintage only   ·   ⚠ from vintage 2022-06-29 the " *
+             "file's 'standard' rows are the 800 ng/ml series\n" *
+             "⚠ NO DATA UNDER 16: the _ab fit's 2-10 / 11-15 antibody curves borrow 16-24's " *
+             "parameters   ·   ⚠ England here, §4–§7's contacts are UK"
+    fig = plot(panels...; layout = (nr, nc), size = (420 * nc, 400 * nr),
+               left_margin = 8Plots.mm, bottom_margin = 12Plots.mm, top_margin = 6Plots.mm,
+               plot_title = ptitle, plot_titlefontsize = 8)
+    mkpath(res_dir)
+    savefig(fig, joinpath(res_dir, fname))
+    return fig
+end
+
+##########################################################################
+# §G2c — the observation against the fit: ONS antibody vs inc2prev's modelled antibody
+##########################################################################
+#
+# ⚠ inc2prev models the PROPORTION ANTIBODY-POSITIVE, not a titre — the same quantity ONS
+# publishes, so the two compare directly. Its daily latent is `gen_dab` (infection- AND vaccine-
+# derived antibody, `stan/functions/ab.stan::detectable_antibodies`), on the 7 CIS bins.
+
+const _AB_POP_PATH = joinpath(@__DIR__, "..", "inc2prev", "data-processed", "populations_ab.csv")
+
+"""
+    i2p_gen_dab(; stem="estimates_age_ab", grid) -> DataFrame (bin, bin_label, date, mean, q5, q50, q95)
+
+The modelled antibody prevalence `gen_dab` from an inc2prev `--ab` output, DAILY, per CIS bin, as a
+proportion. Drawn daily, its `q5`/`q95` are a genuine pointwise 90% interval — nothing is averaged.
+
+⚠ **`gen_dab`'s `date` is EMPTY**; dates come from `_load_estimates`' `t_index → Date` map, which is
+built from ALL bins' `infections` rows at once. That is only sound if every separately-fitted group
+shares one time axis (`estimate.R --ab --age` fits 2-10/11-15/16-24 together and the rest alone),
+so it is ASSERTED per bin here — true today (all seven run 2020-07-31 … 2022-03-26), and the
+assert is what keeps a refit with a per-group `--start-date` from silently shifting a bin.
+
+⚠ **Use `gen_dab`, NEVER `dab`.** `dab` exists only per ANTIBODY series of a grouped fit and its
+`variable` labels come out wrong (today: no `16-24`, a spurious `11-15`); `gen_dab` is labelled per
+bin correctly.
+"""
+function i2p_gen_dab(; stem::AbstractString = "estimates_age_ab", grid = cis_age_grid())
+    df, tmap = _load_estimates(_i2p_est_path(stem))
+    inf = df[df.name .== "infections", :]
+    for r in eachrow(inf)
+        d = _todate_safe(r.date); d === nothing && continue
+        @assert tmap[_toint_safe(r.t_index)] == d "i2p_gen_dab: bin $(r.variable) maps t_index \
+            $(r.t_index) to $d but the shared map says $(tmap[_toint_safe(r.t_index)]) — the groups \
+            were fitted on DIFFERENT time axes, so one map cannot date them all."
+    end
+    gd = df[df.name .== "gen_dab", :]
+    nrow(gd) > 0 || error("i2p_gen_dab: $(stem).csv has no `gen_dab` rows — not an --ab fit")
+    idx = _age_index_map(grid)
+    rows = NamedTuple[]
+    for r in eachrow(gd)
+        a = get(idx, String(r.variable), 0); a == 0 && continue
+        push!(rows, (bin = a, bin_label = grid.LAB[a], date = tmap[_toint_safe(r.t_index)],
+                     mean = _tofloat_safe(r.mean), q5 = _tofloat_safe(r.q5),
+                     q50 = _tofloat_safe(r.q50), q95 = _tofloat_safe(r.q95)))
+    end
+    out = sort(DataFrame(rows), [:bin, :date])
+    @assert Set(out.bin) == Set(1:grid.N) "i2p_gen_dab: bins $(sort(unique(out.bin))) of $(grid.N)"
+    @assert nrow(unique(out, [:bin, :date])) == nrow(out) "i2p_gen_dab: duplicate (bin, date) rows"
+    @assert all(0 .<= out.q5 .<= out.q50 .<= out.q95 .<= 1) "i2p_gen_dab: quantiles out of order or outside [0,1]"
+    return out
+end
+
+"""
+    ons_antibody_to_cis(ab; grid, pop_path) -> DataFrame (bin, bin_label, start_date, date_mid,
+                                                           value, value_lo, value_hi, publication_date)
+
+ONE vintage of `ons_antibody_age` collapsed from the 9 ONS bands onto the CIS bins by POPULATION
+WEIGHT — exactly `read_ab()`'s `reduce_agegroups` + `sum(population * value) / sum(population)`,
+with `populations_ab.csv`, i.e. the series the fit actually saw. Every ONS band must NEST in one CIS
+bin (asserted); none starts below 16, so the two child bins get no rows.
+
+⚠ The CI is weighted the same way, as `read_ab()` does — an approximation (a weighted mean of
+interval bounds is not the interval of the weighted mean), kept because it is what the fit's
+likelihood used for `sd`.
+"""
+function ons_antibody_to_cis(ab::DataFrame; grid = cis_age_grid(),
+                             pop_path::AbstractString = _AB_POP_PATH)
+    v = unique(ab.publication_date)
+    @assert length(v) == 1 "ons_antibody_to_cis: pass ONE vintage, got $v"
+    @assert length(unique(ab.threshold)) == 1 "ons_antibody_to_cis: pass ONE threshold"
+    pops = CSV.read(pop_path, DataFrame)
+    pops = pops[string.(pops.level) .== "age_school", :]
+    popof = Dict(_toint_safe(r.lower_age_limit) => Float64(r.population) for r in eachrow(pops))
+    binof(lo) = findlast(<=(lo), grid.LO)
+    for lo in unique(ab.lower_age_limit)
+        @assert haskey(popof, lo) "ons_antibody_to_cis: no population for ONS band $lo in $pop_path"
+        @assert binof(lo) !== nothing "ons_antibody_to_cis: ONS band $lo is below the CIS grid"
+    end
+    abb = transform(ab, :lower_age_limit => ByRow(binof) => :bin)
+    rows = NamedTuple[]
+    for g in groupby(abb, [:bin, :start_date])
+        w = [popof[lo] for lo in g.lower_age_limit]; W = sum(w)
+        push!(rows, (bin = first(g.bin), bin_label = grid.LAB[first(g.bin)],
+                     start_date = first(g.start_date), date_mid = first(g.date_mid),
+                     value = sum(w .* g.value) / W, value_lo = sum(w .* g.value_lo) / W,
+                     value_hi = sum(w .* g.value_hi) / W, publication_date = only(v)))
+    end
+    return sort(DataFrame(rows), [:bin, :start_date])
+end
+
+"""
+    ons_antibody_vintage_threshold(f, pair) -> "179" | "800"
+
+Which cut-off a single-vintage `"standard"` frame ACTUALLY measures, by median |Δ| against the two
+thresholds of a `pair` vintage (`ons_antibody_age(vintage = d)` carrying both). The label in
+`ab_age.csv` cannot be trusted from 2022-06-29 on (see `ons_antibody_age`), so it is classified
+from the values instead.
+"""
+function ons_antibody_vintage_threshold(f::DataFrame, pair::DataFrame)
+    md(a, b) = (j = innerjoin(select(a, :start_date, :lower_age_limit, :value => :x),
+                              select(b, :start_date, :lower_age_limit, :value => :y),
+                              on = [:start_date, :lower_age_limit]);
+                nrow(j) == 0 ? NaN : median(abs.(j.x .- j.y)))
+    d179 = md(f, pair[pair.threshold .== "standard", :])
+    d800 = md(f, pair[pair.threshold .== "higher", :])
+    @assert isfinite(d179) && isfinite(d800) "ons_antibody_vintage_threshold: no overlap with `pair`"
+    return d179 <= d800 ? "179" : "800"
+end
+
+"""
+    antibody_model_agreement(gd, obs) -> DataFrame
+
+Per CIS bin: the model's antibody prevalence averaged over each ONS window (the mean of `gen_dab`'s
+DAILY MEDIAN over `start_date … start_date+6` — the window average the Stan likelihood takes,
+`observed_in_window`) against the rebinned observation. Reports the window count and span, the median
+signed and absolute difference in percentage points, and the fraction of windows where the model
+sits OUTSIDE the observation's published 95% CI. Windows not fully inside `gd`'s span are dropped,
+never extrapolated.
+"""
+function antibody_model_agreement(gd::DataFrame, obs::DataFrame)
+    med = Dict((r.bin, r.date) => r.q50 for r in eachrow(gd))
+    rows = NamedTuple[]
+    for r in eachrow(obs)
+        ds = r.start_date .+ Day.(0:6)
+        all(d -> haskey(med, (r.bin, d)), ds) || continue
+        m = mean(med[(r.bin, d)] for d in ds)
+        push!(rows, (bin = r.bin, bin_label = r.bin_label, start_date = r.start_date, model = m,
+                     obs = r.value, outside = !(r.value_lo <= m <= r.value_hi)))
+    end
+    isempty(rows) && return DataFrame()
+    w = DataFrame(rows)
+    return sort(combine(groupby(w, [:bin, :bin_label]), nrow => :n_windows,
+                        :start_date => minimum => :first_week, :start_date => maximum => :last_week,
+                        [:model, :obs] => ((m, o) -> 100 * median(m .- o)) => :median_diff_pp,
+                        [:model, :obs] => ((m, o) -> 100 * median(abs.(m .- o))) => :median_absdiff_pp,
+                        :outside => mean => :frac_outside_95), :bin)
+end
+
+"""
+    make_antibody_model_fig(gd, obs_fit; obs_later=nothing, grid, origins=nothing,
+                            res_dir="../res", fname="14j_antibody_model_vs_ons.png") -> Plots.Plot
+
+One panel per CIS bin (layout from `panel_grid`): the modelled antibody prevalence `gen_dab` — daily
+median, 90% band — against the ONS observation rebinned to the CIS bins (`ons_antibody_to_cis`):
+
+- `obs_fit` — the vintage the fit READ (black points, 95% CI bars): the in-sample comparison.
+- `obs_later` — a LATER genuine-179 vintage (grey hollow points): revised values over the fitted
+  span and, past the fit's last antibody window (dashed vline), OUT-OF-SAMPLE data it never saw.
+
+Child bins carry the model only (no ONS band below 16), titled as such. Linear % axis.
+`focus = true` (with `origins`) crops the x-axis to the CoMix origin span with MONTHLY ticks
+(`_origin_span_xaxis!`), as `make_ons_antibody_age_fig` does.
+"""
+function make_antibody_model_fig(gd::DataFrame, obs_fit::DataFrame; obs_later = nothing,
+                                 grid = cis_age_grid(), origins = nothing, focus::Bool = true,
+                                 res_dir::AbstractString = "../res",
+                                 fname::AbstractString = "14j_antibody_model_vs_ons.png")
+    col = _model_cols(2)[2]
+    vfit = only(unique(obs_fit.publication_date))
+    fit_end = maximum(obs_fit.date_mid)
+    alld = vcat(gd.date, obs_fit.date_mid, obs_later === nothing ? Date[] : obs_later.date_mid)
+    span = (focus && origins !== nothing && !isempty(origins)) ? _origin_span(origins) : nothing
+    dmin, dmax = span === nothing ? extrema(alld) : span
+    @assert dmin <= fit_end <= dmax "make_antibody_model_fig: the fit's last antibody window \
+        $fit_end is off the axis $dmin … $dmax — the in/out-of-sample divider would vanish."
+    np = grid.N; nr, nc = panel_grid(np)                  # DERIVED — never a literal
+    panels = Any[]
+    for b in 1:np
+        haso = any(obs_fit.bin .== b)
+        pnl = plot(; title = haso ? "age $(grid.LAB[b])" :
+                             "age $(grid.LAB[b]) — NO ONS data (<16): model only",
+                     titlefontsize = 8, xrotation = 45,
+                     xlabel = (b > np - nc) ? "date" : "",
+                     ylabel = (mod1(b, nc) == 1) ? "antibody positive (%)" : "",
+                     # Legend in the FIRST panel: a child bin, model only and low, so its top-left
+                     # is empty — every adult panel has data in every corner.
+                     legend = b == 1 ? :topleft : false, legendfontsize = 5)
+        g = gd[gd.bin .== b, :]
+        y = 100 .* g.q50
+        plot!(pnl, g.date, y; ribbon = (y .- 100 .* g.q5, 100 .* g.q95 .- y), fillalpha = 0.25,
+              color = col, lw = 1.8, label = "estimates_age_ab.csv gen_dab (median, 90% CrI)")
+        if obs_later !== nothing
+            o = obs_later[obs_later.bin .== b, :]
+            vl = only(unique(obs_later.publication_date))
+            nrow(o) > 0 && scatter!(pnl, o.date_mid, 100 .* o.value; markershape = :circle,
+                                    markersize = 2.2, markercolor = :white, markerstrokecolor = :gray35,
+                                    label = "ONS 179 ng/ml, vintage $vl (later release)")
+        end
+        o = obs_fit[obs_fit.bin .== b, :]
+        if nrow(o) > 0
+            yo = 100 .* o.value
+            scatter!(pnl, o.date_mid, yo; yerror = (yo .- 100 .* o.value_lo, 100 .* o.value_hi .- yo),
+                     markersize = 2.0, markercolor = :black, markerstrokecolor = :black,
+                     label = "ONS 179 ng/ml, vintage $vfit (95% CI) — what the fit read")
+        end
+        plot!(pnl; ylims = (0, 125), yticks = 0:20:100)
+        span === nothing || _origin_span_xaxis!(pnl, span)
+        vline!(pnl, [fit_end]; color = :black, ls = :dash, lw = 0.8, label = "fit's last antibody window")
+        if origins !== nothing && !isempty(origins)
+            vline!(pnl, [week_mid(minimum(origins)), week_mid(maximum(origins))];
+                   color = :gray45, ls = :dot, lw = 1, alpha = 0.8, label = "CoMix origin span (§4–§7)")
+        end
+        shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = b == np)
+        push!(panels, pnl)
+    end
+    ptitle = "Modelled vs observed antibody prevalence by age, ENGLAND — inc2prev estimates_age_ab.csv " *
+             "gen_dab against ONS antibody positivity rebinned to the CIS bins as read_ab() does" *
+             (span === nothing ? "" : ", CoMix origin span $(span[1]) … $(span[2])") * "\n" *
+             "⚠ a PROPORTION antibody-positive (≥179 ng/ml), not a titre   ·   right of the dashed " *
+             "line the ONS points are OUT-OF-SAMPLE   ·   ⚠ child bins have no ONS data"
+    fig = plot(panels...; layout = (nr, nc), size = (420 * nc, 400 * nr),
+               left_margin = 8Plots.mm, bottom_margin = 12Plots.mm, top_margin = 6Plots.mm,
+               plot_title = ptitle, plot_titlefontsize = 8)
+    mkpath(res_dir)
+    savefig(fig, joinpath(res_dir, fname))
+    return fig
+end
 
 ##########################################################################
 # §G3 — §6d: the ENGLAND TOTAL incidence, and the ascertainment it implies

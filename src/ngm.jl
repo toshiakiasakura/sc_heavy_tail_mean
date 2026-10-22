@@ -69,6 +69,11 @@ see `(i,j)` — hence its own `contact_star` method. Returns a DENSE `Matrix` (n
 contact_star(::DiagonalMeanNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::AbstractMatrix) =
     diagm(diag(K1))
 
+"""`contact_star(::VariantNGM, …)` — the variant model's C* IS its base builder's (only γ_SAR is
+variant-specific), so it forwards; this also keeps `DiagonalMeanNGM`'s matrix-level method reachable."""
+contact_star(nb::VariantNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::AbstractMatrix) =
+    contact_star(nb.base, K1, K2, G)
+
 """
     build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)
 
