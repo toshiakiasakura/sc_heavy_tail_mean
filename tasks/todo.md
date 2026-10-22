@@ -616,3 +616,17 @@ Plan: `.claude/plans/indexed-knitting-castle.md` (main checkout). Worktree `/wor
 - [ ] then 9j/17j on the new grid; prose in 9j–17j that quotes 63-origin numbers is stale until re-run
 - [x] 1j: inc2prev dcases vs ONS prevalence; infections vs positives; `_ab` vs no-`_ab` infections (the workbook comparison was dropped with `dt_raw/`)
 - [x] variant proportions from COG-UK ALONE: deleted `dt_ons_variant/` + `dt_ukhsa/` (user), `src/ons_variant.jl`, 16j §2–§3, 14j §6c's UKHSA line + §6d, 1j's ONS→UKHSA series + seam check; COG-UK shares now written to `dt_cog_uk/cog_uk_england_weekly_share.csv`
+
+# 2026-10-22 — remove antibody `A` and the leaky factor `F`
+
+Plan: `.claude/plans/indexed-knitting-castle.md`. User: delete 16j; also drop 14j §6c (cont.).
+
+- [x] `ngm.jl` `build_ngm(Cstar, susc, inf; gamma_sar)`; `full_susceptibility` gone
+- [x] `WindowData` loses `antibody`/`antibody_fc`; `weekly_antibody`/`_notify_no_antibody` gone
+- [x] `model_transmission{,_variant}`, `fit_stage2_pooled` (no `pooled.F`), both forecast iterators
+- [x] readers: 8j `load_transmission_draws`/`reproduction_draws(dm, nb, cfg, win)`, 9j (`plot_F`, `F_pinned`, R(t) `inf` kwarg), 10j, 14j (§G2b/§G2c, `ngm_antibody_columns`), 15j/17j prose
+- [x] 16j deleted; 9j cell 14 (F figure) and 14j cells 43–48 deleted; notebook prose
+- [x] docs: CLAUDE.md, inst/3, inst/7, hpc/README
+- [x] verified: log-density bit-identical; gradient ≤ 2e-12 apart ⇒ Pathfinder draws differ (same posterior,
+      different sample); old-formula R on an F-carrying artefact == new reader exactly; all viz utils load
+- [ ] 9j/14j/17j end-to-end — need the `-eng` grid

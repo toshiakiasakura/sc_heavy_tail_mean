@@ -859,7 +859,7 @@ correlation| between coordinates of the unshuffled draw vector.
 
 **What this is for.** `margins` defaults to `("age",)` alone, because `"age"` is the only margin
 whose vector the model actually produces jointly. Across AGE there *is* a genuine shared-parameter
-joint — one `post_index[d] → Cstar_end[m]`, one `susc`/`inf`/`F`/`gamma_sar`/GI per draw, and
+joint — one `post_index[d] → Cstar_end[m]`, one `susc`/`inf`/`gamma_sar`/GI per draw, and
 `pred = N * acc` couples all seven bins — so a non-zero answer here is possible, and what it
 measures is how much of that joint survives the iid-across-age observation layer that dominates it
 (mean |corr| across age ≈ 0.07–0.10).

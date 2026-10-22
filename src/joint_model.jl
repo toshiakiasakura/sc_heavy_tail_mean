@@ -200,7 +200,7 @@ contactee-bin draw — so `c̄` is the same whichever is passed. That is what ma
 `n_fit − h` of the focal weeks, so `c̄` drifted with the horizon. Anchoring the window restored it.
 
 NOTE the model's *forecasts* are invariant to the `/A` convention AND to `c̄` itself:
-`N_ab = γ_SAR·fs_a·c̄·inf_b`, so `γ_SAR` and `c̄` enter only as a product and `γ_SAR` is freely
+`N_ab = γ_SAR·susc_a·c̄·inf_b`, so `γ_SAR` and `c̄` enter only as a product and `γ_SAR` is freely
 estimated (verified: `c̄`×10 ⇒ `γ_SAR`×0.105, R unchanged to 0.3%). The convention only fixes what
 `γ_SAR` **means** (and where it sits under its prior).
 """
@@ -733,7 +733,7 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
     susc = vcat(offs_s[1:cfg.ref_bin-1], one(sig_s), offs_s[cfg.ref_bin:end])       # susc[ref]=1; the A-1 offsets fill the other bins in order
 
     # NO-INTERACTION model (inst/6): with a DIAGONAL C* the NGM is diagonal, so
-    # N_aa = γ_SAR·susc_a·(1+(F−1)A_a)·C*_aa·inf_a — susc_a and inf_a enter only through their
+    # N_aa = γ_SAR·susc_a·C*_aa·inf_a — susc_a and inf_a enter only through their
     # product and are individually non-identifiable. Infectivity is therefore pinned to 1 in every
     # bin and the whole age profile is carried by `susc`. `sig_i`/`z_i` are NOT sampled at all (an
     # unused latent would just be prior-driven noise in the Pathfinder approximation).
@@ -746,28 +746,11 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
         inf = vcat(offs_i[1:cfg.ref_bin-1], one(sig_i), offs_i[cfg.ref_bin:end])         # inf[ref]=1
     end
 
-    # ⚠ TEMPORARY (2026-08-04, user request): the ANTIBODY / TITRE TERM IS DISABLED by pinning the
-    # leaky protection factor to F ≡ 1. Then full_susceptibility_a(t) = susc_a·(1 + 0·A_a(t)) = susc_a
-    # EXACTLY, so `wd.antibody` drops out of the NGM entirely. `ngm.jl` is deliberately left alone —
-    # `build_ngm`/`full_susceptibility` stay general and are simply called with F = 1.0, and the
-    # multiplier (F−1) is exactly 0.0. That is only NaN-safe because `weekly_antibody` ZERO-fills
-    # unmatched weeks rather than NaN-filling (infection_data.jl; 0.0*NaN would be NaN).
-    #
-    # F is NOT sampled — same reasoning as `fix_infectivity` above (inst/3 §"Fixed infectivity"):
-    # an unused latent stays prior-driven and pollutes the Pathfinder approximation, so it is dropped
-    # from the parameter space rather than merely ignored. It IS still returned (as the constant 1.0)
-    # so every downstream consumer keeps working untouched: `fit_stage2_pooled`'s `q.F` → `pooled.F`,
-    # `two_stage_forecast`, `reproduction_draws` (8j), `fit_window_infection_draws` (10j) and
-    # `plot_F` (9j), whose panel now shows a flat 1.0 line that documents the term being off.
-    #
-    # ⚠ CACHE: this changes the Stage-2 posterior and `contacts_label` does NOT encode it (same trap
-    # as `ref_bin`/`gamma_sar_prior`) — delete any `8j_s2_*` and the derived `9j_assembly_*`/`9j_rt_*`/
-    # `9j_relrt_*`/`9j_obsrt_*` before refitting. Stage-1 `8j_s1_*` chains have no F and are
-    # UNAFFECTED; do NOT bump the token, it is shared with Stage 1 and a bump would orphan them all.
-    #
-    # TO RESTORE the antibody term: swap the two lines below back.
-    # F ~ Beta(5, 1)
-    F = 1.0
+    # (Munday's leaky antibody factor `F` — `susc_a·(1+(F−1)·A_a(t))` — was pinned at F ≡ 1 on
+    # 2026-08-04 and REMOVED, with the antibody input `A_a(t)`, on 2026-10-22. The log-density is
+    # bit-identical without the exact ×1, but ReverseDiff's gradient moves in its last bits
+    # (≤ 2e-12), so Pathfinder draws differ chaotically from pre-removal fits: same target, a
+    # different Monte Carlo sample — like an AD-backend swap. Do not mix the two in one grid.)
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
     # ---- generation interval, ESTIMATED (2026-07-30; Munday 2023 Eq 2 + Table 1, §3.1) ----
@@ -812,10 +795,9 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
     # ---- infection likelihood over the fitting weeks (t > smax); NGM uses week-t C* ----
     # (contacts vary by week; C*_t is the fixed `Cstar_weeks[t - smax + off]` — the contact window
     # starts at `wd`'s first FITTING week and runs `h` weeks past the origin, `-w8h`, so the renewal
-    # reads its last `n_fit` columns. `wd.antibody[:, t]` is still passed but has NO effect
-    # while F ≡ 1 — see the TEMPORARY block above.)
+    # reads its last `n_fit` columns.)
     for t in (cfg.smax + 1):Tn
-        N = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf, F, wd.antibody[:, t]; gamma_sar = gamma_sar)
+        N = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf; gamma_sar = gamma_sar)
         pred = renewal_next(N, wd.I_mean, t, w)
         for a in 1:A
             σ = sqrt((sigma_inf * wd.I_mean[a, t])^2 + wd.I_sd[a, t]^2)
@@ -823,14 +805,14 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
         end
     end
 
-    return (; susc, inf, F, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
+    return (; susc, inf, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
 end
 
 # ======================================================================================
 # VARIANT-SPECIFIC transmission model (`VariantNGM`, inst/3 §12; 2026-10-21, user request).
 #
 # One renewal per variant category v (chosen at the origin, `variant_split`), each with its OWN
-# γ_SAR,v; susc, inf, F, σ_inf and the GI are SHARED and sampled exactly as in `model_transmission`
+# γ_SAR,v; susc, inf, σ_inf and the GI are SHARED and sampled exactly as in `model_transmission`
 # (same priors, same clamps, same names — only `log_gamma_sar` becomes a length-V vector with the
 # same independent prior per element, user's choice). No source gives infections by variant, so the
 # England-wide COG-UK share splits every age bin:  I_v,a(t) = p_v(t)·I_a(t), and
@@ -867,7 +849,6 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
         offs_i = exp.(_softclamp.(sig_i .* z_i, log(0.05), log(20.0)))
         inf = vcat(offs_i[1:cfg.ref_bin-1], one(sig_i), offs_i[cfg.ref_bin:end])
     end
-    F = 1.0                                            # antibody term off, as in model_transmission
     sigma_inf ~ truncated(Normal(0.05, 0.025); lower = 0)
 
     wmu0, wv0 = gen_interval_logparams(cfg.gen_mean_days, cfg.gen_sd_days)
@@ -888,7 +869,7 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
                         for v in 1:V)) for t in 1:Tn]                                      # A×V data
     ll = zero(sigma_inf)
     for t in (cfg.smax + 1):Tn
-        N0  = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf, F, wd.antibody[:, t]; gamma_sar = 1.0)
+        N0  = build_ngm(Cstar_weeks[t - cfg.smax + off], susc, inf; gamma_sar = 1.0)
         acc = w[1] .* Iw[t - 1]
         for s in 2:cfg.smax
             acc = acc .+ w[s] .* Iw[t - s]
@@ -899,7 +880,7 @@ $(length(Cstar_weeks)) weeks; expected n_fit + h = $(cfg.n_fit) + h for h in $(c
     end
     Turing.@addlogprob! ll
 
-    return (; susc, inf, F, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
+    return (; susc, inf, gamma_sar, sigma_inf, w_mu = w_mu_e, w_sigma = w_sigma_e)
 end
 
 """`_transmission_model(Cstar_weeks, wd, cfg, nb)` — the Stage-2 model for builder `nb`:
@@ -1511,8 +1492,8 @@ Mooncake costs 10.64 s vs ReverseDiff's 0.30 s per fit while parallelising 1.09�
 16.5 min vs 0.2 min per pooled cell. See `stage2_ad_backend`.
 
 Returns a NamedTuple
-`(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end, n_post, n_draw)` where the first
-five are the pooled per-draw infection parameters (`susc`/`inf` are `N×A`), `post_index[d]` is the
+`(; gamma_sar, susc, inf, sigma_inf, w_mu, w_sigma, post_index, Cstar_end, n_post, n_draw)` where the first
+six are the pooled per-draw infection parameters (`susc`/`inf` are `N×A`), `post_index[d]` is the
 Stage-1 draw `d` came from, and `Cstar_end[m]` is Stage-1 draw `m`'s **origin+h** (`[end]`) `C*` — the
 matrix the forecast NGM is built from. The `M` per-draw fits run under `Semaphore(max_concurrent)`
 (each with its own deterministic RNG `base_seed + m`), writing disjoint preallocated slots.
@@ -1545,17 +1526,17 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
         nd = min(n_draw, length(gq))
         # `gamma_sar` is a scalar per draw, or a length-V vector for `VariantNGM` (⇒ an nd × V matrix)
         gs = is_variant(nb) ? Matrix{Float64}(undef, nd, length(gq[1].gamma_sar)) : Vector{Float64}(undef, nd)
-        Fv = Vector{Float64}(undef, nd); sg = Vector{Float64}(undef, nd)
+        sg = Vector{Float64}(undef, nd)
         wm = Vector{Float64}(undef, nd); wv = Vector{Float64}(undef, nd)
         su = Matrix{Float64}(undef, nd, A); infm = Matrix{Float64}(undef, nd, A)
         for d in 1:nd
             q = gq[d]
             is_variant(nb) ? (gs[d, :] = q.gamma_sar) : (gs[d] = q.gamma_sar)
-            Fv[d] = q.F; sg[d] = q.sigma_inf
+            sg[d] = q.sigma_inf
             wm[d] = q.w_mu; wv[d] = q.w_sigma          # per-draw GI log-parameters
             su[d, :] = q.susc; infm[d, :] = q.inf
         end
-        per_m[m] = (; gamma_sar = gs, susc = su, inf = infm, F = Fv, sigma_inf = sg,
+        per_m[m] = (; gamma_sar = gs, susc = su, inf = infm, sigma_inf = sg,
                       w_mu = wm, w_sigma = wv)
     end
 
@@ -1580,14 +1561,13 @@ function fit_stage2_pooled(nb::NGMBuilder, moment_draws, wd::WindowData, cfg::Fr
     end
 
     gamma_sar  = reduce(vcat, (per_m[m].gamma_sar  for m in 1:M))
-    F          = reduce(vcat, (per_m[m].F          for m in 1:M))
     sigma_inf  = reduce(vcat, (per_m[m].sigma_inf  for m in 1:M))
     susc       = reduce(vcat, (per_m[m].susc       for m in 1:M))
     inf        = reduce(vcat, (per_m[m].inf        for m in 1:M))
     w_mu       = reduce(vcat, (per_m[m].w_mu       for m in 1:M))
     w_sigma    = reduce(vcat, (per_m[m].w_sigma    for m in 1:M))
-    post_index = reduce(vcat, (fill(m, length(per_m[m].F)) for m in 1:M))
-    base = (; gamma_sar, susc, inf, F, sigma_inf, w_mu, w_sigma, post_index, Cstar_end,
+    post_index = reduce(vcat, (fill(m, length(per_m[m].sigma_inf)) for m in 1:M))
+    base = (; gamma_sar, susc, inf, sigma_inf, w_mu, w_sigma, post_index, Cstar_end,
               n_post = M, n_draw = n_draw)
     is_variant(nb) || return base
     # `VariantNGM`: `gamma_sar` is N × V, columns in `variants` order; the rule and the categories'
@@ -2097,23 +2077,20 @@ Pooled `A × H × N` forecast (N = n_stage1_post·n_stage2_draws = 10_000). **In
 the baseline `win0.origin` (t₀); for each horizon `h` the Stage-2 pooled draws for
 `(dm, nb, origin, h)` are reloaded (or built), and per pooled draw `d` (from Stage-1 draw
 `m = post_index[d]`) the NGM
-`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd0.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
+`N = build_ngm(Cstar_end[m], susc[d], inf[d]; gamma_sar=gamma_sar[d])`
 takes one renewal step against the history (observed lags up to t₀ plus the intervening horizons'
 predictions, plugged as the MEDIAN over finite draws — see `step_plug` below for why not the mean;
 per-draw coherence across horizons is undefined either way, mirroring the former
 `iterated_forecast`). `apd_by_h[hi]` (optional) is the pre-built horizon-window `AgePairData`.
 
-Two things changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
-- **Antibody comes from the TARGET week t₀+h** (`antibody_fc[:, hi]`), not t₀ — matching the contact
-  window, which already ends at t₀+h. §3.2.
+Changed 2026-07-30 (`inst/5_formal_pathfinder_impl.md`):
 - **The generation interval is per draw**, so the renewal-weighted lag sum `acc` is computed INSIDE
   the draw loop from that draw's `(w_mu, w_sigma)`. It can no longer be hoisted per horizon; hoisting
   it would silently apply one draw's GI to all of them.
 
 **`frozen = true`** (2026-10-17) is the FROZEN-CONTACT, unconditional counterpart: ONE Stage-2 pooled
 fit at `h = FROZEN_H` (contacts up to t₀ only, `off = 0`) is loaded/built before the loop and reused
-at EVERY horizon, so `Cstar_end[m]` is the **t₀** matrix throughout; antibody is frozen at t₀ too
-(`wd0.antibody[:, end]` — inert while `F ≡ 1`). `apd_by_h`, if given, is then the one-element
+at EVERY horizon, so `Cstar_end[m]` is the **t₀** matrix throughout. `apd_by_h`, if given, is then the one-element
 `[h0 window]`. Everything else — per-draw GI, `MersenneTwister(cfg.seed + h)` noise, the median lag
 plug, the draw alignment — is the SAME code path, so the two schemes differ only in their contacts
 and fit, never in the iterator. (Proper per-draw iteration would be possible here, since every
@@ -2148,9 +2125,6 @@ apd_by_h must be the single h=$(FROZEN_H) window, got $(length(apd_by_h))"
         # The renewal-weighted history is now PER DRAW: the generation interval is estimated
         # (§3.1), so each pooled draw carries its own (w_mu, w_sigma) ⇒ its own w. It can no
         # longer be hoisted out of the loop as one horizon-constant `acc`.
-        # Antibody comes from the TARGET week t₀+h (2026-07-30, §3.2), matching the contact
-        # window that already ends at t₀+h — not from the origin.
-        ab_h = frozen ? wd0.antibody[:, end] : wd0.antibody_fc[:, hi]   # frozen ⇒ t₀
         draws_h = Array{Float64}(undef, A, Np)
         preds   = Array{Float64}(undef, A, Np)         # deterministic renewal mean per draw
         for d in 1:Np
@@ -2160,8 +2134,8 @@ apd_by_h must be the single h=$(FROZEN_H) window, got $(length(apd_by_h))"
             for s in 1:cfg.smax
                 acc .+= w_d[s] .* hist[:, end - s + 1]
             end
-            N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
-                          pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d])
+            N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :];
+                          gamma_sar = pooled.gamma_sar[d])
             pred = N * acc
             for a in 1:A
                 p = pred[a]
@@ -2199,8 +2173,8 @@ end
     _two_stage_forecast_variant(dm, nb::VariantNGM, wd0, cfg, win0; …) -> A × H × N
 
 `two_stage_forecast` for the VARIANT-SPECIFIC renewal (inst/3 §12). Same pooled loading (per horizon,
-or one `FROZEN_H` set when `frozen`), the same per-draw GI, `MersenneTwister(cfg.seed + h)` noise and
-antibody column as the single-renewal path; what differs is the state: one history per variant
+or one `FROZEN_H` set when `frozen`), the same per-draw GI and `MersenneTwister(cfg.seed + h)` noise as the
+single-renewal path; what differs is the state: one history per variant
 category, `hist_v = p_v·I` over the observed window (shares up to t₀ only — the categories and every
 share are fixed at the origin), each stepped with its own `γ_SAR,v`:
 `pred_v = N_v · Σ_s w_s hist_v[:, end−s+1]`. The forecast draw is the TOTAL `Σ_v pred_v` plus the
@@ -2237,7 +2211,6 @@ apd_by_h must be the single h=$(FROZEN_H) window, got $(length(apd_by_h))"
 $(pooled.variants) ≠ the window's $(vs.names) at origin $(win0.origin), h=$h"
         Np  = size(pooled.gamma_sar, 1)
         rng = MersenneTwister(cfg.seed + h)
-        ab_h = frozen ? wd0.antibody[:, end] : wd0.antibody_fc[:, hi]
         draws_h = Array{Float64}(undef, A, Np)
         preds   = Array{Float64}(undef, A, Np, V)      # deterministic per-variant renewal mean per draw
         acc = zeros(A)
@@ -2250,8 +2223,8 @@ $(pooled.variants) ≠ the window's $(vs.names) at origin $(win0.origin), h=$h"
                 for s in 1:cfg.smax
                     acc .+= w_d[s] .* hist[v][:, end - s + 1]
                 end
-                N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
-                              pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d, v])
+                N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :];
+                              gamma_sar = pooled.gamma_sar[d, v])
                 pv = N * acc
                 preds[:, d, v] = pv
                 tot .+= pv

@@ -93,7 +93,7 @@ by its Thursday mid-date. A forecast is organised around a **`WeeklyWindow`** wi
 - `all_weeks = lag_weeks ++ fit_weeks`: the $T = 12$ contiguous weeks,
 - `forecast_weeks`: the horizon target weeks $t_0 + h$ for $h \in$ `horizons` $= \{1,2,3,4\}$.
 
-⚠ **The two data series are assembled over DIFFERENT spans.** Infections and antibody
+⚠ **The two data series are assembled over DIFFERENT spans.** Infections
 (`load_window_data`, §2.3) span all $T = 12$ `all_weeks`, because the renewal needs $s_{\max}$
 weeks of history $I(t-s)$ that are never themselves predicted. The **contact-degree data**
 (`prepare_degree_data`, §2.4) span `win.fit_weeks ++ win.forecast_weeks` of a window built by
@@ -123,14 +123,14 @@ missed call site would produce a complete, plausible, wrongly-dated forecast.
 Because every horizon's contact window is anchored at $t_0-n_{\text{fit}}+1$, the origin sits at
 column `n_fit` $= 8$ in *every* Stage-1 chain (10j asserts `t_o_est == cfg.n_fit`).
 
-### 2.3 Infection and antibody series
+### 2.3 Infection series
 
 Age-stratified estimates are taken from the `inc2prev` output `estimates_age.csv`
 (`infection_data.jl`, `_EST_PATH`). ⚠ **This was `estimates_age_ab.csv` until 2026-09-16**, when the
 source was changed (errors were found in the use of the `_ab` variant — 1j now shows them: in 2-10,
 11-15, 16-24 and 35-49 the `_ab` fit's weekly infections stay nearly flat through the spring-2021
 trough, up to ~10–20× the positivity-only fit, while the totals agree). The schema is identical, the
-`infections` posterior is not, and the antibody consequences are spelled out below:
+`infections` posterior is not:
 
 - **Weekly infections** $I_{a,t}$ and their SDs $s^{I}_{a,t}$. The `name == "infections"` rows give
   a *daily per-capita infection proportion* with mean and SD; the weekly count is the 7-day sum of
@@ -145,28 +145,12 @@ trough, up to ~10–20× the positivity-only fit, while the totals agree). The s
   PREVALENCE: 1j measures it at 0.6–2.3× the weekly infections week to week (D/7 = 1.24 in steady
   state, D = 8.7 days detectable), a scale and lag the renewal would have had to absorb in
   $\gamma_{\text{SAR}}$ and the generation interval.
-- **Weekly antibody prevalence** $A_{a,t} \in [0,1]$, the within-week mean of the `name == "gen_dab"`
-  rows. Those rows carry no date column, so their dates are reconstructed from the `t_index` field
-  via the `t_index → date` map built from the infection rows.
-
-  Antibody is assembled **twice**: over the $T$ window weeks (`antibody`, used in the Stage-2 fit
-  loop) and separately over the $H$ **forecast target weeks** $t_0+h$ (`antibody_fc`, used by the
-  forecast NGM — §3.2). The two are kept in distinct fields rather than one widened matrix so that
-  `antibody[:, t]` keeps its exact meaning inside the likelihood. `weekly_antibody` fills any week it
-  cannot match with $0$, which is indistinguishable from *genuinely zero antibody prevalence* — and on
-  a forecast column that reads as full susceptibility and would inflate the forecast without erroring.
-  It therefore **warns** on unmatched weeks, loudly for forecast targets. The zero fill is retained as
-  the value (a `NaN`/`missing` would propagate into the NGM); the warning is a tripwire for when the
-  origin cap is raised past the `gen_dab` series' end, and is silent over the current 63 origins.
-
-  ⚠ **Against the current source there are NO `gen_dab` rows at all**, so $A_{a,t} \equiv 0$ for
-  every week and every bin: `estimates_age.csv` carries no antibody block, only the `_ab` variants
-  do. `weekly_antibody` detects the no-rows case and emits one `@info` per session rather than the
-  per-week gap warning, which would otherwise fire at every one of ~126 call sites. This is inert
-  **only** because §3.1 pins $F = 1$, so the leaky factor $1 + (F-1)A_a \equiv 1$ whatever $A$ holds.
-  **Re-enabling $F \sim \mathrm{Beta}(5,1)$ against this source would infer $F$ from a covariate that
-  is identically zero** — a posterior equal to its prior, and zero antibody protection everywhere,
-  with no error and no warning. Point `_EST_PATH` back at an `_ab` variant first.
+- **No antibody series.** Munday's model also carried weekly antibody prevalence $A_{a,t}$ (from
+  `gen_dab`) into a leaky susceptibility factor $1+(F-1)A_a$. $F$ was pinned at $1$ on 2026-08-04, and
+  `estimates_age.csv` has no `gen_dab` rows, so $A \equiv 0$ after the 2026-09-16 switch. Both were
+  **removed on 2026-10-22** (`weekly_antibody`, `WindowData.antibody`/`antibody_fc`, the pooled `F`).
+  The factor was exactly $1$, so the log-density is unchanged bit for bit (Pathfinder draws are not:
+  the gradient moves in its last bits — see CLAUDE.md). Re-adding it needs an `_ab` source.
 
 Populations $N_a$ and proportions $N_a / \sum_b N_b$ complete the `WindowData` container.
 
@@ -272,7 +256,7 @@ and hence its own $w$, which the forecast (§8) and the fit-window diagnostic mu
 For a target week the $A\times A$ NGM is
 
 $$
-N_{ab}(t) \;=\; \gamma_{\mathrm{SAR}}\;\cdot\;\underbrace{\text{susc}_a\big(1 + (F-1)\,A_a(t)\big)}_{\text{full\_susceptibility}_a(t)}
+N_{ab}(t) \;=\; \gamma_{\mathrm{SAR}}\;\cdot\;\text{susc}_a
 \;\cdot\; C^\ast_{ab} \;\cdot\; \text{inf}_b ,
 $$
 
@@ -281,30 +265,14 @@ normalised, so $\gamma_{\mathrm{SAR}}$ carries the NGM level and reproduces the 
 $N_{rr}=\text{susc}_r\cdot\text{inf}_r=\gamma_{\mathrm{SAR}}$, $r=\texttt{cfg.ref\_bin}$, and is
 comparable across origins — $\text{susc}_a$ the **relative** inherent susceptibility of group $a$
 and $\text{inf}_b$ the **relative** infectivity of group $b$, both normalised so the reference bin
-$r = 4$ ("25-34") is $1$ ($\text{susc}_r=\text{inf}_r=1$; the other $A-1$ bins estimated), and
-$F$ a **leaky** antibody-protection factor scaling susceptibility by the group's antibody
-prevalence $A_a(t)$ (at $F=1$ antibodies confer no protection; smaller $F$ gives stronger
-protection). $C^\ast_{ab}$ is the per-capita effective contact matrix produced by the NGM builder
+$r = 4$ ("25-34") is $1$ ($\text{susc}_r=\text{inf}_r=1$; the other $A-1$ bins estimated).
+$C^\ast_{ab}$ is the per-capita effective contact matrix produced by the NGM builder
 (§5.1).
 
-**$F$ is pinned to $1$**, so $\text{full\_susceptibility}_a(t)=\text{susc}_a$ exactly, the $(F-1)$
-multiplier is $0$ and $A_a(t)$ does not enter the NGM. It is not a Stage-2 latent — dropping it from
-the parameter space rather than leaving it unused keeps it out of the Pathfinder approximation — but
-it is still *returned* as the constant $1.0$, so every downstream consumer takes the same shape.
-`ngm.jl` is deliberately left general: `build_ngm`/`full_susceptibility` take $F$ and are simply
-called with $1$. That is NaN-safe only because `weekly_antibody` zero-fills unmatched weeks rather
-than NaN-filling them (§2.3).
-
-**Antibody at the target week.** Inside the Stage-2 *fit* loop $A_a(t)$ is the week-$t$ antibody of
-the $t_0$-anchored infection window. In the **forecast** (§8) the frozen NGM instead uses
-$A_a(t_0+h)$ — the antibody prevalence at the horizon target week — mirroring the availability
-assumption already made for the contact data (whose Stage-1 window ends at $t_0+h$). The fit loop is
-deliberately **not** shifted: the infection outcomes it is evaluated against exist only up to $t_0$,
-so an $h$-shifted antibody there would pair future antibody with present infections for no gain. One
-consequence is that the likelihood pairs $t{+}h$ contacts with $t$ antibody, and only the forecast
-step has both at $t_0+h$. Note also that antibody (`gen_dab`) comes from the **same** inc2prev/CIS
-pipeline as the infection targets, whereas CoMix is an independent survey — so assuming $A(t_0+h)$ is
-known is a stronger assumption than assuming contacts at $t_0+h$ are.
+**No antibody term.** Munday's NGM scales susceptibility by a leaky antibody factor
+$1+(F-1)A_a(t)$. It was pinned at $F=1$ (no protection) on 2026-08-04 and removed, with the antibody
+input $A_a(t)$, on 2026-10-22 (§2.3). Its forecast-side detail — the target-week antibody
+$A_a(t_0+h)$ — went with it.
 
 ### 3.3 Renewal recursion
 
@@ -693,8 +661,7 @@ $\rho_{\text{diag}}, \rho_{\text{gap}}$, the AR(1) coefficient $\phi$ and the sc
 $\eta, \sigma_c$ — so the weekly log-rate fields are **temporally correlated** rather than
 independent draws. Each week yields its own $C^\ast_t$ (through the per-week level $c_t$,
 structure-field column $R_{\cdot,t}$, and the per-week block-linear dispersion $m_{\ell,t}$, §4.3),
-and the transmission NGM $N(t)$ therefore varies in time through **both** antibody prevalence and
-contacts. `constant_contacts = true` recovers the pooled one-$C^\ast$-per-window preliminary;
+and the transmission NGM $N(t)$ therefore varies in time through the contacts. `constant_contacts = true` recovers the pooled one-$C^\ast$-per-window preliminary;
 `model_degree` branches on the flag but returns per-week moments of length $T_n$ either way.
 
 **Sampling statements.**
@@ -760,7 +727,7 @@ $$
 \text{susc} &= \operatorname{splice}_r\big(1,\ \exp(\operatorname{softclamp}(\sigma_s\,z_s, \log 0.05, \log 20))\big),\\
 \sigma_i &\sim \mathcal N^+(0, 0.25^2), & z_i &\sim \mathcal N(0,1)^{A-1}, &
 \text{inf} &= \operatorname{splice}_r\big(1,\ \exp(\operatorname{softclamp}(\sigma_i\,z_i, \log 0.05, \log 20))\big),\\
-F &\equiv 1 \ \text{(pinned, §3.2)}, & \sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2), & & \\
+\sigma_{\text{inf}} &\sim \mathcal N^+(0.05, 0.025^2), & & & & \\
 w_\mu &\sim \mathcal N(-0.6830,\ 0.1366^2), & w_\sigma &\sim \mathcal N^{+}(0.6931,\ 0.1386^2), &
 w &= \text{Eq. §3.1}\big(w_\mu, w_\sigma\big).
 \end{aligned}
@@ -784,7 +751,7 @@ Pathfinder draw's supercritical NGM at the source. The $A-1$ non-reference offse
 per age bin** ($z\sim\mathcal N(0,1)^{A-1}$ iid) — **no cross-bin smoothing**. The
 **generation-interval** latents $(w_\mu, w_\sigma)$ live here too (§3.1); they enter only the
 renewal, so the cut keeps them clear of the contact GP. Stage 2 returns the generated quantities
-$(\text{susc}, \text{inf}, F, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, w_\mu, w_\sigma)$ —
+$(\text{susc}, \text{inf}, \gamma_{\mathrm{SAR}}, \sigma_{\text{inf}}, w_\mu, w_\sigma)$ —
 $\gamma_{\mathrm{SAR}}$, susc/inf and the GI parameters **post-clamp**, so downstream reconstructions
 reproduce the fit exactly.
 
@@ -793,13 +760,12 @@ reproduce the fit exactly.
 $\text{inf}\equiv \mathbf 1$. The reason is exact non-identifiability, not preference: with $C^\ast$
 diagonal the NGM is diagonal, so
 
-$$N_{aa} = \gamma_{\mathrm{SAR}}\cdot\text{susc}_a\big(1+(F-1)A_a(t)\big)\cdot C^\ast_{aa}\cdot\text{inf}_a ,$$
+$$N_{aa} = \gamma_{\mathrm{SAR}}\cdot\text{susc}_a\cdot C^\ast_{aa}\cdot\text{inf}_a ,$$
 
 and $\text{susc}_a$ and $\text{inf}_a$ enter **only** through their product. Pinning
 $\text{inf}\equiv1$ puts the whole age profile in $\text{susc}$. (Leaving $\sigma_i,z_i$ in the
 program as unused latents would leave them prior-driven and pollute the Pathfinder approximation,
-so they are dropped from the parameter space rather than merely ignored — the same treatment, and
-the same reason, as $F$.) This is *distinct* from, and additional to, the reference-bin
+so they are dropped from the parameter space rather than merely ignored.) This is *distinct* from, and additional to, the reference-bin
 normalisation $\text{susc}_r=\text{inf}_r=1$ that all variants share.
 
 *Infection likelihood*, over the fit weeks $t = s_{\max}+1,\dots,T$ (the first $s_{\max}$ weeks serve
@@ -843,9 +809,7 @@ contact window runs $[t_0-n_{\text{fit}}+1 \dots t_0+h]$ (cached as
 stage's $\{C^\ast_t\}$ against the infection/renewal window anchored at $t_0$ (`wd` fixed; pooled
 draws cached as `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2`). So for every horizon the
 contact term is fit over weeks offset $h$ **ahead** of the infection term — the age-pair degree
-distribution is observed **at** the target week $t_0+h$ — whereas infections and the fit-loop
-antibody are anchored at $t_0$. The forecast NGM additionally takes its antibody at $t_0+h$
-(§3.2, §8).
+distribution is observed **at** the target week $t_0+h$ — whereas infections are anchored at $t_0$.
 
 ---
 
@@ -887,7 +851,7 @@ For one $(dm, nb, \text{origin}, h)$:
 2. **Stage 2** — `fit_stage2_pooled(nb, moment_draws, wd, cfg)` forms $\{C^\ast_t\}$ for each Stage-1
    draw (via `contact_star`) and **Pathfinder**-fits `model_transmission` conditioning on it, keeping
    $D = $ `cfg.n_stage2_draws` $= 100$ draws. The $M\times D = 10{,}000$ pooled draws
-   $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, F, \sigma_{\text{inf}}, w_\mu, w_\sigma,
+   $(\gamma_{\mathrm{SAR}}, \text{susc}, \text{inf}, \sigma_{\text{inf}}, w_\mu, w_\sigma,
    \text{post\_index}, \{C^\ast_{\text{end}}\})$ are the infection predictive. **Stage 2 has no NUTS
    path at all** — 100 cheap fits per Stage-1 draw is the point of the cut, not an omission.
 
@@ -973,8 +937,7 @@ draws. For a baseline origin $t_0$, the infection series is **frozen at $t_0$**,
 contact/degree window extends: for horizon $h$ the Stage-1 degree window ends at $t_0 + h$ and the
 Stage-2 pooled draws for $(dm, nb, t_0, h)$ are reloaded (or fit). Per pooled draw $d$ (from Stage-1
 draw $m = $ `post_index[d]`) a fresh NGM is formed from that draw's origin-week $C^\ast$
-(`Cstar_end[m]`) with **antibody at the target week $A(t_0+h)$** (§3.2) and its Stage-2 infection
-parameters, and a single renewal step is taken with **that draw's own** generation interval
+(`Cstar_end[m]`) and its Stage-2 infection parameters, and a single renewal step is taken with **that draw's own** generation interval
 $w^{(d)} = $ §3.1$(w_\mu^{(d)}, w_\sigma^{(d)})$,
 
 $$
@@ -1007,7 +970,7 @@ $C^\ast(t_0+h)$. Its unconditional counterpart, `two_stage_forecast(…; frozen 
 - **one** Stage-1 chain per (degree, origin), on `degree_window(t₀, FROZEN_H = 0, cfg)`. These are
   the bare $n_{\text{fit}}$ fit weeks, so $T_n = n_{\text{fit}}$ and there are 261 / 653 latents.
 - **one** Stage-2 pooled fit per (combo, origin), with same-week pairing (`off = 0`).
-- every horizon iterated with $C^\ast(t_0)$ and antibody $A(t_0)$ frozen.
+- every horizon iterated with $C^\ast(t_0)$ frozen.
 
 The per-draw GI, the `MersenneTwister(cfg.seed + h)` observation noise, the median lag plug and the
 draw alignment are the same code. **The two schemes therefore differ only in their contacts.**
@@ -1127,11 +1090,6 @@ series is *not* a length-scale and must not be read as weeks). Further panels:
   confounding of §11;
 - a **$p^0$** panel (10j, weighted path): the fitted zero probability against the empirical $n^0/n$
   per cell — the check that the Binomial denominator is wired to the roster correctly;
-- an **antibody-protection factor** panel (9j, `res/9j_protection_factor_F.png`): the posterior of
-  $F$ per model over the rolling origins. With $F$ pinned at $1$ (§3.2) this is degenerate by
-  construction — six flat lines at exactly $1.0$ — and is deliberately kept as the visible
-  confirmation that the antibody term is off (`plot_F`'s `ylims` is $(0,1.05)$ so the pinned line
-  does not vanish into the border);
 - **dispersion panels** (10j/11j): a $7\times7$ map of per-cell dispersion against its block mean,
   four flat quadrants by construction; and `plot_within_block_sd`, whose current-model line **must be
   identically 0** (§4.3);
@@ -1145,7 +1103,7 @@ series is *not* a length-scale and must not be read as weeks). Further panels:
 NGM, per origin, over the inc2prev national $R$ and the $R=1$ line. *(2)*
 `res/9j_contact_reproduction_number.png` — the **contacts-only relative** $R$:
 $\rho(C^\ast_t)/\rho(C^\ast_{t_{\text{first}}})$, the dominant eigenvalue of the bare contact matrix
-$C^\ast$ alone (no $\gamma_{\text{SAR}}$, susceptibility, infectivity or antibody) normalised to the
+$C^\ast$ alone (no $\gamma_{\text{SAR}}$, susceptibility or infectivity) normalised to the
 **first forecast origin** (=1.0), isolating how contact structure alone drove transmissibility
 relative to the baseline week. Overlaid with one **model-free** line —
 $\rho(\hat{E}_t)/\rho(\hat{E}_{t_{\text{first}}})$, the same ratio for the RAW empirical weekly
@@ -1217,15 +1175,9 @@ interpretation of the fitted transmission parameters.**
   susceptibility/infectivity **relative** to the reference bin, fit as **Stage 2** of the cut (§6.0).
   The relative offsets are **independent per age bin** with separately estimated marginal scales
   $\sigma_s,\sigma_i$ and **no cross-bin smoothing**, each log-offset soft-clamped to
-  $[\log 0.05,\log 20]$. *Remaining seams*: $F$ is **pinned at 1** (§3.2), so the open question is
-  whether to re-enable the antibody term at all rather than which prior to give it (the reference
-  prior is $\mathrm{Beta}(5,1)$; the paper uses $\Gamma(2,2)T[0,1]$); and infection observation error
-  uses an independence approximation across the week and across ages.
-- **Antibody availability.** The forecast NGM assumes $A(t_0+h)$ is known at forecast time (§3.2),
-  parallel to the contact data. This is a *stronger* assumption than the contact one, because
-  `gen_dab` shares the inc2prev/CIS pipeline with the infection targets while CoMix is an independent
-  survey. The Stage-2 fit loop is left at $t_0$-anchored antibody, so the likelihood pairs $t{+}h$
-  contacts with $t$ antibody.
+  $[\log 0.05,\log 20]$. *Remaining seams*: there is **no antibody term** (removed 2026-10-22,
+  §3.2; the reference prior for its $F$ was $\mathrm{Beta}(5,1)$, the paper's $\Gamma(2,2)T[0,1]$);
+  and infection observation error uses an independence approximation across the week and across ages.
 - **NGM lag index.** Munday Eq 1/6 places the NGM *inside* the lag sum,
   $\sum_s w(s)\,N(t-s)\,I(t-s)$ — the NGM at the infector's primary event. This implementation applies
   a single $N(t)$ outside the sum (§3.3). The deviation is unresolved.
@@ -1236,7 +1188,7 @@ interpretation of the fitted transmission parameters.**
 
 A Stage-2 alternative in which each variant category $v = 1,\dots,V$ has its **own renewal** and its
 **own** $\gamma_{\mathrm{SAR}}$, written $\gamma_v$. Everything else is **shared** across variants:
-$\text{susc}_a$, $\text{inf}_b$, $F$, $\sigma_{\text{inf}}$, the generation interval $w$ and $C^\ast$.
+$\text{susc}_a$, $\text{inf}_b$, $\sigma_{\text{inf}}$, the generation interval $w$ and $C^\ast$.
 
 It is a wrapper on the NGM axis, `VariantNGM(base)` (`framework.jl`), labelled `"<base>-variant"`
 (e.g. `weighted-hweibull|neighbourhood-variant`, `no-contact|null-variant`). The wrapper forwards
@@ -1329,11 +1281,11 @@ multiple of one shared matrix:
 
 $$
 N_v(t) = \gamma_v\, N_0(t),\qquad
-N_{0,ab}(t) = \text{susc}_a\big(1+(F-1)A_a(t)\big)\, C^\ast_{ab,t}\, \text{inf}_b ,
+N_{0,ab}(t) = \text{susc}_a\, C^\ast_{ab,t}\, \text{inf}_b ,
 $$
 
 which is §3.2's NGM at $\gamma_{\mathrm{SAR}}=1$. $C^\ast_t$ is read at `Cstar_weeks[t − smax + h]`
-exactly as in §6, and $F\equiv1$ (§3.2).
+exactly as in §6.
 
 **Renewal per variant.** Each category runs §3.3's recursion on its own infections:
 
@@ -1414,8 +1366,7 @@ $\tilde p = (n+\tfrac12)/(n+1) < 1$. 9j §V's tripwire therefore builds the dege
 ### 12.4 Forecast
 
 `_two_stage_forecast_variant` keeps the §8 machinery: the same pooled loading per horizon, the
-same draw alignment ($m = $ `post_index[d]`, $C^\ast$ = `Cstar_end[m]` at $t_0+h$), antibody at
-$t_0+h$, the per-draw GI $w^{(d)}$, and the `MersenneTwister(cfg.seed + h)` noise. What changes is
+same draw alignment ($m = $ `post_index[d]`, $C^\ast$ = `Cstar_end[m]` at $t_0+h$), the per-draw GI $w^{(d)}$, and the `MersenneTwister(cfg.seed + h)` noise. What changes is
 the **state**: one history per category instead of one total.
 
 - **History.** $I_v(t) = p_v(t)\,I(t)$ over the observed window, $t \le t_0$.
@@ -1456,7 +1407,7 @@ never be handed a `-variant` label: `load_transmission_draws`, 9j `collect_trans
 
 - **The share is England-wide and not age-specific.** Every age bin gets the same composition.
 - **The GI is shared**, although Omicron's is shorter. Any GI difference is absorbed into $\gamma_v$.
-- **Immune escape is absorbed into $\gamma_v$**, because susceptibility is shared and $F$ is pinned.
+- **Immune escape is absorbed into $\gamma_v$**, because susceptibility is shared and there is no antibody term.
 - **A just-included category is thinly identified.** It has 1–3 non-zero fit weeks and a wide
   independent prior on its own $\gamma_v$. 9j §V reports how often a $\gamma_v$ parks on a
   soft-clamp bound.

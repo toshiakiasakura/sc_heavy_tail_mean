@@ -170,8 +170,7 @@ end
 """`with_variants(wd, vs)` — `wd` with its `variant` field set; asserts the two cover the same weeks."""
 function with_variants(wd::WindowData, vs::VariantSplit)
     @assert vs.weeks == wd.weeks "with_variants: variant weeks $(first(vs.weeks))…$(last(vs.weeks)) ≠ window weeks $(first(wd.weeks))…$(last(wd.weeks))"
-    return WindowData(wd.weeks, wd.A, wd.I_mean, wd.I_sd, wd.antibody, wd.antibody_fc,
-                      wd.pop, wd.prop, wd.labels, vs)
+    return WindowData(wd.weeks, wd.A, wd.I_mean, wd.I_sd, wd.pop, wd.prop, wd.labels, vs)
 end
 
 """`variant_set_table(wins, cc, cfg)` — one row per origin: the categories, the residual's members and

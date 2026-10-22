@@ -1,8 +1,9 @@
 # ngm.jl — build the next-generation matrix from the age-pair contact-degree
 # distribution. The NGM *builder* is the second swap axis (deterministic dispatch).
 #
-#   N_ab(t) = γ_SAR · full_susceptibility_a(t) · C*_ab(t) · inf_rate_b
-#   full_susceptibility_a(t) = susceptibility_a · (1 + (F-1)·A_a(t))   (leaky, stan:260)
+#   N_ab(t) = γ_SAR · susceptibility_a · C*_ab(t) · inf_rate_b
+# (Munday's leaky antibody factor `(1 + (F-1)·A_a(t))`, stan:260, was REMOVED on 2026-10-22: it had
+# been pinned at F = 1 since 2026-08-04 and the source carries no antibody, so it was exactly 1.)
 # γ_SAR is the per-contact secondary attack rate; susc/inf are RELATIVE, normalised to the reference
 # bin `cfg.ref_bin` (default 4 = "25-34"; formerly 1 = "2-10") = 1. C* is NOT normalised (the -gnorm
 # `C* → C*/S̄` decoupling was reverted 2026-07-12, inst/4_cut_Bayes.md), so C* feeds the NGM at its raw
@@ -38,11 +39,6 @@ base_contact(::NeighbourhoodDegreeNGM, k1, k2, g) = k1 > 0 ? (k2 / k1) * g : zer
 # the model label (`no-contact|null`) and its cache files self-documenting.
 base_contact(::NullNGM, k1, k2, g)                = k1
 
-"""`full_susceptibility(susc, F, A_col)` — leaky antibody susceptibility vector
-`susc .* (1 .+ (F-1).*A_col)` for one week's antibody prevalence `A_col`."""
-full_susceptibility(susc::AbstractVector, F::Real, A_col::AbstractVector) =
-    susc .* (1 .+ (F - 1) .* A_col)
-
 """
     contact_star(builder, K1, K2, G)
 
@@ -75,22 +71,21 @@ contact_star(nb::VariantNGM, K1::AbstractMatrix, K2::AbstractMatrix, G::Abstract
     contact_star(nb.base, K1, K2, G)
 
 """
-    build_ngm(Cstar, susc, inf, F, A_col; gamma_sar=1.0)
+    build_ngm(Cstar, susc, inf; gamma_sar=1.0)
 
 7×7 next-generation matrix for one week from a precomputed `C*`:
-`N_ab = γ_SAR · full_susceptibility_a · C*_ab · inf_b`. `gamma_sar` is the per-contact secondary
+`N_ab = γ_SAR · susc_a · C*_ab · inf_b`. `gamma_sar` is the per-contact secondary
 attack rate (susc/inf relative to the reference bin `cfg.ref_bin`, default 4 = "25-34"); `gamma_sar=1`
 recovers the pre-reparam form.
 """
-function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
-    fs = full_susceptibility(susc, F, A_col)
-    return gamma_sar .* ((fs .* Cstar) .* inf')
+function build_ngm(Cstar::AbstractMatrix, susc::AbstractVector, inf::AbstractVector;
+                   gamma_sar::Real = 1.0)
+    return gamma_sar .* ((susc .* Cstar) .* inf')
 end
 
 """Convenience: build `C*` then the NGM in one call (used in tests)."""
 function build_ngm(builder::NGMBuilder, K1::AbstractMatrix, K2::AbstractMatrix,
-                   G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector,
-                   F::Real, A_col::AbstractVector; gamma_sar::Real = 1.0)
-    return build_ngm(contact_star(builder, K1, K2, G), susc, inf, F, A_col; gamma_sar = gamma_sar)
+                   G::AbstractMatrix, susc::AbstractVector, inf::AbstractVector;
+                   gamma_sar::Real = 1.0)
+    return build_ngm(contact_star(builder, K1, K2, G), susc, inf; gamma_sar = gamma_sar)
 end

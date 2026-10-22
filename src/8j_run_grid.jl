@@ -126,7 +126,7 @@ ORIGIN_STRIDE >= 1 || error("ORIGIN_STRIDE must be >= 1, got $ORIGIN_STRIDE")
 wins = wins[(ORIGIN_OFFSET + 1):ORIGIN_STRIDE:end]
 @assert !isempty(wins) "slice $ORIGIN_OFFSET/$ORIGIN_STRIDE selected no origins"
 
-# ───────────────────────────────────────────────────────────── combos (notebook cell 5, 9j cell 24)
+# ───────────────────────────────────────────────────────────── combos (notebook cell 5, 9j cell 23)
 combos = vcat([(dm, nb) for dm in (NegBinAgePair(), HurdleWeibullAgePair())
                         for nb in (MeanNGM(), NeighbourhoodDegreeNGM())],
               [(NegBinAgePair(),   DiagonalMeanNGM()),      # no-interaction (inst/6)
@@ -243,8 +243,8 @@ if get(ENV, "DRY_RUN", "0") == "1"
     exit(10)
 end
 
-# ───────────────────────────────────────────────────────────── data providers (8j cells 7/8, 9j cell 27)
-# One origin's datasets: window infection/antibody (+ the origin's `VariantSplit` for the variant
+# ───────────────────────────────────────────────────────────── data providers (8j cells 7/8, 9j cell 26)
+# One origin's datasets: window infections (+ the origin's `VariantSplit` for the variant
 # sets) and one contact/degree window PER ENTRY of `horizons` — aligned to the horizons of the call
 # the provider serves. Pure and deterministic given the shared read-only `inf`/`raw`/`cog` reads.
 # `oi` is unused — `prefit_*!` pass it as the index into the vector they were given.

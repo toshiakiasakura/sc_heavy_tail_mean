@@ -11,7 +11,7 @@ to ONS CIS positivity and switched back the same day (see "Stage 2 and scoring")
 |---|---|---|
 | Stage 1 contacts | CoMix **UK** participants | CoMix **England** participants (`england_only`) |
 | Stage 2 target, renewal history, scoring truth | inc2prev **modelled infections** (`estimates_age.csv`, 7-day sum × pop) | unchanged — now with a full-coverage assert per week |
-| Antibody covariate `A` | `estimates_age.csv` `gen_dab` (absent ⇒ `A ≡ 0`, `F = 1`) | unchanged |
+| Antibody covariate `A` | `estimates_age.csv` `gen_dab` (absent ⇒ `A ≡ 0`, `F = 1`) | **removed** with `F` (2026-10-22) |
 | Population / age grid | `populations.csv` `age_school`, 7 bins 2-10 … 70+ | unchanged |
 | Variant composition | COG-UK England, Monday weeks, read from the week starting the day after each Sunday week | same file, now the SAME week (`cog_week` = identity) |
 | Week grid | Sunday-start, anchor 2021-03-21 | **Monday-start, anchor 2021-03-22**, Thursday mid labels |
@@ -58,8 +58,8 @@ to ONS CIS positivity and switched back the same day (see "Stage 2 and scoring")
 
 ## Covariates
 
-- **Antibody** `A_a(t)`: `inc2prev/outputs/estimates_age.csv` `gen_dab` — absent from this file, so
-  `A ≡ 0`; inert while `F = 1` is pinned (unchanged; see CLAUDE.md's schema gotcha).
+- **Antibody** `A_a(t)`: none. It was `estimates_age.csv` `gen_dab` — absent from that file, so `A ≡ 0`
+  under a pinned `F = 1` — and both were removed from the code on 2026-10-22.
 - **Population**: `inc2prev/data-processed/populations.csv` (`grid.POP`), England, unchanged.
 - **Variants** (`VariantNGM`): `dt_cog_uk/cog_uk_england_weekly.csv`, COG-UK England genomes per
   Monday sample week by constellation group (untracked; must be uploaded with the repo for HPC runs).

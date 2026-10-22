@@ -400,33 +400,27 @@ end
 
 # ── Reproduction number over time: dominant NGM eigenvalue ────────────────────────────
 """
-    reproduction_over_time(combos, labels4, wins, cfg; grid, raw, h, save_dir, inf, verbose)
+    reproduction_over_time(combos, labels4, wins, cfg; grid, raw, h, save_dir, verbose)
         -> Dict(label => (; med, lo, hi))
 
 For each forecast origin and model, the median and 90% band of the reproduction number
 (`reproduction_draws`, dominant eigenvalue of the frozen origin+h NGM at horizon `h`).
-Reloads window/degree data + cached chains per origin — read-only, no re-fit.
-
-Pass `inf = load_raw_infection_inputs()` to use `load_window_data`'s CACHED `(win, df, tmap)` form
-instead of its CSV-reading one-argument form. Without it this loop re-reads and re-parses the whole
-inc2prev estimates CSV **once per origin** — 63 full parses, this collector's dominant cost and the
-reason its `_or_load` cache exists. `infection_data.jl` documents the two forms as byte-identical
-(14j §7 asserts it against this function's own cached store), so `inf` changes only the wall-clock.
+Reloads the cached Stage-2 pooled files per origin — read-only, no re-fit, and no infection data:
+the NGM needs none since the antibody input was removed (2026-10-22), which also retired the
+`inf` kwarg that saved a per-origin CSV re-read.
 """
 function reproduction_over_time(combos, labels4, wins, cfg;
                                 grid = cis_age_grid(), raw,
                                 h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
-                                inf = nothing, verbose::Bool = true)
+                                verbose::Bool = true)
     nO = length(wins)
     store = Dict(l => (med = fill(NaN, nO), lo = fill(NaN, nO), hi = fill(NaN, nO)) for l in labels4)
     t0 = time()
     for (oi, win_o) in enumerate(wins)
-        wd_o  = inf === nothing ? load_window_data(win_o; grid = grid) :
-                                  load_window_data(win_o, inf.df, inf.tmap; grid = grid)
-        # R reads the Stage-2 pooled file directly (Cstar_end = contacts at origin+h, antibody at
-        # origin) — no degree-data rebuild needed under the two-stage cut.
+        # R reads the Stage-2 pooled file directly (Cstar_end = contacts at origin+h) — no
+        # degree-data rebuild needed under the two-stage cut.
         for ((dm, nb), lbl) in zip(combos, labels4)
-            R = reproduction_draws(dm, nb, wd_o, cfg, win_o; h = h, save_dir = save_dir)
+            R = reproduction_draws(dm, nb, cfg, win_o; h = h, save_dir = save_dir)
             R === nothing && continue
             store[lbl].med[oi] = median(R)
             store[lbl].lo[oi]  = quantile(R, 0.05)
@@ -443,8 +437,8 @@ end
     reproduction_over_time_or_load(combos, labels4, wins, cfg; grid, raw, h, save_dir,
                                    cache_path, rebuild, verbose) -> store
 
-Cached wrapper around `reproduction_over_time`. The R(t) loop reloads window/degree data and
-the cached chain per origin × combo (slow), but is deterministic given the cached chains — so
+Cached wrapper around `reproduction_over_time`. The R(t) loop reloads the cached pooled file per
+origin × combo (slow), but is deterministic given the cached chains — so
 its `store` is cached to `dt_intermediate/9j_rt_<contacts>_h<h>.jld2` with the same
 validate-or-rebuild pattern as `assemble_or_load_forecasts`. The cache self-invalidates when
 `origins`/`labels` change; `rebuild=true` forces a fresh compute.
@@ -459,7 +453,7 @@ writes nothing outside `res/`). The same applies to `relative_contact_reproducti
 function reproduction_over_time_or_load(combos, labels4, wins, cfg;
         grid = cis_age_grid(), raw, h::Integer = 1, save_dir::AbstractString = "../dt_intermediate",
         cache_path::AbstractString = joinpath(save_dir, "9j_rt_$(contacts_label(cfg))_h$(h).jld2"),
-        rebuild::Bool = false, inf = nothing, verbose::Bool = true)
+        rebuild::Bool = false, verbose::Bool = true)
     origins = [w.origin for w in wins]
     if !rebuild && isfile(cache_path)
         c = load(cache_path)
@@ -471,7 +465,7 @@ function reproduction_over_time_or_load(combos, labels4, wins, cfg;
     end
     store = reproduction_over_time(combos, labels4, wins, cfg;
                                    grid = grid, raw = raw, h = h, save_dir = save_dir,
-                                   inf = inf, verbose = verbose)
+                                   verbose = verbose)
     jldsave(cache_path; store, origins, labels = labels4, h)
     return store
 end
@@ -554,7 +548,7 @@ end
 
 For each forecast origin and model, the median and 90% band of the **relative contact reproduction
 number** `ρ(C*_origin) / ρ(C*_ref)`, where `ρ(C*)` is the dominant eigenvalue of the origin+h
-contact matrix alone (`contact_reproduction_draws` — no γ_SAR/susc/inf/antibody) and the reference is
+contact matrix alone (`contact_reproduction_draws` — no γ_SAR/susc/inf) and the reference is
 the **first forecast origin** (`wins[1]`). Each origin's per-draw ρ is divided by the reference
 origin's *median* ρ (the reference window is the fixed anchor), so every model's curve passes through
 1.0 at the first origin. Contact-only ⇒ isolates how contact structure alone drove transmissibility
@@ -1096,8 +1090,8 @@ end
 # ── Fitted transmission structure (susceptibility / infectivity / GP length-scales) ────
 """
     collect_transmission_structure(labels4, origins, cfg; grid, h)
-        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, F, sigma_inf,
-              inf_pinned, F_pinned, sg_names, ref_lab)
+        -> (; susc, inf, susc_bin, inf_bin, rho, gamma, gi, sigma_inf,
+              inf_pinned, sg_names, ref_lab)
 
 Per-model × origin summary (median + 90% band) of the fitted transmission structure from the
 two-stage artefacts. `susc`/`inf` are pop-weighted age super-group values, `susc_bin`/`inf_bin` the
@@ -1121,12 +1115,12 @@ age-yrs; col 3 the AR(1) φ, dimensionless — `NaN` for pooled chains); `gamma`
 secondary attack rate γ_SAR and `sigma_inf` the infection-likelihood observation SD (added
 2026-08-09 — it was stored in every `8j_s2_*` but never surfaced).
 
-`inf_pinned` / `F_pinned` are `Dict(label => Bool)` flags saying whether that model's `inf` / `F` is
-a **pin rather than an estimate** — `model_transmission` sets `inf = ones(A)` under
-`fix_infectivity(nb)` (the diagonal-NGM baseline identifies only `susc_a·inf_a`) and `F = 1.0`
-always. Detected from the draws (`all(== 1.0)`), so a label rename cannot silently un-mark it. Pass
-them to `plot_ratio`/`plot_F` so a pinned flat line is annotated as such instead of reading as a
-fitted result that happens to equal 1. ⚠ A pinned `inf` also means that model's `susc` absorbs the
+`inf_pinned` is a `Dict(label => Bool)` flag saying whether that model's `inf` is a **pin rather
+than an estimate** — `model_transmission` sets `inf = ones(A)` under `fix_infectivity(nb)` (the
+diagonal-NGM baseline identifies only `susc_a·inf_a`). Detected from the draws (`all(== 1.0)`), so a
+label rename cannot silently un-mark it. (Its twin `F_pinned`, for the leaky antibody factor `F`
+pinned at 1, went with `F` and `plot_F` on 2026-10-22.) Pass it to `plot_ratio` so a pinned flat
+line is annotated as such instead of reading as a fitted result that happens to equal 1. ⚠ A pinned `inf` also means that model's `susc` absorbs the
 whole `susc·inf` product and is NOT on the same footing as the other models' `susc`.
 
 Stores are `Dict(label => (med, lo, hi))` of `nO × length(sg_names)` matrices for
@@ -1144,19 +1138,16 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
                       for l in labels4)
     susc_store, inf_store, rho_store, gamma_store = mkstore(nG), mkstore(nG), mkstore(3), mkstore(1)
     gi_store = mkstore(2)                               # GI: col 1 = mean (days), col 2 = SD (days)
-    F_store  = mkstore(1)                               # leaky antibody-protection factor F (scalar per draw)
     sinf_store = mkstore(1)                             # observation SD σ_inf (scalar per draw)
     susc_bin_store, inf_bin_store = mkstore(grid.N), mkstore(grid.N)
     # PINNED vs FITTED. `model_transmission` pins `inf = ones(A)` whenever `fix_infectivity(nb)`
     # (the no-interaction / DiagonalMeanNGM baseline: a diagonal NGM identifies only the product
-    # susc_a·inf_a, so infectivity is not separately estimable) and pins `F = 1.0` for every model
-    # (the antibody term is off since 2026-08-04). A pin renders as a flat 1.0 line that is
+    # susc_a·inf_a, so infectivity is not separately estimable). A pin renders as a flat 1.0 line that is
     # indistinguishable from a fitted parameter that happens to sit at 1 — so detect it and let the
     # figures SAY so. Detected from the DRAWS (`all(== 1.0)`, exact because the pin is a literal
     # `one`/`1.0`, not an estimate) rather than by parsing `lbl` for "mean-diagonal": the label is a
     # display string and a rename would silently un-mark the pin.
     inf_pinned = Dict(l => true for l in labels4)
-    F_pinned   = Dict(l => true for l in labels4)
     seen       = Dict(l => false for l in labels4)
     for lbl in labels4, (oi, origin) in enumerate(origins)
         # ⚠ `contacts` MUST be passed explicitly. `load_transmission_draws` defaults it to
@@ -1164,7 +1155,7 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
         # so ALWAYS ends `-nuts`, no matter what this `cfg` says. Omitting it here (the state until
         # 2026-08-09) silently pointed every lookup at the NUTS generation — which does not exist on
         # disk — so `load_transmission_draws` returned `nothing` for all 63 origins × 6 models and
-        # EVERY figure fed by this function (susc, inf, susc_bin, inf_bin, rho, gamma, gi, F) came
+        # EVERY figure fed by this function (susc, inf, susc_bin, inf_bin, rho, gamma, gi) came
         # out blank: all-NaN stores, panels containing nothing but their reference line. There is no
         # warning, because a missing Stage-2 artefact is a legitimate "skipped origin×combo".
         # This is the same bug class fixed across `10j_viz_utils.jl` on 2026-08-08 (see the
@@ -1174,7 +1165,6 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
         d === nothing && continue                       # genuinely missing → leaves a NaN gap
         seen[lbl] = true
         inf_pinned[lbl] &= all(==(1.0), d.inf)          # exact: the pin is a literal `one`, not a fit
-        F_pinned[lbl]   &= all(==(1.0), d.F)
         for (V, dst, dstb) in ((d.susc, susc_store, susc_bin_store),
                                (d.inf,  inf_store,  inf_bin_store))
             den = view(V, :, ref)                        # the model's gauge — identically 1 per draw
@@ -1202,10 +1192,6 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
         gamma_store[lbl].med[oi, 1] = median(γ)
         gamma_store[lbl].lo[oi, 1]  = quantile(γ, 0.05)
         gamma_store[lbl].hi[oi, 1]  = quantile(γ, 0.95)
-        Fd = d.F                                          # leaky antibody-protection factor (scalar per draw)
-        F_store[lbl].med[oi, 1] = median(Fd)
-        F_store[lbl].lo[oi, 1]  = quantile(Fd, 0.05)
-        F_store[lbl].hi[oi, 1]  = quantile(Fd, 0.95)
         si = d.sigma_inf                                  # infection-likelihood observation SD
         sinf_store[lbl].med[oi, 1] = median(si)
         sinf_store[lbl].lo[oi, 1]  = quantile(si, 0.05)
@@ -1222,11 +1208,11 @@ function collect_transmission_structure(labels4, origins, cfg; grid = cis_age_gr
     # and an all-missing model would never have it cleared, turning a MISSING model into a
     # confident claim about its parameterisation. `seen` is what distinguishes the two.
     for l in labels4
-        seen[l] || (inf_pinned[l] = false; F_pinned[l] = false)
+        seen[l] || (inf_pinned[l] = false)
     end
     return (; susc = susc_store, inf = inf_store, susc_bin = susc_bin_store,
               inf_bin = inf_bin_store, rho = rho_store, gamma = gamma_store, gi = gi_store,
-              F = F_store, sigma_inf = sinf_store, inf_pinned, F_pinned,
+              sigma_inf = sinf_store, inf_pinned,
               sg_names, ref_lab = grid.LAB[ref])
 end
 
@@ -1652,45 +1638,6 @@ function plot_sigma_inf(store, labels4, model_cols, origins; h::Integer = 1)
     plot!(fig, xs, fill(pm, 2); color = :grey40, ls = :dot, lw = 1.0, label = "prior 90%",
           ribbon = (fill(pm - max(pm - zq * ps, 0.0), 2), fill(zq * ps, 2)),
           fillalpha = 0.10, fillcolor = :grey60)
-    return fig
-end
-
-"""
-    plot_F(store, labels4, model_cols, origins; h=1) -> Plot
-
-Antibody-protection factor **F** over the rolling forecast origins, one line per model (median + 90%
-band). `store` is the `F` field of `collect_transmission_structure` (an `nO × 1` med/lo/hi store of
-the pooled per-draw `F`). F is the LEAKY antibody-protection factor in `full_susceptibility_a(t) =
-susc_a·(1 + (F−1)·A_a(t))`: F = 0 ⇒ antibodies fully protect, F = 1 ⇒ no protection. This is the
-direct analog of `plot_gamma` for the γ_SAR level.
-
-⚠ **CHANGED 2026-08-04 (user request): F is no longer estimated.** `model_transmission` PINS
-`F = 1.0` to disable the antibody term (the `Beta(5,1)` prior is commented out there), so every
-model's line is a flat 1.0 with a zero-width band and all six coincide — that degenerate line IS
-the pin, not a fitting result or a convergence failure. The panel is kept as the visible evidence
-that the term is off. `ylims` is `(0, 1.05)` rather than `(0, 1)` precisely so the pinned line does
-not sit on the top border and vanish (it also fixes the pre-existing silent-clipping hazard: an F
-outside (0,1) used to be clipped away without warning).
-"""
-function plot_F(store, labels4, model_cols, origins; h::Integer = 1, pinned = nothing)
-    # Plot the real Date-bearing series directly (no leading synthetic/`hline!` line) so the
-    # x-axis stays a date axis — see the gotcha in `plot_ratio` / `plot_reproduction`.
-    # The "PINNED" title used to be a hard-coded string, which would have quietly LIED the moment
-    # F was restored to `~ Beta(5,1)`. It is now driven by `pinned` (`tr.F_pinned`), detected from
-    # the draws, so the panel can only claim a pin that is actually in the artefacts.
-    all_pinned = pinned !== nothing && !isempty(labels4) && all(get(pinned, l, false) for l in labels4)
-    ttl = all_pinned ? "9j — antibody-protection factor F (h=$h) — PINNED at 1.0 (term off)" :
-          pinned === nothing ? "9j — antibody-protection factor F (h=$h)" :
-                               "9j — antibody-protection factor F (h=$h) — FITTED"
-    fig = plot(; xlabel = "forecast origin", ylabel = "F (leaky antibody-protection factor)",
-               title = ttl,
-               size = (950, 520), legend = :topright, xrotation = 45, ylims = (0, 1.05))
-    for (ci, lbl) in enumerate(labels4)
-        m, lo, hi = store[lbl].med[:, 1], store[lbl].lo[:, 1], store[lbl].hi[:, 1]
-        all(isnan, m) && continue
-        plot!(fig, origins, m; color = model_cols[ci], lw = 1.8, marker = :circle, ms = 2,
-              ribbon = (m .- lo, hi .- m), fillalpha = 0.12, label = lbl)
-    end
     return fig
 end
 

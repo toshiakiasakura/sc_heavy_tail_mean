@@ -1210,7 +1210,7 @@ end
 In-sample expected (fitted) infections over the fit window, from the two-stage artefacts of the
 horizon-`h` fit: the MEAN of Stage 2's Normal infection likelihood (`model_transmission`). Per
 pooled draw `d` (from Stage-1 draw `m = post_index[d]`),
-`pred_t = build_ngm(Cstar_m[t−smax+h], susc[d], inf[d], F[d], wd.antibody[:,t]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
+`pred_t = build_ngm(Cstar_m[t−smax+h], susc[d], inf[d]; gamma_sar[d]) · Σ_s w[s]·wd.I_mean[:,t-s]`
 using OBSERVED lags ⇒ one-step-ahead fitted mean (NOT the self-iterated forecast). Columns
 `(smax+1):Tn` == the window's fit weeks; the `−smax+h` on `Cstar_m` is the `-w8h` window offset (the
 contact window spans `n_fit + h` weeks ending at t₀+h, the infection window `n_fit + smax` ending at
@@ -1259,8 +1259,8 @@ function fit_window_infection_draws(dm::ContactDegreeModel, nb::NGMBuilder,
         # post-clamp, so this reproduces the model's `w` exactly.
         w_d = gen_interval_pmf_log(pooled.w_mu[d], pooled.w_sigma[d]; smax = cfg.smax)
         for (c, t) in enumerate(fitcols)
-            N = build_ngm(Cstar_by_m[m][t - cfg.smax + off], pooled.susc[d, :], pooled.inf[d, :],
-                          pooled.F[d], wd.antibody[:, t]; gamma_sar = pooled.gamma_sar[d])
+            N = build_ngm(Cstar_by_m[m][t - cfg.smax + off], pooled.susc[d, :], pooled.inf[d, :];
+                          gamma_sar = pooled.gamma_sar[d])
             out[:, c, d] = renewal_next(N, wd.I_mean, t, w_d)
         end
     end

@@ -73,7 +73,7 @@ Into `/home/<user>/prj_sc_heavy_tail_mean/` (= `PROJECT_DIR` in `config.sh`):
 |---|---|
 | the repo (`src/`, `hpc/`, `Project.toml`, `Manifest.toml`, `inst/`, `tasks/`) | `git clone` on the login node is fine |
 | `dt_comix_no_public/part_uk.arrow`, `contacts_uk.arrow` | **gitignored — WinSCP only** |
-| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these two files are read by the fitting path. `estimates_age.csv` is the OUTCOME (weekly infections) and the (all-zero) antibody covariate — ⚠ **not the `_ab` variant**, whose infections 1j shows are badly distorted in four age bins |
+| `inc2prev/data-processed/populations.csv`, `inc2prev/outputs/estimates_age.csv` | the submodule; only these two files are read by the fitting path. `estimates_age.csv` is the OUTCOME (weekly infections; the framework reads no antibody since 2026-10-22) — ⚠ **not the `_ab` variant**, whose infections 1j shows are badly distorted in four age bins |
 | `dt_cog_uk/cog_uk_england_weekly.csv` | **untracked — WinSCP it.** The variant sets (`SCENARIOS` containing `variant`); the driver refuses to start without it |
 | the `.simg` | ~3–5 GB (squashfs of the 12.6 GB image) |
 

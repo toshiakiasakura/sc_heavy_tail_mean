@@ -47,7 +47,7 @@ ngm_label(::DiagonalMeanNGM)        = "mean-diagonal"
 """`fix_infectivity(nb)` — pin the relative age-dependent infectivity to `inf ≡ 1` (all bins)?
 
 `true` only for `DiagonalMeanNGM` (the NO-INTERACTION model, inst/6). With a diagonal C* the NGM is
-diagonal, `N_aa = γ_SAR·susc_a·(1+(F−1)A_a)·C*_aa·inf_a`, so `susc_a` and `inf_a` enter only through
+diagonal, `N_aa = γ_SAR·susc_a·C*_aa·inf_a`, so `susc_a` and `inf_a` enter only through
 their product and are individually non-identifiable — infectivity is fixed to 1 and the age profile
 is carried entirely by `susc`. See `model_transmission` (joint_model.jl)."""
 fix_infectivity(::NGMBuilder)      = false
@@ -853,28 +853,21 @@ end
 """Weekly window data for the transmission/renewal fit.
 
 `I_mean`, `I_sd` :: (A × T) weekly infection counts and SDs (rolling-sum × population).
-`antibody` :: (A × T) weekly antibody prevalence A_a(t) ∈ [0,1] over `weeks` (= `win.all_weeks`).
-`antibody_fc` :: (A × H) antibody at the FORECAST TARGET weeks `win.forecast_weeks` (t₀+h).
 `pop`, `prop` :: (A) populations and proportions. `weeks` chronological (all_weeks).
 `variant` :: the window's `VariantSplit` for `VariantNGM` fits (attached by `with_variants`), else `nothing`.
 
-Antibody is deliberately carried in TWO fields rather than one widened matrix (2026-07-30, §3.2):
-`antibody[:, t]` keeps its exact meaning inside the Stage-2 fit loop, which is anchored at t₀,
-while `antibody_fc[:, hi]` is what the *forecast* NGM uses — matching the contact window that
-already ends at t₀+h. Widening `antibody` would have made `[:, end]` silently mean something new
-at every existing call site.
+(The `antibody`/`antibody_fc` fields — weekly antibody prevalence over the window and at the forecast
+targets — were removed on 2026-10-22 with the leaky antibody factor `F`.)
 """
 struct WindowData
     weeks::Vector{Date}
     A::Int
     I_mean::Matrix{Float64}
     I_sd::Matrix{Float64}
-    antibody::Matrix{Float64}
-    antibody_fc::Matrix{Float64}
     pop::Vector{Float64}
     prop::Vector{Float64}
     labels::Vector{String}
     variant::Union{Nothing,VariantSplit}   # `nothing` except for `VariantNGM` fits (`with_variants`)
 end
-WindowData(weeks, A, I_mean, I_sd, antibody, antibody_fc, pop, prop, labels) =
-    WindowData(weeks, A, I_mean, I_sd, antibody, antibody_fc, pop, prop, labels, nothing)
+WindowData(weeks, A, I_mean, I_sd, pop, prop, labels) =
+    WindowData(weeks, A, I_mean, I_sd, pop, prop, labels, nothing)

@@ -36,7 +36,7 @@ include("comix_uk_time_series.jl")  # inc2prev-aligned weekly helpers
 
 # --- forecasting framework (dependency order) --------------------------------
 include("framework.jl")             # swap-axis types, WeeklyWindow, FrameworkConfig, containers, age grid
-include("infection_data.jl")        # weekly infections (rolling-sum × pop) + gen_dab antibody
+include("infection_data.jl")        # weekly infections (rolling-sum × pop)
 include("variant_data.jl")          # COG-UK variant composition for the VariantNGM renewal (inst/3 §12)
 include("degree_agepair.jl")        # age-pair binning + per-cell weekly degree assembly
 include("renewal.jl")               # generation-interval PMF + renewal iteration/forecast

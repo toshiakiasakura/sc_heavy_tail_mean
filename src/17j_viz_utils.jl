@@ -4,7 +4,7 @@
 # The CONDITIONAL forecast (9j) is the contact-updated iterate: horizon h is fitted on contacts up
 # to t₀+h and its NGM is frozen at the t₀+h contact matrix — it is TOLD the future contacts. The
 # FROZEN forecast (`two_stage_forecast(…; frozen = true)`) is fitted on contacts up to t₀ only
-# (`FROZEN_H = 0`) and iterates every horizon with C* (and antibody) frozen at t₀. Same iterator,
+# (`FROZEN_H = 0`) and iterates every horizon with C* frozen at t₀. Same iterator,
 # same noise seeds, same median lag plug — the two differ only in their contacts and fit.
 #
 # Requires `forecast_utils.jl` → `9j_viz_utils.jl` → `15j_viz_utils.jl` (for `load_9j_assembly`, the

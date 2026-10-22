@@ -5,7 +5,7 @@
 #     contact-degree GP latents (NGM-independent ⇒ NO ngm token). μ / ρ / dispersion reconstruct
 #     from here (see `model_degree` in joint_model.jl §5/§6, and 10j_viz_utils.jl).
 #   • Stage-2 pooled    `8j_s2_<degree>_<ngm>_<contacts>_<origin>_h<h>.jld2` (key "pooled") — the
-#     100×100 pooled infection draws `(; gamma_sar, susc, inf, F, sigma_inf, post_index, Cstar_end)`
+#     100×100 pooled infection draws `(; gamma_sar, susc, inf, sigma_inf, post_index, Cstar_end)`
 #     (see `fit_stage2_pooled`). susc/inf/γ_SAR/R read from here.
 # `lbl = "<degree>|<ngm>"` splits into the two tokens.
 
@@ -109,9 +109,9 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
                          end) : nothing
     if chn === nothing                                                   # NULL model: no contact fit
         nan1 = fill(NaN, 1)
-        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+        return (; susc, inf, gamma_sar, sigma_inf, rho_diag = nan1, rho_gap = nan1,
                   phi_time = nan1,
-                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/F/σ_inf are Stage-2, always there
+                  w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)          # GI/σ_inf are Stage-2, always there
     end
     s1names = string.(names(chn, :parameters))
     # `-diag` chains (2026-08-05, short-lived) LACK `log_rho_gap`: their spatial kernel smoothed the
@@ -138,7 +138,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
         @warn "Stage-1 chain is not the current generation (no `log_rho_gap`, no `phi_time` \
                i.e. a Matérn-temporal chain, or a pre-`-m32` token); ρ set to NaN" s1p contacts
         nan1 = fill(NaN, 1)
-        return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag = nan1, rho_gap = nan1,
+        return (; susc, inf, gamma_sar, sigma_inf, rho_diag = nan1, rho_gap = nan1,
                   phi_time = nan1,
                   w_mu = pooled.w_mu, w_sigma = pooled.w_sigma)
     end
@@ -153,7 +153,7 @@ function load_transmission_draws(lbl::AbstractString, origin::Date, h::Integer;
     # (dimensionless correlation vs age-years), so it must NOT share their axis in 9j.
     phi_time = vec(Array(chn[:phi_time]))
     w_mu = pooled.w_mu; w_sigma = pooled.w_sigma      # per-draw GI log-params (post-clamp)
-    return (; susc, inf, gamma_sar, F = pooled.F, sigma_inf, rho_diag, rho_gap, phi_time,
+    return (; susc, inf, gamma_sar, sigma_inf, rho_diag, rho_gap, phi_time,
               w_mu, w_sigma)
 end
 
@@ -219,19 +219,18 @@ pick_origins(origins::AbstractVector{Date}; n::Int = 9) =
     origins[unique(round.(Int, range(1, length(origins); length = min(n, length(origins)))))]
 
 """
-    reproduction_draws(dm, nb, wd, cfg, win; h=1, save_dir) -> Vector{Float64} | nothing
+    reproduction_draws(dm, nb, cfg, win; h=1, save_dir) -> Vector{Float64} | nothing
 
 Per-pooled-draw reproduction number `R` for one forecast origin/model: the dominant eigenvalue of
 the horizon-`h` next-generation matrix, exactly the NGM the forecast is frozen at (`Cstar_end` =
-contacts at origin+h, antibody at the TARGET week origin+h). Reloads the cached **Stage-2 pooled**
+contacts at origin+h). Reloads the cached **Stage-2 pooled**
 file (NO re-fit); for each pooled draw `d` (from Stage-1 draw `m = post_index[d]`) builds
-`N = build_ngm(Cstar_end[m], susc[d], inf[d], F[d], wd.antibody_fc[:,hi]; gamma_sar=gamma_sar[d])`
+`N = build_ngm(Cstar_end[m], susc[d], inf[d]; gamma_sar=gamma_sar[d])`
 and takes `max real(eigvals(N))` (the NGM is nonnegative ⇒ its Perron root is real & positive).
-The antibody column moved from the origin to origin+h on 2026-07-30 (§3.2) so this R describes the
-same NGM `two_stage_forecast` actually uses — keep the two in step.
+This R describes the same NGM `two_stage_forecast` actually uses — keep the two in step.
 Returns `nothing` when the pooled file is missing/unreadable, so callers can leave a gap.
 """
-function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win;
+function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, cfg, win;
                             h::Integer = 1,
                             save_dir::AbstractString = joinpath(@__DIR__, "..", "dt_intermediate"))
     lbl  = string(degree_label(dm), "|", ngm_label(nb))
@@ -245,12 +244,10 @@ function reproduction_draws(dm::ContactDegreeModel, nb::NGMBuilder, wd, cfg, win
     end
     Np = length(pooled.gamma_sar)
     R = Vector{Float64}(undef, Np)
-    hi = findfirst(==(h), collect(cfg.horizons))          # antibody column for THIS horizon
-    ab_h = hi === nothing ? wd.antibody[:, end] : wd.antibody_fc[:, hi]
     for d in 1:Np
         m = pooled.post_index[d]
-        N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :],
-                      pooled.F[d], ab_h; gamma_sar = pooled.gamma_sar[d])
+        N = build_ngm(pooled.Cstar_end[m], pooled.susc[d, :], pooled.inf[d, :];
+                      gamma_sar = pooled.gamma_sar[d])
         R[d] = maximum(real(eigvals(N)))
     end
     return R
@@ -261,7 +258,7 @@ end
 
 Per-Stage-1-draw **contact-only** reproduction number: the dominant eigenvalue of the **origin+h**
 contact matrix `C*` ALONE — `ρ(C*) = max real(eigvals(Cstar_end[m]))` — dropping γ_SAR,
-susceptibility, infectivity and antibody entirely (unlike `reproduction_draws`, which diagonalises
+susceptibility and infectivity entirely (unlike `reproduction_draws`, which diagonalises
 the full NGM). Reloads the cached **Stage-2 pooled** file read-only and uses its stored `Cstar_end`
 (the same origin+h C* the forecast NGM is frozen at), so **no Stage-1 refit/reload** is needed.
 `C*` is nonnegative ⇒ its Perron root is real & positive. Returns the `n_post` distinct Stage-1 C*

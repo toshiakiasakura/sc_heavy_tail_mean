@@ -2843,3 +2843,19 @@ File present, structure clean, provenance uniform, Stage 2 fitted, 17j scored it
 artefact; (2) the start guard must test the WHOLE start, not one coordinate. The φ guard only reset φ. The
 z-score test on the scalar hyperparameters separated stuck (≥ 9.9σ) from healthy (≤ 3.4σ) chains cleanly,
 and restarting from `_stage1_init` fixed all 11 (min ESS 241–517, ~4× faster per fit).
+
+## 2026-10-22 — Deleting an exact `×1` is not a no-op for Pathfinder
+
+Removing the pinned leaky antibody factor (`susc .* (1 .+ (F−1) .* A)` with `F = 1`, `A = 0`) left
+the Stage-2 log-density **bit-identical** (checked at 5 random θ: Δ = 0.0). The ReverseDiff
+gradient was not: it moved by up to 1.8e-12, because dropping one tracked broadcast changes the
+adjoint accumulation order. Pathfinder's L-BFGS amplified that into a different approximation, so
+the null model at 2021-05-10 gave γ_SAR SD 0.0132 vs 0.0246 and forecast quantiles 2–14% apart,
+from the same seed. Repeat runs of either version were exactly reproducible.
+
+**The lesson: "mathematically identical" licenses "same posterior", never "same artefacts".** Any
+edit on the AD path, however exact, is a new Monte Carlo sample. Don't mix pre- and post-edit
+Stage-2 files in one grid, and verify such a change on the log-density (exact) and on summary
+statistics (MC-level), not on the draws. A second point surfaced on the way: one Pathfinder fit
+(the null model pools just one) can halve or double its spread on a last-bit perturbation —
+the 100-fit pooling of the contact models is what averages that out.
