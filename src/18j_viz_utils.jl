@@ -295,6 +295,28 @@ function plot_scenario_wis_coverage_over_time(by_dt_h::DataFrame, cov::DataFrame
                 plot_title = "18j — mean WIS and coverage over time$(title_suffix)", plot_titlefontsize = 10)
 end
 
+"""
+    scenario_assembly_sources(cfg; save_dir = "../dt_intermediate") -> Vector{Tuple{String,Vector{String},Bool}}
+
+The four forecast caches behind the 22 scenario series, one `(path, labels, frozen)` each, in 17j's order:
+9j's conditional cache, the frozen one, the variant one and the variant-frozen one. The last has no null model.
+Shared by 18j and `19r_export_wis_age.jl`, so the list exists once.
+"""
+function scenario_assembly_sources(cfg::FrameworkConfig; save_dir::AbstractString = "../dt_intermediate")
+    combos = vcat([(dm, nb) for dm in (NegBinAgePair(), HurdleWeibullAgePair())
+                            for nb in (MeanNGM(), NeighbourhoodDegreeNGM())],
+                  [(NegBinAgePair(),   DiagonalMeanNGM()),      # no-interaction
+                   (NoContactDegree(), NullNGM())])             # null, in 9j's order
+    lab(dm, nb) = string(degree_label(dm), "|", ngm_label(nb))
+    labels_c = [lab(dm, nb) for (dm, nb) in combos]
+    labels_v = [lab(dm, VariantNGM(nb)) for (dm, nb) in combos]
+    return [(joinpath(save_dir, "9j_assembly_$(contacts_label(cfg)).jld2"), labels_c, false),
+            (frozen_cache_path(cfg; save_dir), labels_c, true),
+            (variant_cache_path(cfg; frozen = false, save_dir), labels_v, false),
+            (variant_cache_path(cfg; frozen = true, save_dir),
+             [lab(dm, VariantNGM(nb)) for (dm, nb) in combos if needs_stage1(dm)], true)]
+end
+
 "18j's own cache of the age-level scores and coverage — small frames only, no fans or quantiles."
 age_coverage_cache_path(cfg::FrameworkConfig; save_dir::AbstractString = "../dt_intermediate") =
     joinpath(save_dir, "18j_age_coverage_$(contacts_label(cfg)).jld2")

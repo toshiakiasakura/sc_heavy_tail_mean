@@ -2877,3 +2877,20 @@ blank with exit 0 on two grids in a row. Fixed to `WK = cfg.n_fit`.
 17j's checks (5)/(9) assert that nothing outside `res/17j_*` changed after `T_START`. Running 14j
 in parallel made 17j fail on `14j_grid_audit.csv`. Not a bug in either — run 17j (and any notebook
 with that check) on its own, after the others.
+
+## 2026-11-03 — a custom Tweedie family in brms does not scale to a per-row WIS regression (19r)
+
+19r was first written in brms, with a custom Tweedie family. Stan has no Tweedie lpdf, so it was a Dunn–Smyth
+series walked outward from its mode, evaluated per row and per gradient. On 8 470 rows that is hundreds of `lgamma`
+calls per row on the autodiff tape. The first gradient alone was 0.046 s, about 50× a closed-form family. A 2-chain
+× 300-iteration smoke run at h1 was still sampling after 16 min, at 12–17 GB RSS per chain, which never shrinks
+because Stan's arena keeps its peak.
+
+Before that, it OOM-killed outright: an extreme warmup proposal made every term NaN, `t < prev` is false for NaN,
+and the walk never stopped. The only symptom was exit 137 and "chain finished unexpectedly", with NO Stan message.
+Running the compiled binary by hand is what exposed the exit code.
+
+`mgcv::bam(family = tw())` fits the same model in ~2.5 s: compiled series, analytic derivatives, REML.
+**Lesson:** a likelihood with no closed form belongs in a tool that evaluates it in compiled code with analytic
+derivatives, not in a hand-written Stan function under NUTS. If one is ever needed in Stan, every series walk must
+bail out on a non-finite term.

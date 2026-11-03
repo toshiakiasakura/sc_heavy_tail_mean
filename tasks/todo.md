@@ -1,3 +1,15 @@
+# 2026-11-03 — 19r: regression of log-scale WIS on scenario and contact-model features (mgcv `bam`)
+
+Plan: `.claude/plans/in-19r-notebook-use-wiggly-seahorse.md`. Decisions (user): lognormal + gamma + Tweedie, all in mgcv `bam`
+(brms abandoned: the custom Tweedie did not scale); one fit per horizon; pre-Omicron (55 origins); random intercepts for
+origin, age and origin × age; random slopes by origin on all 9 X terms; no incidence term.
+
+- [x] `scenario_assembly_sources(cfg)` lifted into `18j_viz_utils.jl`; 18j cell 7 calls it (18j re-executed, cell-8 checks pass)
+- [x] `19r_export_wis_age.jl` → `dt_intermediate/19r_wis_age_time_<token>.csv` (33 880 rows; age-mean = 17j to 4e-16)
+- [x] `19r_utils.R` (bam helpers; `ldTweedie` = brute-force series to 4.5e-13)
+- [x] `19r_wis_bam.ipynb` (plain, IR kernel) executed headless: 0 errors, 12 fits converge, Jacobian check passes
+- [ ] Decide what to do about the h4 bimodality the PPC shows (no family reproduces it)
+
 # 9j transmission-parameter visualisation — match the current parameter construction
 
 Measured on the completed Pathfinder grid (`temporal-gsar-cut-sc-p0-gi-s0-m32-t0-ar1`,

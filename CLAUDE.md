@@ -38,6 +38,10 @@ jupyter nbconvert --to notebook --execute src/<name>.ipynb \
 
 # One-time R dep for forecast scoring (src/scoring.jl)
 Rscript -e 'install.packages("scoringutils")'   # v2 required; 2.2.0 installed 2026-08-07
+
+# One-time R deps for 19r (mgcv `bam`; mgcv is NOT in the base image). The ISM CRAN mirror was unreachable from
+# the container on 2026-11-03; the cloud mirror worked.
+Rscript -e 'install.packages(c("mgcv", "RhpcBLASctl"), repos = "https://cloud.r-project.org")'
 ```
 
 `JULIA_NUM_THREADS=12` and `JULIA_DEPOT_PATH=/home/jovyan/.julia:/opt/julia` are set by the devcontainer.
@@ -282,7 +286,18 @@ src/
                                after t₀ enters a fit or forecast (user's choice). Verified: reproduces the 1j threshold table
                                (Alpha 2020-10-18, Delta 2021-04-04, BA.1 2021-11-21, BA.2 2021-12-26 first included, on the
                                Sunday grid).
-  18j_viz_utils.jl           Fixed-row twin of 17j's ranking figure (2026-11-02): `scenario_bar_contact_order`, `scenario_bar_rows`, `plot_scenario_bars_by_horizon`, the Cleveland dot plot `plot_scenario_dots`, `plot_scenario_age_heatmap`, `scenario_coverage_by_origin` (from the draws, because the scored quantiles stop at 5–95%) and `plot_scenario_wis_coverage_over_time`. Requires forecast_utils → 9j → 15j → 17j utils.
+  18j_viz_utils.jl           Fixed-row twin of 17j's ranking figure (2026-11-02): `scenario_bar_contact_order`, `scenario_bar_rows`, `plot_scenario_bars_by_horizon`, the Cleveland dot plot `plot_scenario_dots`, `plot_scenario_age_heatmap`, `scenario_coverage_by_origin` (from the draws, because the scored quantiles stop at 5–95%) and `plot_scenario_wis_coverage_over_time`. Requires forecast_utils → 9j → 15j → 17j utils. `scenario_assembly_sources(cfg)` (2026-11-03) is the ONE list of the four forecast caches `(path, labels, frozen)` behind the 22 series; 18j cell 7 and `19r_export_wis_age.jl` both call it.
+  19r_export_wis_age.jl      (2026-11-03) Julia script, run from `src/` after 17j: scores the 22 series from the four caches (`load_9j_assembly`, cannot refit) and writes
+                               `dt_intermediate/19r_wis_age_time_<token>.csv` — log-scale WIS per series × origin × horizon × age bin, origins ≤ 2021-11-01
+                               (33 880 rows) plus `observed`. Asserts the mean over the 7 bins equals 17j's per-origin log WIS (measured 4e-16).
+  19r_utils.R                (2026-11-03) R helpers for the 19r notebook: `add_design` (X_data/X_model 0/1 coding; interactions are PRODUCT columns
+                               `ctc_future_variant`/`ctc_frozen_variant`/`duration_nbhd`, because `s(origin, by = x, bs = "re")` needs a numeric `by`),
+                               `wis_formula`/`fit_wis_bam` (`bam(fREML, discrete = TRUE, nthreads)`), `aic_on_wis` (lognormal = gaussian on log WIS, put on
+                               the `wis` scale by its Jacobian −Σ log y), `coef_draws` (N(b̂, Vp)), effect/slope/RE tables, `simulate_wis`, `rtweedie` +
+                               `dtweedie_log_brute` (checks `ldTweedie`'s parameterisation), and `PERIODS` restated from 9j (keep in step by hand).
+                               ⚠ It calls `RhpcBLASctl::blas_set_num_threads(1)`: with `nthreads > 1` the image's OpenBLAS warns "Detect OpenMP Loop
+                               and this application may hang" on every BLAS call. ⚠ `fit$scale` PARTIAL-MATCHES `scale.estimated` (→ TRUE); the scale
+                               estimate is `fit$sig2`. ⚠ `gam.vcomp(...)$all` is NULL for these fits — the table is `$vc`.
   17j_viz_utils.jl           FROZEN-CONTACT (h0, unconditional) vs CONDITIONAL forecast (2026-10-17). `assert_h0_artefacts`
                                (the no-refit guard), `frozen_cache_path` (`17j_assembly_frozen_<token>.jld2`, NEVER 9j's
                                default path), `check_h0_artefact_shapes`, `scheme_compare_frames` (model × horizon and
@@ -632,6 +647,19 @@ src/
                                  WIS + 95% coverage over time (h1, h4, pre-Omicron), which read the four assembly caches via `load_9j_assembly`, so 18j still
                                  cannot refit, and cache the result in `dt_intermediate/18j_age_coverage_*` (`scenario_age_coverage_or_load`; rebuilt if a source is newer or `REBUILD_18J = true`). PNGs default to 600 dpi. ⚠ That reader's stale warning fires on the 9j cache because the variant/h0 `8j_s2_*` are newer: measured
                                  2026-11-02, 0 of the 1608 conditional ones are. ⚠ The frozen cache holds a 23rd series, `no-contact|null@frozen`; filter to the 22. Outputs `res/18j_*`.
+                               19r WIS regression (2026-11-03) — the FIRST R-kernel (`ir`) notebook, `19r_wis_bam.ipynb`. Per horizon, log-scale WIS per series ×
+                                 origin × age (pre-Omicron, 8 470 rows) ~ 9 fixed X terms (X_data: `ctc_future`, `ctc_frozen`, `variant` + both contact ×
+                                 variant interactions; X_model: `duration`, `nbhd`, `duration_nbhd`, `diagonal`, 0 for no-contact) + random intercepts for
+                                 origin, age and origin × age + a RANDOM SLOPE BY ORIGIN ON ALL 9 TERMS, under lognormal / gamma / Tweedie (`tw()`), all
+                                 with mgcv `bam`; compared by AIC on the `wis` scale. NO incidence covariate (user's choice: constant within origin × age).
+                                 Reads only the 19r export CSV; 12 fits take ~1 min in total, so nothing is cached. Outputs `res/19r_*`.
+                                 ⚠ brms was tried first and ABANDONED (user decision): the Tweedie needed a custom Stan family whose density is a
+                                 per-row series, and a 2-chain × 300-iteration smoke run at h1 was still sampling after 16 min at 12–17 GB per
+                                 chain. Measured on the `bam` fits (2026-11-03): Tweedie p = 1.99 (mgcv's upper limit, i.e. the gamma) at h1–2,
+                                 1.81 / 1.66 at h3 / h4; AIC best = lognormal at h1, Tweedie at h2–4. The slopes widen the h1 SEs ×0.91–2.17
+                                 (`diagonal` most). The slope SDs of the two interactions (at h1) and of `duration_nbhd` (h1–2) are ≈ 0.
+                                 ⚠ The PPC shows observed WIS is BIMODAL at h4 (a mode near 0.08 and one near 1), which none of the three families
+                                 reproduces.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 

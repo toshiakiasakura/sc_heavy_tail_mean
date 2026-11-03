@@ -25,6 +25,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 
 USER jovyan
 
+# mgcv `bam` for 19r (src/19r_wis_bam.ipynb), absent from this base image; RhpcBLASctl pins BLAS to one thread there.
+RUN R -e "install.packages(c('mgcv', 'RhpcBLASctl'), repos = 'https://cran.ism.ac.jp')"
+
 # Install RTK (Rust Token Killer) for token-efficient Claude Code sessions
 RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh && \
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/jovyan/.bashrc
