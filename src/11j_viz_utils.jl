@@ -115,7 +115,7 @@ function plot_moment_timeline(dm::ContactDegreeModel, j::Integer, origin::Date, 
     panels = Any[]
     for i in 1:A
         pnl = plot(; title = "contactor $(grid.LAB[i])", titlefontsize = 8, xrotation = 45,
-                   xlabel = "week (Wed mid-date)", ylabel = "contacts / participant-day",
+                   xlabel = "week (Thu mid-date)", ylabel = "contacts / participant-day",
                    yscale = yscale, legend = (i == 1 ? :best : false), legendfontsize = 5)
         # Date-valued series FIRST (date-axis gotcha), then the vertical origin rule.
         mmed = st.mean.med[:, i, j];  mlo = st.mean.lo[:, i, j];  mhi = st.mean.hi[:, i, j]

@@ -49,7 +49,8 @@
 #   MAX_ORIGINS       origins per PROCESS — the memory bound        (default 8)
 #   CHUNK             origins per prefit! call — memory checkpoint   (default 4)
 #   MEM_FLOOR_GIB     exit early below this MemAvailable            (default 8.0)
-#   ORIGIN_STRIDE     how many disjoint slices the origins split into (default 1 = no slicing)
+#   S1_QUEUE=true     Stage 1 as ONE work queue over the chunk's fits (default false = per-origin fan-out)
+#   ORIGIN_STRIDE    how many disjoint slices the origins split into (default 1 = no slicing)
 #   ORIGIN_OFFSET     which slice THIS process owns, 0-based         (default 0)
 #   DRY_RUN=1         resolve + print everything, exit 10 before any fit (login-node preflight)
 #   S1_CONCURRENCY / S2_CONCURRENCY / FIT_END / ORIGIN_MIN  — exactly as the notebook reads them
@@ -63,6 +64,11 @@
 # STAGE1_USE_NUTS defaults to "true", as in 8j. (It defaulted to "false" until 2026-10-22, to RESUME
 # the Pathfinder `-ar1` generation; nothing is left to resume.) It is in the cache token, so getting
 # it wrong does not error — it starts a different generation and refits from scratch.
+#
+# S1_QUEUE=true passes `queue = true` to `prefit_stage1!` (`_prefit_stage1_queue!`, as 8j §2b does).
+# It matters when only h0 is left to fit: the per-origin fan-out is then 2 fits wide and barriers on
+# each origin's slower hurdle-Weibull chain, idling most threads. Set CHUNK = MAX_ORIGINS with it, so
+# one queue spans the whole batch. Same files, RNGs and return value either way.
 #
 #   julia --project=/workdir /workdir/src/8j_run_grid.jl
 
@@ -82,6 +88,7 @@ PHASE           = get(ENV, "PHASE", "s1")
 MAX_ORIGINS     = parse(Int,     get(ENV, "MAX_ORIGINS",  "8"))
 CHUNK           = parse(Int,     get(ENV, "CHUNK",        "4"))
 MEM_FLOOR       = parse(Float64, get(ENV, "MEM_FLOOR_GIB", "8.0"))
+S1_QUEUE        = get(ENV, "S1_QUEUE", "false") == "true"
 PHASE in ("s1", "s2") || error("PHASE must be \"s1\" or \"s2\", got $(repr(PHASE))")
 
 const KNOWN_SCENARIOS = ("conditional", "frozen", "variant")
@@ -182,7 +189,7 @@ say("  origins     : ", length(FORECAST_ORIGINS), " available (", first(FORECAST
 # tasks partitioned the grid rather than duplicating it. Two logs that share an origin are the bug.
 say("  slice       : ", ORIGIN_OFFSET, "/", ORIGIN_STRIDE, " ⇒ ", length(wins), " origin(s): ",
     join(string.(getfield.(wins, :origin)), ", "))
-say("  concurrency : s1 = ", S1_CONCURRENCY, ", s2 = ", S2_CONCURRENCY,
+say("  concurrency : s1 = ", S1_CONCURRENCY, S1_QUEUE ? " (queue)" : "", ", s2 = ", S2_CONCURRENCY,
     " | batch = ", MAX_ORIGINS, " origins, chunk = ", CHUNK, ", mem floor = ", MEM_FLOOR, " GiB")
 say("  scenarios   : ", join(sort(collect(SCENARIOS)), ", "), " | s1 horizons ", S1_HORIZONS)
 say("  grid now    : s1 ", sum(w -> N_S1 - s1_missing(w), wins), "/", N_S1 * length(wins),
@@ -281,7 +288,8 @@ for (ci, chunk) in enumerate(Iterators.partition(batch, CHUNK))
     if PHASE == "s1"
         # ONE call over h1–4 AND h0: every (degree × horizon) fit of an origin shares one fan-out.
         r = prefit_stage1!(DMS, chunk, cfg; data_provider = make_provider(S1_HORIZONS),
-                           horizons = S1_HORIZONS, save_dir = SAVE_DIR, max_concurrent = S1_CONCURRENCY)
+                           horizons = S1_HORIZONS, save_dir = SAVE_DIR, max_concurrent = S1_CONCURRENCY,
+                           queue = S1_QUEUE)
         n_fitted[] += r.fitted
         say("  s1 ", S1_HORIZONS, ": ", r.fitted, " fitted / ", r.skipped, " skipped / ", r.failed,
             " FAILED in ", round(Int, time() - t0), "s")

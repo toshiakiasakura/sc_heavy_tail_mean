@@ -21,6 +21,27 @@ frozen_cache_path(cfg::FrameworkConfig; save_dir::AbstractString = "../dt_interm
     joinpath(save_dir, "17j_assembly_frozen_$(contacts_label(cfg)).jld2")
 
 """
+    missing_h0_artefacts(wins, combos, cfg; save_dir) -> (; want, miss)
+
+Every frozen-contact (h0) artefact the frozen scheme reads — the `8j_s1_*_h0` chain of each Stage-1
+degree model and the `8j_s2_*_h0` pooled file of each combo, per origin — and those absent. The
+non-throwing core of `assert_h0_artefacts`, so 17j can SKIP the frozen scheme (2026-10-27: none exist
+on the `-eng` grid yet) instead of failing.
+"""
+function missing_h0_artefacts(wins, combos, cfg::FrameworkConfig;
+                              save_dir::AbstractString = "../dt_intermediate")
+    tag = contacts_label(cfg)
+    want = String[]
+    for w in wins, (dm, nb) in combos
+        needs_stage1(dm) &&
+            push!(want, stage1_path(dm, w.origin, FROZEN_H; contacts = tag, save_dir = save_dir))
+        push!(want, stage2_path(dm, nb, w.origin, FROZEN_H; contacts = tag, save_dir = save_dir))
+    end
+    unique!(want)
+    return (; want, miss = filter(!isfile, want))
+end
+
+"""
     assert_h0_artefacts(wins, combos, cfg; save_dir) -> n_checked
 
 Error unless every frozen-contact artefact exists: the `8j_s1_*_h0` chain of each Stage-1 degree
@@ -30,15 +51,7 @@ writing into the live token.
 """
 function assert_h0_artefacts(wins, combos, cfg::FrameworkConfig;
                              save_dir::AbstractString = "../dt_intermediate")
-    tag = contacts_label(cfg)
-    want = String[]
-    for w in wins, (dm, nb) in combos
-        needs_stage1(dm) &&
-            push!(want, stage1_path(dm, w.origin, FROZEN_H; contacts = tag, save_dir = save_dir))
-        push!(want, stage2_path(dm, nb, w.origin, FROZEN_H; contacts = tag, save_dir = save_dir))
-    end
-    unique!(want)
-    miss = filter(!isfile, want)
+    (; want, miss) = missing_h0_artefacts(wins, combos, cfg; save_dir = save_dir)
     isempty(miss) || error("""
         17j: $(length(miss)) of $(length(want)) frozen-contact (h$(FROZEN_H)) artefacts are missing,
         e.g. $(basename.(first(miss, 3))).
@@ -364,24 +377,35 @@ variant_cache_path(cfg::FrameworkConfig; frozen::Bool, save_dir::AbstractString 
 series_name(label::AbstractString, frozen::Bool) = frozen ? string(label, "@frozen") : String(label)
 
 """
-    scenario_table(contact_labels) -> DataFrame
+    scenario_table(contact_labels; scenarios = SCENARIO_ORDER) -> DataFrame
 
 One row per (contact panel × scenario): `contact` (the contact combo label), `scenario`
-(`SCENARIO_ORDER`), `label` (the model label), `frozen`, `series` (`series_name`).
+(`SCENARIO_ORDER`), `label` (the model label), `frozen`, `series` (`series_name`). `scenarios` keeps
+only the scenarios whose artefacts exist (2026-10-27: the `-eng` grid has no `_h0` / `-variant` files
+yet, so 17j runs on "no contact" + "contact"); every §6 helper reads the scenario set back from `st`
+via `scenarios_in`, never from `SCENARIO_ORDER`.
 """
-function scenario_table(contact_labels)
+function scenario_table(contact_labels; scenarios = SCENARIO_ORDER)
+    @assert issubset(scenarios, SCENARIO_ORDER) "scenario_table: unknown scenario(s) $(setdiff(scenarios, SCENARIO_ORDER))"
     rows = NamedTuple[]
     for c in contact_labels
         for (sc, lbl, fz) in (("no contact", NULL_LABEL, false), ("contact", c, false),
                               ("contact (frozen)", c, true), ("variant", NULL_VARIANT_LABEL, false),
                               ("variant + contact", c * "-variant", false),
                               ("variant + contact (frozen)", c * "-variant", true))
+            sc in scenarios || continue
             push!(rows, (; contact = String(c), scenario = sc, label = String(lbl), frozen = fz,
                            series = series_name(lbl, fz)))
         end
     end
     return DataFrame(rows)
 end
+
+"The scenarios present in `st`, in `SCENARIO_ORDER` — what every §6 plotter loops over."
+scenarios_in(st::DataFrame) = filter(in(Set(st.scenario)), SCENARIO_ORDER)
+
+"`\"N scenarios\"` for a figure title (it was a literal \"six\")."
+_nscen(st::DataFrame) = (n = length(scenarios_in(st)); n == 1 ? "1 scenario" : "$(n) scenarios")
 
 """
     rename_series(qall, fc_store, frozen) -> (qall, fc_store)
@@ -401,6 +425,7 @@ end
 Paired contrasts per contact panel × horizon, `ratio = mean WIS(num) / mean WIS(den)` over origins
 with a `level` origin-bootstrap band (both series resampled together), on `scale`:
 - `vs no contact` for scenarios 2–6 (relative skill against scenario 1);
+  only contrasts whose numerator and denominator are both in `st` are computed;
 - the named contrasts `variant gain` (4/1, 5/2, 6/3), `contact gain` (2/1, 5/4) and
   `frozen penalty` (3/2, 6/5).
 `by_dt_h` is `score_wis(...).by_model_dt_h` over the series names. Origins are weekly and
@@ -421,6 +446,8 @@ function scenario_pair_ratios(by_dt_h::DataFrame, st::DataFrame; B::Int = 2000, 
                       ("contact gain", "variant + contact", "variant"),
                       ("frozen penalty", "contact (frozen)", "contact"),
                       ("frozen penalty", "variant + contact (frozen)", "variant + contact")])
+    have = Set(st.scenario)                           # only contrasts whose both sides exist
+    filter!(c -> c[2] in have && c[3] in have, contrasts)
     rows = NamedTuple[]
     for c in unique(st.contact), (kind, num, den) in contrasts, h in sort(unique(d.horizon))
         sn, sd = sname(c, num), sname(c, den)
@@ -441,7 +468,7 @@ end
 """
     plot_scenario_wis_by_horizon(by_h, st, cfg; scale) -> Plot
 
-One panel per contact model (layout from `panel_grid`), the six scenarios' mean WIS by horizon on a
+One panel per contact model (layout from `panel_grid`), the scenarios' (those in `st`) mean WIS by horizon on a
 shared y-axis. Scenarios 1 and 4 (no contact data) are identical in every panel.
 """
 function plot_scenario_wis_by_horizon(by_h::DataFrame, st::DataFrame, cfg; scale::AbstractString = WIS_SCALE,
@@ -454,7 +481,7 @@ function plot_scenario_wis_by_horizon(by_h::DataFrame, st::DataFrame, cfg; scale
         p = plot(; title = c, titlefontsize = 8, xlabel = "horizon (weeks)", ylabel = "WIS ($scale)",
                  xticks = collect(cfg.horizons), ylim = yl, legend = (k == 1 ? :topleft : false),
                  legendfontsize = 6)
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             s = sort(@subset(j, :contact .== c, :scenario .== sc), :horizon)
             col, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s.wis; color = col, ls = ls, marker = mk, ms = 3, lw = 2, label = sc)
@@ -463,7 +490,7 @@ function plot_scenario_wis_by_horizon(by_h::DataFrame, st::DataFrame, cfg; scale
     end
     nr, nc = panel_grid(length(panels))
     return plot(panels...; layout = (nr, nc), size = (400 * nc, 340 * nr),
-                plot_title = "17j — WIS by horizon, six scenarios per contact model ($(scale) scale)$(subtitle)",
+                plot_title = "17j — WIS by horizon, $(_nscen(st)) per contact model ($(scale) scale)$(subtitle)",
                 plot_titlefontsize = 10)
 end
 
@@ -482,7 +509,7 @@ function plot_scenario_rel_wis(ratios::DataFrame, cfg)
                  ylabel = "WIS / WIS(no contact)", ylim = yl, xticks = collect(cfg.horizons),
                  legend = (k == 1 ? :topleft : false), legendfontsize = 6)
         hline!(p, [1.0]; color = :grey40, ls = :solid, lw = 1, label = "no contact")
-        for sc in SCENARIO_ORDER[2:end]
+        for sc in filter(in(Set(r.num)), SCENARIO_ORDER[2:end])
             s = sort(@subset(r, :contact .== c, :num .== sc), :horizon)
             col, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s.ratio; ribbon = (s.ratio .- s.lo, s.hi .- s.ratio), fillalpha = 0.10,
@@ -555,7 +582,7 @@ function plot_scenario_coverage(by_h::DataFrame, st::DataFrame, cfg; scale::Abst
                  ylabel = "coverage", ylim = (0, 1), xticks = collect(cfg.horizons),
                  legend = (lvl == 50 && k == 1 ? :bottomleft : false), legendfontsize = 5)
         hline!(p, [lvl / 100]; color = :gray, ls = :dot, label = "nominal")
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             s = sort(@subset(j, :contact .== c, :scenario .== sc), :horizon)
             colr, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s[!, col_]; color = colr, ls = ls, marker = mk, ms = 2, msc = colr, lw = 1.6, label = sc)
@@ -564,7 +591,7 @@ function plot_scenario_coverage(by_h::DataFrame, st::DataFrame, cfg; scale::Abst
     end
     nc = length(contacts)
     return plot(panels...; layout = (2, nc), size = (330 * nc, 700),
-                plot_title = "17j — 50% / 90% interval coverage, six scenarios$(subtitle)", plot_titlefontsize = 10)
+                plot_title = "17j — 50% / 90% interval coverage, $(_nscen(st))$(subtitle)", plot_titlefontsize = 10)
 end
 
 """
@@ -600,7 +627,7 @@ end
 """
     plot_scenario_forecast_panels(fc_store, wins, st, contact, cfg; groups, scenarios, grid, inf) -> Plot
 
-9j's `plot_forecast_panels` for the six scenarios of ONE contact model: per origin, the observed
+9j's `plot_forecast_panels` for the scenarios (`st`) of ONE contact model: per origin, the observed
 total infections (fit weeks ++ realised targets) and each scenario's forecast fan (median + 90% band;
 frozen scenarios dashed). `groups` = `takeover_origins(…)` lays the panels out as one COLUMN per
 takeover and one ROW per origin; the first origin at ≥ 50% is marked in its title. Each panel's y-axis
@@ -609,7 +636,7 @@ is capped at `ycap ×` the largest observed value it shows (the variant fans at 
 upper band crosses the cap is COUNTED in the title, never hidden silently.
 """
 function plot_scenario_forecast_panels(fc_store, wins, st::DataFrame, contact::AbstractString, cfg;
-                                       groups, scenarios = SCENARIO_ORDER,
+                                       groups, scenarios = scenarios_in(st),
                                        grid = cis_age_grid(), inf = nothing, ycap::Real = 3.0)
     fmt(y) = abs(y) >= 1e6 ? string(round(y / 1e6; digits = 1), "M") : string(round(Int, y / 1e3), "k")
     all_o = [w.origin for w in wins]
@@ -653,7 +680,7 @@ function plot_scenario_forecast_panels(fc_store, wins, st::DataFrame, contact::A
     end
     nc = length(groups)
     return plot(panels...; layout = (k, nc), size = (520 * nc, 300 * k),
-                plot_title = "17j — $(contact): total infections around each takeover, six scenarios (median + 90% band; dashed = frozen)",
+                plot_title = "17j — $(contact): total infections around each takeover, $(length(scenarios)) scenarios (median + 90% band; dashed = frozen)",
                 plot_titlefontsize = 10)
 end
 
@@ -677,7 +704,7 @@ function plot_scenario_wis_over_time(by_dt_h::DataFrame, st::DataFrame, contact:
         pl = plot(; title = "horizon $h — WIS ($scale)", titlefontsize = 8, ylabel = "WIS ($scale)",
                   legend = (k == 1 ? :topleft : false), legendfontsize = 5, xrotation = 45, ylim = (0, Inf),
                   xlabel = (h == last(cfg.horizons) ? "forecast origin" : ""))
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             s = sort(@subset(sub, :model .== sname(sc)), :forecast_date)
             colr, ls, _ = SCENARIO_STYLE[sc]
             plot!(pl, s.forecast_date, s.wis; color = colr, ls = ls, lw = 1.4, label = sc)
@@ -686,7 +713,7 @@ function plot_scenario_wis_over_time(by_dt_h::DataFrame, st::DataFrame, contact:
         pr = plot(; title = "horizon $h — cumulative WIS − WIS($ref)", titlefontsize = 8,
                   ylabel = "cumulative diff", legend = false, xrotation = 45,
                   xlabel = (h == last(cfg.horizons) ? "forecast origin" : ""))
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             sc == ref && continue
             s = sort(@subset(sub, :model .== sname(sc)), :forecast_date)
             dts = Date[]; cum = Float64[]; acc = 0.0
@@ -711,24 +738,25 @@ function plot_scenario_wis_over_time(by_dt_h::DataFrame, st::DataFrame, contact:
     end
     H = length(cfg.horizons)
     return plot(panels...; layout = (H, 2), size = (1400, 330 * H),
-                plot_title = "17j — $(contact): WIS over time by horizon, six scenarios ($(scale) scale; right: cumulative vs $(ref), < 0 ⇒ better; dotted = a variant category enters)",
+                plot_title = "17j — $(contact): WIS over time by horizon, $(_nscen(st)) ($(scale) scale; right: cumulative vs $(ref), < 0 ⇒ better; dotted = a variant category enters)",
                 plot_titlefontsize = 10)
 end
 
 """
     scenario_period_label(d) -> String
 
-`period_of(d)` (Munday 2023 Table 2, 9j), plus two explicit buckets for the origins outside every
-phase — `"before Lockdown 2"` and `"after Opening up"`. 9j drops those; here they are kept because
-the latter holds the Omicron origins. Never reuse 9j's `"(pre-Lockdown 2)"` label for both: it
-mislabels the five late origins.
+`period_of(d)` (9j's `PERIODS`), plus two explicit buckets for an origin outside every phase —
+`"before <first phase>"` / `"after <last phase>"`, the labels `period_summary` prints. Since
+2026-10-27 `PERIODS` carries "Tiers" and "Plan B / Omicron" around Munday's Table 2, so on the `-eng`
+grid both buckets are EMPTY (they held 3 and 9 origins on the Table-2-only bands, the latter the
+Omicron wave); they stay as a guard for a longer grid.
 """
 function scenario_period_label(d::Date)
     p = period_of(d)
     ismissing(p) || return p
-    return d < PERIODS[1][2] ? "before Lockdown 2" : "after Opening up"
+    return d < PERIODS[1][2] ? "before $(PERIOD_ORDER[1])" : "after $(PERIOD_ORDER[end])"
 end
-const SCENARIO_PERIOD_ORDER = vcat(["before Lockdown 2"], PERIOD_ORDER, ["after Opening up"])
+const SCENARIO_PERIOD_ORDER = vcat(["before $(PERIOD_ORDER[1])"], PERIOD_ORDER, ["after $(PERIOD_ORDER[end])"])
 
 """
     scenario_wis_by_period(by_dt_h, st; scale) -> DataFrame
@@ -749,7 +777,7 @@ end
     plot_scenario_wis_by_period(agg, contact, cfg; scale) -> Plot
 
 ABSOLUTE mean WIS by horizon, one panel per pandemic period (`SCENARIO_PERIOD_ORDER`, those present),
-the six scenarios as lines — the absolute-scale twin of 9j's `plot_rwis_by_period`. Each panel has its
+the scenarios present as lines — the absolute-scale twin of 9j's `plot_rwis_by_period`. Each panel has its
 own y-axis from 0 (periods differ by an order of magnitude); `n` origins in the title.
 """
 function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cfg; scale::AbstractString = WIS_SCALE)
@@ -761,7 +789,7 @@ function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cf
         p = plot(; title = "$(per) (n = $(maximum(ap.n_origins)))", titlefontsize = 8,
                  xlabel = "horizon (weeks)", ylabel = "WIS ($scale)", xticks = collect(cfg.horizons),
                  ylim = (0, maximum(ap.wis) * 1.08), legend = (k == 1 ? :topleft : false), legendfontsize = 5)
-        for sc in SCENARIO_ORDER
+        for sc in filter(in(Set(a.scenario)), SCENARIO_ORDER)
             s = sort(@subset(ap, :scenario .== sc), :horizon)
             colr, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s.wis; color = colr, ls = ls, marker = mk, ms = 3, msc = colr, lw = 1.8, label = sc)
@@ -770,7 +798,7 @@ function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cf
     end
     nc = min(3, length(panels)); nr = cld(length(panels), nc)
     return plot(panels...; layout = (nr, nc), size = (420 * nc, 320 * nr),
-                plot_title = "17j — $(contact): mean WIS by horizon per pandemic period, six scenarios ($(scale) scale)",
+                plot_title = "17j — $(contact): mean WIS by horizon per pandemic period, $(length(unique(a.scenario))) scenarios ($(scale) scale)",
                 plot_titlefontsize = 10)
 end
 
@@ -778,8 +806,8 @@ end
     plot_scenario_age_fans(fc_store, wins, st, contact, origin, cfg; grid, inf, ycap) -> Plot
 
 AGE-STRATIFIED forecast at one `origin` for one contact model: one panel per CIS age bin plus an
-all-ages panel; in each, the observed weekly infections (fit weeks ++ realised targets) and the six
-scenarios' fans (median + 90% band; frozen dashed). y capped at `ycap ×` the panel's observed maximum,
+all-ages panel; in each, the observed weekly infections (fit weeks ++ realised targets) and the
+scenarios' fans (those in `st`) (median + 90% band; frozen dashed). y capped at `ycap ×` the panel's observed maximum,
 with fans crossing it COUNTED in the panel title.
 """
 function plot_scenario_age_fans(fc_store, wins, st::DataFrame, contact::AbstractString, origin::Date, cfg;
@@ -804,7 +832,7 @@ function plot_scenario_age_fans(fc_store, wins, st::DataFrame, contact::Abstract
               ms = 2, label = "observed")
         vline!(p, [week_mid(origin)]; color = :gray, ls = :dash, lw = 1, label = "")
         n_off = 0
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             key = (origin, sname(sc))
             haskey(fc_store, key) || continue
             f = fc_store[key]                             # A × H × draws
@@ -823,7 +851,7 @@ function plot_scenario_age_fans(fc_store, wins, st::DataFrame, contact::Abstract
     end
     nc = 4; nr = cld(length(panels), nc)
     return plot(panels...; layout = (nr, nc), size = (400 * nc, 330 * nr),
-                plot_title = "17j — $(contact): age-stratified forecast at origin $(origin), six scenarios (median + 90% band; dashed = frozen)",
+                plot_title = "17j — $(contact): age-stratified forecast at origin $(origin), $(_nscen(st)) (median + 90% band; dashed = frozen)",
                 plot_titlefontsize = 10)
 end
 
@@ -831,7 +859,7 @@ end
     _point_forecast_inputs(fc_store, st, contact, origin, cfg; inf, grid, n_before, n_after) -> NamedTuple
 
 Everything one origin's point-forecast panels need: the observed weekly infections `I_obs` (A × weeks)
-over `n_before` weeks up to the origin and `n_after` past it, the six scenario fans (A × H × draws), and
+over `n_before` weeks up to the origin and `n_after` past it, the scenario fans (those in `st`) (A × H × draws), and
 the x positions. Asserts every fan exists and that `I_obs` reproduces the window's fit weeks
 (`load_window_data`) and scored targets (`load_forecast_truth`) EXACTLY — the long series IS the truth the
 forecasts were fitted to and scored against.
@@ -852,7 +880,7 @@ function _point_forecast_inputs(fc_store, st::DataFrame, contact::AbstractString
     sname(sc) = only(@subset(st, :contact .== contact, :scenario .== sc).series)
     fans = Dict(sc => (k = (origin, sname(sc));
                        @assert haskey(fc_store, k) "_point_forecast_inputs: no fan for $(k)"; fc_store[k])
-                for sc in SCENARIO_ORDER)
+                for sc in scenarios_in(st))
     x_obs  = week_mid.(weeks)
     months = [d for d in firstdayofmonth(first(x_obs)):Month(1):last(x_obs) if d >= first(x_obs)]
     return (; origin, win, weeks, I_obs, fans, x_obs, months, H, i0 = wi[origin],
@@ -877,7 +905,7 @@ function _point_forecast_panel!(frame::DataFrame, d, lab::AbstractString, rows; 
     H = d.H
     y_obs = vec(sum(d.I_obs[rows, :]; dims = 1))
     meds  = Dict(sc => (tot = dropdims(sum(d.fans[sc][rows, :, :]; dims = 1); dims = 1);
-                        [_fmed(tot[h, :]) for h in 1:H]) for sc in SCENARIO_ORDER)
+                        [_fmed(tot[h, :]) for h in 1:H]) for sc in keys(d.fans))
     ymax  = ycap * maximum(y_obs)                         # the cap; the axis shrinks to the data under it
     ytop  = 1.05 * min(ymax, maximum(vcat(y_obs, filter(isfinite, reduce(vcat, values(meds))))))
     xlab  = xfmt === nothing ? fill("", length(d.months)) : Dates.format.(d.months, xfmt)
@@ -890,7 +918,7 @@ function _point_forecast_panel!(frame::DataFrame, d, lab::AbstractString, rows; 
     append!(frame, DataFrame(origin = d.origin, age_group = lab, series = "observed", week = d.weeks,
                              value = y_obs, horizon = missing))
     n_off = 0
-    for sc in SCENARIO_ORDER
+    for sc in filter(in(keys(d.fans)), SCENARIO_ORDER)
         colr, _, mk = SCENARIO_STYLE[sc]
         plot!(p, d.x_fc, vcat(y_obs[d.i0], meds[sc]); color = colr, ls = :dot, lw, marker = mk, ms,
               markercolor = :white, markerstrokecolor = colr, markerstrokewidth = msw, label = sc)
@@ -909,7 +937,7 @@ _point_frame() = DataFrame(origin = Date[], age_group = String[], series = Strin
     plot_scenario_point_forecasts(fc_store, st, contact, origins, cfg; inf, grid, tags,
                                   n_before = 12, n_after = 6, ycap = 3.0) -> (; fig, frame)
 
-Fig 4 of Bracher et al. 2021 (Nat Commun 12:5173; `ref/s41467-021-25207-0.pdf`) for the six scenarios of
+Fig 4 of Bracher et al. 2021 (Nat Commun 12:5173; `ref/s41467-021-25207-0.pdf`) for the scenarios (`st`) of
 ONE contact model, ALL AGES: one panel per origin — observed weekly infections, a dashed line at the
 origin, and each scenario's POINT forecast (median, no band) at h = 1..H. See `_point_forecast_panel!`
 and `_point_forecast_inputs` (which asserts the observed series against the scored truth). `frame` is
@@ -928,7 +956,7 @@ function plot_scenario_point_forecasts(fc_store, st::DataFrame, contact::Abstrac
                                title = "($(Char('a' + j - 1))) Infections, England, forecasts from $(origin)$(tag)")
     end
     fig = plot(panels...; layout = (1, length(panels)), size = (560 * length(panels), 400),
-               plot_title = "17j — $(contact): point forecasts (median) of the six scenarios, all ages",
+               plot_title = "17j — $(contact): point forecasts (median) of $(_nscen(st)), all ages",
                plot_titlefontsize = 10)
     return (; fig, frame)
 end
@@ -958,14 +986,14 @@ function plot_scenario_point_forecasts_by_age(fc_store, st::DataFrame, contact::
     leg = plot(; framestyle = :none, grid = false, xticks = false, yticks = false, legend = :left,
                legendfontsize = 8, foreground_color_legend = nothing)
     plot!(leg, [NaN], [NaN]; color = :black, lw = 1.8, marker = :square, ms = 4.0, label = "observed")
-    for sc in SCENARIO_ORDER
+    for sc in scenarios_in(st)
         colr, _, mk = SCENARIO_STYLE[sc]
         plot!(leg, [NaN], [NaN]; color = colr, ls = :dot, lw = 1.8, marker = mk, ms = 5.5,
               markercolor = :white, markerstrokecolor = colr, markerstrokewidth = 0.5, label = sc)
     end
     # the 2 × 4 cells spelled out: `grid(2, 4)` inside `@layout` would call this function's `grid` kwarg
     fig = plot(big, small..., leg; layout = @layout([a{0.5h}; [b c d e; f g h i]]), size = (1300, 1000),
-               plot_title = "17j — $(contact): point forecasts (median) of the six scenarios, by age",
+               plot_title = "17j — $(contact): point forecasts (median) of $(_nscen(st)), by age",
                plot_titlefontsize = 11)
     return (; fig, frame)
 end
@@ -988,8 +1016,9 @@ end
 """
     scenario_rank_frame(wis_by_h, st; scale) -> DataFrame
 
-One row per DISTINCT series × horizon (22 series: the 5 contact models × 4 contact scenarios + the 2
-no-contact ones — the no-contact model has only "no contact" and "variant"): its mean WIS (`scale`),
+One row per DISTINCT series × horizon (22 series with all six scenarios: the 5 contact models × 4
+contact scenarios + the 2 no-contact ones — the no-contact model has only "no contact" and "variant";
+6 on the conditional-only `-eng` grid, the 5 contact models + "no contact"): its mean WIS (`scale`),
 `rank` within the horizon (1 = lowest WIS), the base model (`-variant` stripped) and the scenario.
 `wis_by_h` is `by_model_h`-shaped (e.g. `scenario_wis_by_horizon_until`).
 """
@@ -1040,7 +1069,7 @@ end
     plot_scenario_bias(by_h, st, cfg; scale, subtitle) -> Plot
 
 scoringutils' `bias` (∈ [−1, 1]; > 0 ⇒ over-prediction, < 0 ⇒ under-prediction) by horizon, one panel per
-contact model (layout from `panel_grid`), the six scenarios as lines; shared y-axis [−1, 1] with 0 dashed.
+contact model (layout from `panel_grid`), the scenarios in `st` as lines; shared y-axis [−1, 1] with 0 dashed.
 `by_h` is `by_model_h`-shaped (`score_wis(…).by_model_h`, or `scenario_wis_by_horizon_until` for a sub-period).
 """
 function plot_scenario_bias(by_h::DataFrame, st::DataFrame, cfg; scale::AbstractString = WIS_SCALE,
@@ -1052,7 +1081,7 @@ function plot_scenario_bias(by_h::DataFrame, st::DataFrame, cfg; scale::Abstract
                  ylim = (-1, 1), xticks = collect(cfg.horizons), legend = (k == 1 ? :bottomleft : false),
                  legendfontsize = 5)
         hline!(p, [0.0]; color = :gray, ls = :dot, label = "")
-        for sc in SCENARIO_ORDER
+        for sc in scenarios_in(st)
             s = sort(@subset(j, :contact .== c, :scenario .== sc), :horizon)
             colr, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s.bias; color = colr, ls = ls, marker = mk, ms = 3, msc = colr, lw = 1.8, label = sc)
@@ -1061,6 +1090,6 @@ function plot_scenario_bias(by_h::DataFrame, st::DataFrame, cfg; scale::Abstract
     end
     nr, nc = panel_grid(length(panels))
     return plot(panels...; layout = (nr, nc), size = (400 * nc, 340 * nr),
-                plot_title = "17j — bias by horizon, six scenarios per contact model (> 0 over-, < 0 under-prediction)$(subtitle)",
+                plot_title = "17j — bias by horizon, $(_nscen(st)) per contact model (> 0 over-, < 0 under-prediction)$(subtitle)",
                 plot_titlefontsize = 10)
 end

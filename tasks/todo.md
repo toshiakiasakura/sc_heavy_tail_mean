@@ -613,7 +613,7 @@ Plan: `.claude/plans/indexed-knitting-castle.md` (main checkout). Worktree `/wor
 - [x] `8j_run_grid.jl` `SCENARIOS` (conditional, frozen, variant ⇒ 10 s1 + 59 s2 per origin); hpc/ scripts + README
 - [x] spot checks (grid, roster, origins, outcome coverage, variant sets) — re-run for the 67-origin grid
 - [ ] full 67-origin grid on the HPC (670 s1 NUTS + 3953 s2) — not started
-- [ ] then 9j/17j on the new grid; prose in 9j–17j that quotes 63-origin numbers is stale until re-run
+- [x] then 9j/17j on the new grid; prose in 9j–17j that quotes 63-origin numbers is stale until re-run (2026-10-27, conditional-only)
 - [x] 1j: inc2prev dcases vs ONS prevalence; infections vs positives; `_ab` vs no-`_ab` infections (the workbook comparison was dropped with `dt_raw/`)
 - [x] variant proportions from COG-UK ALONE: deleted `dt_ons_variant/` + `dt_ukhsa/` (user), `src/ons_variant.jl`, 16j §2–§3, 14j §6c's UKHSA line + §6d, 1j's ONS→UKHSA series + seam check; COG-UK shares now written to `dt_cog_uk/cog_uk_england_weekly_share.csv`
 
@@ -630,3 +630,21 @@ Plan: `.claude/plans/indexed-knitting-castle.md`. User: delete 16j; also drop 14
 - [x] verified: log-density bit-identical; gradient ≤ 2e-12 apart ⇒ Pathfinder draws differ (same posterior,
       different sample); old-formula R on an F-carrying artefact == new reader exactly; all viz utils load
 - [ ] 9j/14j/17j end-to-end — need the `-eng` grid
+
+# 2026-10-27 — 9j–17j on the prepared `-eng` grid (conditional h1–4 only; no h0 / variant)
+
+Plan: `.claude/plans/update-the-notebook-from-serialized-sonnet.md`. User: no fitting; 17j keeps
+the full span + the pre-Omicron views; add Tiers + Plan B / Omicron phases; 14j WINDOWS unchanged;
+export each executed notebook to `res_summary/13_<nb>.pdf`.
+
+- [x] A. PERIODS + Tiers / Plan B / Omicron; `period_summary` before/after split
+- [x] B. 9j §V skips cleanly (`FIT_VARIANT` default false, `HAS_VARIANT`)
+- [x] C. 17j conditional-only (`HAS_FROZEN`/`HAS_VARIANT`, `scenarios_in(st)`)
+- [x] D. 11j `WK` bug; Thu mid-date; CoMix England; stale counts/comments
+- [x] E1. move old res/ outputs to `res/_superseded_sun_20261022/`
+- [x] E2. execute 9j → 10j–13j → 14j → 15j → 17j
+- [x] E4. re-measure prose from the executed outputs
+- [x] E5. PDFs `res_summary/13_*.pdf`
+- [x] E6. CLAUDE.md / lessons
+- [ ] 17j frozen + variant scenarios: copy the HPC `_h0` / `-variant` files into `dt_intermediate/`, re-run 17j
+      (HAS_FROZEN / HAS_VARIANT switch on by themselves) and 9j (§V γ_v diagnostic), re-export the PDFs

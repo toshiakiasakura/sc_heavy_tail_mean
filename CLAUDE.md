@@ -197,10 +197,11 @@ src/
                                  ⚠ **FUNCTIONS, NOT `const`s.** `PERIODS` lives in `9j_viz_utils.jl`, which this file's
                                  header does NOT list as a dependency — every other 9j reference here sits inside a
                                  function body, so the file still loads standalone. A top-level `const` built from
-                                 `PERIODS` would evaluate at include time and break that. `PERIODS` spans
-                                 2020-11-05…2021-11-24 vs origins 2020-10-18…2021-12-26, so **8 origins fall outside**
-                                 (3 before, 5 after) and get ONE grey, DASHED `"outside phases"` bucket — do NOT reuse
-                                 9j's `period_summary` label `"(pre-Lockdown 2)"`, which mislabels five of the eight.
+                                 `PERIODS` would evaluate at include time and break that. Since 2026-10-27 `PERIODS` spans
+                                 2020-10-14…2022-01-26 ("Tiers" and "Plan B / Omicron" added around Table 2), so every
+                                 `-eng` origin has a phase and the grey, DASHED `"outside phases"` bucket is EMPTY (kept as
+                                 a guard; on the Table-2-only bands it held 3 before + 9 after). `period_summary` now
+                                 prints `(before …)` / `(after …)` separately; it used to call every outsider "pre-Lockdown 2".
                                • `observed_contact_means` now also returns **`apd`**, purely so §5 can assert its own
                                  roster against `apd.n[t,i,1]` without a second `prepare_degree_data` call.
                                ROUND 6 (2026-09-10) — §4 zero baselines, §6 per-phase + NGM:
@@ -279,7 +280,9 @@ src/
                                dominant group when off), `variant_split(win, cc, cfg)` → `VariantSplit` over `win.all_weeks`, `with_variants`,
                                `variant_set_table`. ⚠ Categories are fixed at the ORIGIN for every horizon; no variant data
                                after t₀ enters a fit or forecast (user's choice). Verified: reproduces the 1j threshold table
-                               (Alpha 2020-10-18, Delta 2021-04-04, BA.1 2021-11-21, BA.2 2021-12-26 first included).
+                               (Alpha 2020-10-18, Delta 2021-04-04, BA.1 2021-11-21, BA.2 2021-12-26 first included, on the
+                               Sunday grid).
+  18j_viz_utils.jl           Fixed-row twin of 17j's ranking figure (2026-11-02): `scenario_bar_contact_order`, `scenario_bar_rows`, `plot_scenario_bars_by_horizon`, the Cleveland dot plot `plot_scenario_dots`, `plot_scenario_age_heatmap`, `scenario_coverage_by_origin` (from the draws, because the scored quantiles stop at 5–95%) and `plot_scenario_wis_coverage_over_time`. Requires forecast_utils → 9j → 15j → 17j utils.
   17j_viz_utils.jl           FROZEN-CONTACT (h0, unconditional) vs CONDITIONAL forecast (2026-10-17). `assert_h0_artefacts`
                                (the no-refit guard), `frozen_cache_path` (`17j_assembly_frozen_<token>.jld2`, NEVER 9j's
                                default path), `check_h0_artefact_shapes`, `scheme_compare_frames` (model × horizon and
@@ -294,8 +297,8 @@ src/
                                contact) and `plot_scenario_forecast_panels(…; groups = takeover_origins(…))` (15 panels:
                                5 origins centred on the first ≥50% origin of Alpha/Delta/BA.1, all six scenarios; y capped
                                at 3× observed, off-scale fans COUNTED in the title); `plot_scenario_wis_by_period` (absolute mean WIS by horizon per period; periods via
-                               `scenario_period_label` = 9j's + "before Lockdown 2"/"after Opening up", which 9j drops but
-                               which hold the Omicron origins) and `plot_scenario_age_fans` (age panels at one origin, 2021-05-09); `scenario_wis_by_horizon_until` (WIS by
+                               `scenario_period_label` = 9j's `PERIODS` + "before <first>"/"after <last>" guard buckets, empty
+                               since "Tiers"/"Plan B / Omicron" were added) and `plot_scenario_age_fans` (age panels at one origin, 2021-05-10); `scenario_wis_by_horizon_until` (WIS by
                                horizon over origins ≤ a date — the pre-Omicron figure uses ≤ 2021-11-01), and `scenario_rank_frame` +
                                `plot_scenario_rank_by_horizon` (all 22 distinct series ranked by mean WIS per horizon, pre-Omicron); `plot_scenario_bias` (bias by
                                horizon; with `plot_scenario_coverage`, drawn over all origins and pre-Omicron).
@@ -310,8 +313,13 @@ src/
                                is of the per-draw age SUM, so the age panels do not add to the total. ⚠ Inside a function
                                with a `grid` kwarg, `@layout [...; grid(2, 4)]` CALLS that kwarg (MethodError: NamedTuple not
                                callable) — spell the cells out. 17j cell after the age fans: `weighted-hweibull|neighbourhood`
-                               at 2020-12-06 (Alpha) and 2021-05-09 (Delta) → `res/17j_scenarios_point_forecasts_total_*`,
+                               at 2020-12-07 (Alpha) and 2021-05-10 (Delta) → `res/17j_scenarios_point_forecasts_total_*`,
                                `…_age_<origin>_*.png`, `…_age_*.csv`.
+                               (2026-10-27) **A SCENARIO SUBSET**: `scenario_table(…; scenarios = …)` keeps only the
+                               scenarios whose artefacts exist, and every §6 helper loops `scenarios_in(st)` — NEVER
+                               `SCENARIO_ORDER`, whose `only(@subset(st, …))` look-ups throw on an absent scenario;
+                               `scenario_pair_ratios` drops contrasts missing a side. `missing_h0_artefacts` is the
+                               non-throwing core of `assert_h0_artefacts`.
   15j_viz_utils.jl           MULTIVARIATE scoring (2026-10-15; margins cut 2026-10-16) — 9j's WIS is univariate, so
                                nothing asked whether the 7 age bins move TOGETHER as a model says. Reads 9j's own
                                `9j_assembly_*.jld2` (`load_9j_assembly`: `isfile` → `load` → validate; it deliberately
@@ -349,8 +357,10 @@ src/
                                for the marginals, so a uniformly biased forecast is not penalised at all. Measured on
                                this grid by `summarise_mvscores_by_horizon` at `margin="age"`: by MEAN, Σ WIS, Σ CRPS
                                and ES give ONE identical ordering at all four horizons and both variogram orders do
-                               not — and at h=4 `vs_p1` ranks **`no-contact|null` FIRST**, i.e. a model with a constant
-                               C* and no contact data at all wins. Report VS as a dependence diagnostic beside ES,
+                               not — on the Sunday grid at h=4 `vs_p1` ranked **`no-contact|null` FIRST**, i.e. a model
+                               with a constant C* and no contact data at all won; on the `-eng` grid (2026-10-27) the
+                               proper rules' mean ordering is unchanged and VS departs more mildly (swaps the two NegBin
+                               models from h=2, lifts the null to SECOND at h=3–4 under `vs_p1`). Report VS as a dependence diagnostic beside ES,
                                never instead of it. `plot_score_rank_bump_by_horizon` draws median and mean as two
                                rows of ONE chart for exactly these two reasons.
                                ⚠ `decouple_check` permutes each coordinate's draws independently; `margins` now
@@ -404,7 +414,9 @@ src/
                                  `res/1j_outcome_*`, `res/1j_infections_ab_vs_noab_*`) · 2j duration · 3j effective degree · 4j Danon [legacy] ·
                                5j group contacts · 6j fitting dist · 7j weekly age-pair · 8j forecast fitting ·
                                9j forecast diagnostics/scoring (+ §V, 2026-10-21: the ONE fitting section — Stage-2 of
-                                 the variant-specific renewal for all six models, h1–4 and h0; `FIT_VARIANT=false` skips;
+                                 the variant-specific renewal for all six models, h1–4 and h0; fits ONLY with `FIT_VARIANT=true` —
+                                 default `false` since 2026-10-27, when its h0 guard also became fit-only and the
+                                 γ_v diagnostic runs only if `HAS_VARIANT` (every variant file on disk);
                                  asserts a V=1 log-joint/forecast identity first; `res/9j_variant_{sets,gamma}.*`) · 10j model diagnostics (§1–§6 + §7 Stage-1 GP
                                  hyperparameters vs prior) · 11j weekly identifiability + shrinkage ·
                                12j Stage-1 NUTS chain convergence (one origin × both degree models) ·
@@ -560,8 +572,8 @@ src/
                                  Table 2 phase bands `plot_wis_diff_over_time` draws. Reused, NOT restated: two
                                  copies of the phase boundaries is exactly the duplication this file keeps warning
                                  about. `shade_periods!` must be called AFTER the series (its docstring: a leading
-                                 numeric overlay collapses the Date axis). `PERIODS` spans 2020-11-05…2021-11-24, so
-                                 the grid's first ~3 and last ~5 origins are legitimately unshaded, as in 9j.
+                                 numeric overlay collapses the Date axis). `PERIODS` spans 2020-10-14…2022-01-26 since
+                                 2026-10-27 (Table 2 + "Tiers" + "Plan B / Omicron"), so every origin is shaded.
                                  ⚠ The observed WEIGHTED comparator is `Σ_j (1−p⁰)·mean(positive weights)`, NOT
                                  10j's `_observed_cell_mean(…; weighted=true)`, which returns the positive-part mean
                                  alone — the right comparator for μ but not for the `K1 = (1−p⁰)·μ` §4 plots. Omit
@@ -606,6 +618,20 @@ src/
                                  variant ones from 9j §V's `-variant` artefacts, assembled into their OWN caches behind an
                                  artefact-exists guard. Outputs `res/17j_scenarios_*`. Check (8) asserts the existing
                                  series re-score to §2's frames exactly.
+                                 ⚠ **CONDITIONAL-ONLY ON THE `-eng` GRID (2026-10-27).** The prepared grid has no `_h0`
+                                 / `-variant` files, so 17j no longer ASSERTS them: `HAS_FROZEN` (cell 3) and
+                                 `HAS_VARIANT` (§6 guard) say what exists, §1–§5's frozen parts print "skipped", and §6
+                                 runs the scenarios present ("no contact" + "contact") over all 67 origins and the
+                                 pre-Omicron views (origins ≤ 2021-11-01, n = 55). Both flags switch on by themselves
+                                 when the HPC frozen/variant files are copied in — nothing needs editing.
+                               18j scenario bars (2026-11-02) — 17j's pre-Omicron ranking redrawn with fixed rows: horizons 1–4
+                                 as columns sharing y ticks. Reads `res/17j_scenarios_{rank_pre_omicron,scores_by_model_date_horizon}.csv`
+                                 only (run 17j first; cannot refit). Contact models are sorted by factor, each level ranked by its
+                                 best `variant + contact` mean WIS over h1–4, so a row can sit above a better-scoring one. Also a Cleveland dot plot of all 22 series at h1 and h4 (and a second version at h1–4),
+                                 as WIS relative to no contact – no variant: one row per contact model plus a no-contact row. Also relative WIS by age and
+                                 WIS + 95% coverage over time (h1, h4, pre-Omicron), which read the four assembly caches via `load_9j_assembly`, so 18j still
+                                 cannot refit, and cache the result in `dt_intermediate/18j_age_coverage_*` (`scenario_age_coverage_or_load`; rebuilt if a source is newer or `REBUILD_18J = true`). PNGs default to 600 dpi. ⚠ That reader's stale warning fires on the 9j cache because the variant/h0 `8j_s2_*` are newer: measured
+                                 2026-11-02, 0 of the 1608 conditional ones are. ⚠ The frozen cache holds a 23rd series, `no-contact|null@frozen`; filter to the 22. Outputs `res/18j_*`.
                              NOTE notebooks are stored PLAIN (no outputs, `execution_count = null`) — verify with
                              `jupyter nbconvert --execute --output-dir <scratch>`, never `--inplace`.
 
@@ -836,7 +862,8 @@ Why iid (`-lc0`, user request): the level was whitened through `Lc = chol(Qtᵀ�
   current code and so carry `phi_pf_max`, which the 504 conditional chains lack. The default
   `prefit_stage1!` fan-out is per origin, so at h0 it is only 2 wide; pass `queue = true` (`_prefit_stage1_queue!`)
   for ONE work queue over all origins.
-  ⚠ **THE h0 GRID IS COMPLETE (126 s1 + 378 s2, 2026-10-21) BUT NOT ONE-PASS.** 11 of 63 weighted-hurdle-Weibull
+  ⚠ **THE `-eng` GRID HAS NO h0 ARTEFACTS (2026-10-27)** — everything below describes the Sunday grid.
+  ⚠ **THE (Sunday) h0 GRID WAS COMPLETE (126 s1 + 378 s2, 2026-10-21) BUT NOT ONE-PASS.** 11 of 63 weighted-hurdle-Weibull
   h0 chains first came out STUCK in a collapsed Pathfinder mode (`c` 120–332 vs ≤ 1.31 healthy, min ESS ≈ 4.5,
   R̂ ≈ 2.1, depth at cap — and the audit's only divergences). That made 17j's hurdle-Weibull frozen penalty look
   like 1.1–1.7× when the 52 healthy origins gave 0.99–1.06. Those 11 were REFITTED under the new

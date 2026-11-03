@@ -48,9 +48,10 @@
 # ⚠ THE SCORES ARE ON THE LOG SCALE, AND FOR THESE TWO RULES THAT IS NOT A PREFERENCE.
 # `score_wis` only ever drops NON-FINITE predictions, and WIS is structurally immune to the tail
 # anyway because `to_quantile_long` keeps just the 5–95% quantiles. ES and VS use EVERY draw, and
-# the 2026-09-16 grid contains extreme but perfectly FINITE draws — up to 3.80e109 — that every
-# existing guard passes. Measured at the worst cell (2021-08-29, weighted-hweibull|neighbourhood,
-# h=3): natural-scale ES 6.1e101 and VS(p=0.5) 1.2e103, against 1.30 and 7.86 under `log(x+1)`.
+# the 2026-09-16 (Sunday) grid contains extreme but perfectly FINITE draws — up to 3.80e109 — that
+# every existing guard passes. Measured at the worst cell (2021-08-29, weighted-hweibull|neighbourhood,
+# h=3): natural-scale ES 6.1e101 and VS(p=0.5) 1.2e103, against 1.30 and 7.86 under `log(x+1)`. The
+# `-eng` grid (2026-10-27) is milder but the same in kind: max 5.63e50, 890 draws above 1e8.
 # So a natural-scale panel is not a worse view of the same thing, it is a view of one draw.
 
 using Glob, Random, Statistics, StatsBase
@@ -83,7 +84,7 @@ so passing `margins = ("time", "age-time")` explicitly still works; they are sim
 
 ⚠ **`"none"` is NOT a reported view and must not be "tidied" away either.** It is the univariate
 baseline that carries this notebook's sharpest verification (ES ≡ `crps_sample` at `d == 1`,
-asserted over 10 584 rows) and the only place WIS and CRPS are compared on an identical cell.
+asserted over every row — 11 256 on the 67-origin `-eng` grid) and the only place WIS and CRPS are compared on an identical cell.
 """
 const MARGIN_ORDER = ("none", "age")
 
@@ -100,7 +101,7 @@ keeps the tie checked rather than merely intended."
 const MV_SCALE = "log"
 
 "`|draw|` above this is flagged as pathological. 1e8 is ~130× the largest observed weekly infection
-count in the grid (7.6e5), so nothing legitimate reaches it. Reported, NEVER filtered — see the
+count in the grid (7.6e5 Sunday grid, 7.8e5 `-eng`), so nothing legitimate reaches it. Reported, NEVER filtered — see the
 header note; this is the guard class `score_wis` cannot see."
 const EXTREME_DRAW = 1e8
 
@@ -637,7 +638,7 @@ Per (margin, metric, model): `n_groups`, `score_mean`, `score_median`, `rel_mean
 
 ⚠ **Relative skill is the MEDIAN of per-group ratios, not the ratio of means**, and both are
 returned. Even on the log scale a mean is outlier-sensitive — the cache's own `crps` frame has one
-cell at 5.14e7 against ~5.5e4 for its peers — so when `rel_mean` and `rel_median` disagree about a
+cell at 5.14e7 against ~5.5e4 for its peers (Sunday grid) — so when `rel_mean` and `rel_median` disagree about a
 winner, **that disagreement is the result**: it says one origin carries the mean. Print both.
 """
 function summarise_mvscores(joined::DataFrame; ref::AbstractString = REF_MODEL,
@@ -739,7 +740,7 @@ does?
 - `model_level`: Spearman/Kendall between each metric pair over the **6 model medians**, with
   `n_discordant` out of the 15 model pairs. ⚠ A rank correlation on n = 6 is coarse — the
   discordant-pair count is the more readable number and is why it is reported alongside.
-- `group_level`: the same correlations computed **per model over its 63–1764 groups**, which
+- `group_level`: the same correlations computed **per model over its groups** (one per origin up to origin × horizon × age: 67–1876 on the `-eng` grid), which
   answers the better-powered question: given a model, do the two rules agree about which origins
   it forecast badly?
 """
@@ -1074,7 +1075,7 @@ about the data rather than about the code:
 
 - **log scale: ≤3.3e-13** over 400 real cells (`rtol = 1e-10` passes comfortably).
 - **natural scale: ~2.3e-9** — and it CANNOT be made better. The pair term sums 5e7 square roots;
-  where a cell contains a 3.8e109 draw beside ~1e5 ones, Float64 cannot represent the small
+  where a cell contains a 3.8e109 draw (Sunday grid) beside ~1e5 ones, Float64 cannot represent the small
   contributions at all, so two algebraically identical algorithms (this O(M²) kernel and
   `crps_sample`'s sorted O(M log M) rearrangement) necessarily lose different amounts. That is one
   more consequence of the extreme finite draws, not a defect — call this on the log scale, which is
@@ -1341,9 +1342,12 @@ Two things to read off it, both of which belong in any caption:
 1. **The three proper, marginal-sensitive rules agree perfectly across lead time on the mean** —
    `weighted-hweibull|neighbourhood < weighted-hweibull|mean < no-contact|null <
    unweighted-negbin|mean < unweighted-negbin|neighbourhood < unweighted-negbin|mean-diagonal` at
-   every horizon. The variogram score does not. ⚠ At h=4 by mean, `vs_p1` ranks **`no-contact|null`
-   FIRST** — a model with a constant `C*` and no contact data at all wins. That is not a finding
-   about the null model, it is **VS's impropriety for the marginals demonstrated**: VS is
+   every horizon. The variogram score does not. ⚠ At h=4 by mean, `vs_p1` ranked **`no-contact|null`
+   FIRST** on that grid — a model with a constant `C*` and no contact data at all won. On the `-eng`
+   grid (2026-10-27, 67 origins) the same table holds, and the mean ordering of the three proper rules is
+   unchanged, but VS's departure is milder: it swaps the two NegBin models from h=2 on and lifts
+   `no-contact|null` to SECOND at h=3–4 under `vs_p1`. Neither is a finding about the null model; it is
+   **VS's impropriety for the marginals demonstrated**: VS is
    shift-invariant and sees only pairwise differences, so a uniformly biased forecast is not
    penalised. Read VS as a dependence diagnostic, never as a skill ranking.
 2. **The mean ranking cannot move with the aggregation and the median ranking can.** The mean over

@@ -27,10 +27,16 @@ const WIS_SCALE = "log"                       # headline scale for WIS / coverag
 
 # ── Pandemic periods (Munday 2023, Table 2 / Gimma et al.) ────────────────────────────
 # Named UK COVID phases used to aggregate forecast skill over the epidemic timeline.
-# Boundaries verbatim from Table 2, correcting the OCR typo in the Lockdown-3 start
-# (printed "2021-05-01" → 2021-01-05). Origins before Lockdown 2 (the autumn-2020 tier
-# system) fall outside Gimma's periods → `missing`.
+# The seven Table-2 boundaries are verbatim, correcting the OCR typo in the Lockdown-3 start
+# (printed "2021-05-01" → 2021-01-05). Table 2 stops at "Opening up" (2021-11-24), which left
+# the `-eng` grid's first 3 and last 9 of 67 origins outside every phase, so two phases were
+# ADDED here (2026-10-27, user request) — they are OURS, not Table 2's:
+#   "Tiers"            2020-10-14 … 2020-11-04  England's three-tier system, up to Lockdown 2;
+#   "Plan B / Omicron" 2021-11-25 … 2022-01-26  the Omicron BA.1 wave and Plan B (announced
+#                                               2021-12-08, lifted 2022-01-27).
+# With them every origin 2020-10-19 … 2022-01-24 has a phase; anything outside → `missing`.
 const PERIODS = [
+    ("Tiers",                   Date(2020, 10, 14), Date(2020, 11, 4)),    # added, not Table 2
     ("Lockdown 2",              Date(2020, 11, 5),  Date(2020, 12, 2)),
     ("Lockdown 2 Easing",       Date(2020, 12, 3),  Date(2020, 12, 19)),
     ("Christmas",               Date(2020, 12, 20), Date(2021, 1, 4)),
@@ -38,10 +44,11 @@ const PERIODS = [
     ("Lockdown 3 Schools open", Date(2021, 3, 9),   Date(2021, 3, 28)),
     ("Lockdown 3 Easing",       Date(2021, 3, 29),  Date(2021, 9, 30)),
     ("Opening up",              Date(2021, 10, 1),  Date(2021, 11, 24)),
+    ("Plan B / Omicron",        Date(2021, 11, 25), Date(2022, 1, 26)),    # added, not Table 2
 ]
 const PERIOD_ORDER = first.(PERIODS)
 
-"Named pandemic period (Table 2) containing `d`, or `missing` if outside all periods."
+"Named pandemic period containing `d`, or `missing` if outside all periods."
 function period_of(d::Date)
     for (nm, lo, hi) in PERIODS
         lo <= d <= hi && return nm
@@ -49,7 +56,10 @@ function period_of(d::Date)
     return missing
 end
 
-"Print a tally of forecast `origins` per named period (origins before Lockdown 2 → pre-L2)."
+"""
+Print a tally of forecast `origins` per named period. Origins outside `PERIODS` are counted as
+`before <first>` / `after <last>` separately — a single "pre-" bucket mislabelled late origins.
+"""
 function period_summary(origins)
     tally = Dict{Union{String,Missing},Int}()
     for o in origins
@@ -59,12 +69,16 @@ function period_summary(origins)
     for p in PERIOD_ORDER
         haskey(tally, p) && println("  ", rpad(p, 26), tally[p])
     end
-    haskey(tally, missing) && println("  ", rpad("(pre-Lockdown 2)", 26), tally[missing])
+    n_pre  = count(o -> ismissing(period_of(o)) && o < PERIODS[1][2], origins)
+    n_post = count(o -> ismissing(period_of(o)) && o > PERIODS[end][3], origins)
+    n_pre  > 0 && println("  ", rpad("(before $(PERIOD_ORDER[1]))", 26), n_pre)
+    n_post > 0 && println("  ", rpad("(after $(PERIOD_ORDER[end]))", 26), n_post)
     return tally
 end
 
 # Compact labels for the named periods, used when shading them onto a narrow date-axis panel.
 const PERIOD_ABBR = Dict(
+    "Tiers"                   => "Tiers",
     "Lockdown 2"              => "L2",
     "Lockdown 2 Easing"       => "L2 easing",
     "Christmas"               => "Xmas",
@@ -72,6 +86,7 @@ const PERIOD_ABBR = Dict(
     "Lockdown 3 Schools open" => "L3 schools",
     "Lockdown 3 Easing"       => "L3 easing",
     "Opening up"              => "Opening up",
+    "Plan B / Omicron"        => "Plan B",
 )
 
 """

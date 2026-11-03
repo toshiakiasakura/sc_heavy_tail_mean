@@ -72,6 +72,7 @@ GLYPHS = {
     "┌": "+", "│": "|", "└": "+",          # the frame Julia's logging draws around @warn/@info
     "┼": "+", "⋯": "~",                    # DataFrames' header junction and column-truncation mark (17j)
     "⋮": ":", "⋱": "\\",                   # DataFrames' row-elision marks
+    "●": "o", "∝": " prop. to ", "ℓ": "l", "⟺": "<=>", "∉": " not in ",   # 10j/11j/14j/15j prose (2026-10-27)
     # Lowercase Greek and the sub/superscript letters and digits: NONE of them has a glyph (measured
     # 2026-10-21 by exporting a test notebook, both in prose and in code). 9j's code comments are full
     # of them (ρ_diag, φ_time, cₜ, Kᵀ), and 66 rendered as empty boxes. Σ ² ¹ · × — → • … − – é § are fine.

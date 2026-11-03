@@ -41,7 +41,7 @@ headline metric is the log-scale, by-horizon WIS (`scale=="log"`). Returns
 `(; by_model, by_model_h, by_model_dt, by_model_dt_h, by_model_h_age, by_model_dt_h_age)`
 with WIS + components, bias, and interval coverage; `by_model_h_age` adds the age-stratified
 (model × horizon × age_group) WIS used by the 9j Fig-3-style diagnostics, `by_model_dt_h_age`
-is the same at the FULL forecast unit (+ `forecast_date`, 21 168 rows — added for 15j, which must
+is the same at the FULL forecast unit (+ `forecast_date`, 6 models × origins × 4 h × 7 ages: 22 512 rows on the 67-origin `-eng` grid — added for 15j, which must
 sum WIS over exactly the margins an energy score collapses), and
 `n_negative`/`negative_by_model` report predicted quantiles that fell below zero.
 

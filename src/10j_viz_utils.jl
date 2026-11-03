@@ -1423,7 +1423,7 @@ correction.) `constant_contacts = false` is what makes μ per-week at all. It is
 
 `reconstruct_mu_draws(lbl, origin, h_chain; week_index = t)` reads μ at each window week `t`;
 observed comes from that same window `apd_h` (= `apd_o[h_chain]`) per week (`_observed_cell_mean`).
-x-axis = week (Wed mid-date); the origin t₀ is marked with a rule (fit weeks left, horizons h1..h4
+x-axis = week (Thu mid-date); the origin t₀ is marked with a rule (fit weeks left, horizons h1..h4
 right). Two lines per panel = mean- vs neighbourhood-NGM (median + 90% ribbon); × = observed. Saves
 to `res_dir/10j_agepair_mu_<tag>_<degree>_<origin>.png`.
 """
@@ -1465,7 +1465,7 @@ function make_mu_timeline_fig(dm::ContactDegreeModel, cells, tag::AbstractString
     panels = Any[]
     for (p, (_, _, ptitle)) in enumerate(cells)
         pnl = plot(; title = ptitle, titlefontsize = 8, xrotation = 45,
-                   xlabel = "week (Wed mid-date)", ylabel = "contact mean μ",
+                   xlabel = "week (Thu mid-date)", ylabel = "contact mean μ",
                    legend = (p == 1 ? :best : false), legendfontsize = 5)
         vline!(pnl, [week_mid(origin)]; color = :gray, ls = :dash, lw = 1, label = "")   # origin t₀
         for nb in (MeanNGM(), NeighbourhoodDegreeNGM())
@@ -1691,7 +1691,7 @@ function make_forecast_ci_fig(fc_store, fit_store, win, wd, truth, cfg, labels4,
                          "(h$(fit_h), dashed) + forecast (solid), origin $(origin) (90%)",
                titlefontsize = 8, xrotation = 45, legend = :topleft, size = (950, 540),
                left_margin = 8Plots.mm, bottom_margin = 14Plots.mm,   # room for y-label & rotated dates
-               xlabel = "week (Wed mid-date)", ylabel = "weekly infections ($(age_desc))")
+               xlabel = "week (Thu mid-date)", ylabel = "weekly infections ($(age_desc))")
     plot!(fig, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
           color = :black, lw = 2, marker = :circle, ms = 3, label = "observed")
     vline!(fig, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")
@@ -1744,7 +1744,7 @@ function forecast_ci_age_panel(a::Integer, fc_store, fit_store, win, wd, truth, 
 
     pnl = plot(; title = ttl, titlefontsize = 8, xrotation = 45,
                legend = (showleg ? :topleft : false), legendfontsize = 5,
-               xlabel = "week (Wed mid-date)", ylabel = "weekly infections")
+               xlabel = "week (Thu mid-date)", ylabel = "weekly infections")
     plot!(pnl, vcat(x_hist, x_fore), vcat(y_hist, y_fore);
           color = :black, lw = 2, marker = :circle, ms = 2, label = "observed")
     vline!(pnl, [week_mid(win.origin)]; color = :gray, ls = :dash, lw = 1, label = "")

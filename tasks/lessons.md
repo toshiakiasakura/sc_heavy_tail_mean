@@ -2859,3 +2859,21 @@ Stage-2 files in one grid, and verify such a change on the log-density (exact) a
 statistics (MC-level), not on the draws. A second point surfaced on the way: one Pathfinder fit
 (the null model pools just one) can halve or double its spread on a last-bit perturbation —
 the 100-fit pooling of the contact models is what averages that out.
+
+## 2026-10-27 — a week index that outlived its window (11j §2(2))
+
+11j cell 9 read the per-cell dispersion at `WK = cfg.smax + cfg.n_fit` (= 12, "the last window
+week"), which was the origin week only while every contact window was the full 12-week `all_weeks`.
+Since `-w8h` the h=1 chain has `Tn = n_fit + 1` = 9 weeks and t₀ is column `cfg.n_fit` in EVERY
+chain (10j asserts `t_o_est == cfg.n_fit`). `_read_disp_chain` correctly refused the out-of-range
+column, warned, and returned `nothing` — and the notebook `display`ed `nothing`, so §2(2) rendered
+blank with exit 0 on two grids in a row. Fixed to `WK = cfg.n_fit`.
+**Lesson:** when a window's length changes, grep every hand-built week index (`smax + n_fit`,
+`length(all_weeks)`, literal 12), not just the window constructors — and a figure cell that can
+`display(nothing)` should assert the plot exists.
+
+## 2026-10-27 — a parallel nbconvert run trips another notebook's namespace check
+
+17j's checks (5)/(9) assert that nothing outside `res/17j_*` changed after `T_START`. Running 14j
+in parallel made 17j fail on `14j_grid_audit.csv`. Not a bug in either — run 17j (and any notebook
+with that check) on its own, after the others.

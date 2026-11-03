@@ -835,7 +835,7 @@ function make_degree_fig(md::NamedTuple, fit::NamedTuple; res_dir::AbstractStrin
     d0, d1 = md.window
     fig = plot(p1, p2; layout = (1, 2), size = (1050, 430),
                left_margin = 5Plots.mm, bottom_margin = 5Plots.mm,
-               plot_title = "CoMix UK $(md.caption), $(d0) – $(d1); " *
+               plot_title = "CoMix England $(md.caption), $(d0) – $(d1); " *
                             "n = $(md.n) participant-days",
                plot_titlefontsize = 9)
     mkpath(res_dir)
@@ -861,7 +861,7 @@ function make_degree_combined_fig(mds::Dict{Symbol,<:NamedTuple}, fits::Dict{Sym
     d0, d1 = mds[:adult].window
     fig = plot(panels...; layout = (2, 2), size = (1150, 830),
                left_margin = 5Plots.mm, bottom_margin = 5Plots.mm,
-               plot_title = "CoMix UK contact degree, $(d0) – $(d1) — observed vs duration-weighted " *
+               plot_title = "CoMix England contact degree, $(d0) – $(d1) — observed vs duration-weighted " *
                             "(group contacts included / zeroed), with NegBin and hurdle-Weibull fits",
                plot_titlefontsize = 9)
     mkpath(res_dir)
@@ -903,7 +903,7 @@ function make_degree_pairs_fig(mds::Dict{Symbol,<:NamedTuple}, fits::Dict{Symbol
     # both ends. Neither failure raises; both are only visible in the rendered PNG.
     fig = plot(panels...; layout = (length(_MD_PAIR_KEYS), 2), size = (1250, 1650),
                left_margin = 12Plots.mm, right_margin = 4Plots.mm, bottom_margin = 5Plots.mm,
-               plot_title = "CoMix UK contact degree by contactor → contactee block, $(d0) – $(d1) " *
+               plot_title = "CoMix England contact degree by contactor → contactee block, $(d0) – $(d1) " *
                             "— observed vs duration-weighted, NegBin and hurdle-Weibull fits",
                plot_titlefontsize = 9)
     mkpath(res_dir)
@@ -1500,7 +1500,7 @@ function _make_timeline_fig(tl::DataFrame, obs, keycol::Symbol, keys, labels, co
         if nrow(sub) == 0
             push!(panels, _timeline_empty_panel(deg, ttl)); continue
         end
-        pnl = plot(; xlabel = "forecast origin (Wed mid-date)", ylabel = ylab,
+        pnl = plot(; xlabel = "forecast origin (Thu mid-date)", ylabel = ylab,
                      title = ttl, titlefontsize = 8, xrotation = 45,
                      legend = pi == 1 ? :topleft : false, legendfontsize = legendfontsize)
         ob = obs === nothing || nrow(obs) == 0 ? nothing :
@@ -1599,7 +1599,7 @@ end
 # §F — pandemic-phase colouring, and §5's raw home/non-home duration share
 ##########################################################################
 
-"Bucket for weeks `PERIODS` does not cover (3 origins before it, 5 after, on the current grid)."
+"Bucket for weeks `PERIODS` does not cover — EMPTY on the `-eng` grid since \"Tiers\" / \"Plan B / Omicron\" were added (2026-10-27); kept as a guard."
 const _OUTSIDE_PHASES = "outside phases"
 
 """
@@ -1629,11 +1629,14 @@ end
 
 `period_of(d)`, or the single bucket `"outside phases"`.
 
-⚠ Do NOT reuse 9j's `period_summary` bucket `"(pre-Lockdown 2)"`: `PERIODS` spans
-2020-11-05 … 2021-11-24 while the origin grid runs 2020-10-18 … 2021-12-26, so **3 origins fall
-before and 5 fall after**, and that label mislabels five of the eight. Classify the ORIGIN (Monday),
-matching `period_summary(origins)`, not the Thursday `week_mid` label — the two agree on this grid
-but need not in general.
+Since 2026-10-27 `PERIODS` runs 2020-10-14 … 2022-01-26 ("Tiers" and "Plan B / Omicron" were added
+around Table 2), so every `-eng` origin 2020-10-19 … 2022-01-24 has a phase and the bucket is empty;
+it stays as a guard for a longer grid. (On the Table-2-only bands, 3 origins fell before and 9 after.)
+Classify the ORIGIN (Monday), matching `period_summary(origins)`, not the Thursday `week_mid` label.
+⚠ The two DISAGREE at a phase boundary: on the Monday grid 6 origins (2020-11-02, 2020-11-30,
+2021-01-04, 2021-03-08, 2021-11-22, and 2022-01-24 whose Thursday is past the last band) sit in a
+different phase from their own Thursday, so a line's colour can differ
+from the `shade_periods!` band its point is drawn in. Colour keys on the origin, deliberately.
 """
 _period_group(d::Date) = (p = period_of(d); p === missing ? _OUTSIDE_PHASES : p)
 
@@ -1810,8 +1813,9 @@ the week; the CSV's `q5`/`q95` are *daily per-capita* quantiles, and summing qua
 quantile of a sum — nor does a ratio-of-sums have a closed form from marginal SDs. No consumer in
 this repo has ever put a band on observed infections.
 
-⚠ **ENGLAND vs UK.** inc2prev infections are **England**; the CoMix contact side is **UK**. Nothing
-to fix in code, but any figure putting the two on one axis must say so.
+Both sides are **England** since the `-eng` generation (2026-10-22): inc2prev infections are
+England, and the framework's CoMix roster is England-only (`england_only` in
+`load_raw_contact_inputs`). Until then the contact side was UK-wide.
 """
 function incidence_age_shares(cfg::FrameworkConfig; grid = cis_age_grid(),
                               origins::AbstractVector{Date}, inf = nothing)
@@ -2282,13 +2286,13 @@ function _i2p_title(kind::Symbol)
                "⚠ MIXED QUANTITIES: the model lines are a weekly SUM of new infections (a FLOW), the " *
                "observed a weekly MEAN of detectable prevalence (a STOCK)\n" *
                "the prevalence figure is the like-for-like check   ·   framework source: " *
-               "$(i2p_framework_source()).csv   ·   ⚠ England here, §4–§7's contacts are UK"
+               "$(i2p_framework_source()).csv   ·   England (as are §4–§7's contacts)"
     elseif kind === :prevalence
         return "Weekly PCR-detectable prevalence by age, ENGLAND — dcases from both inc2prev fits " *
                "against the ONS CIS positivity they were FITTED TO   (log₁₀ counts)\n" *
                "LIKE-FOR-LIKE: all three lines are a weekly MEAN of the same STOCK\n" *
                "framework source: $(i2p_framework_source()).csv   ·   " *
-               "⚠ England here, §4–§7's contacts are UK"
+               "England (as are §4–§7's contacts)"
     end
     return "inc2prev age-stratified $kind (log₁₀ counts)"
 end
@@ -2387,7 +2391,7 @@ function make_inc2prev_timeline_fig(ts::DataFrame; kind::Symbol = :incidence,
         ttl = b == 0 ? "$lab — own y-scale (a SUM over the others)" : lab
         # Axis labels on the OUTER edges only: eight copies of each is noise, and the repeated
         # x-label is what pushed the rotated date ticks into the row below.
-        pnl = plot(; xlabel = (pi > np - nc) ? "week (Wed mid-date)" : "",
+        pnl = plot(; xlabel = (pi > np - nc) ? "week (Thu mid-date)" : "",
                      ylabel = (mod1(pi, nc) == 1) ? "people / week" : "",
                      title = ttl, titlefontsize = 8, xrotation = 45,
                      legend = pi == 1 ? :topleft : false, legendfontsize = 6)
@@ -2508,7 +2512,7 @@ function make_contact_quantities_fig(tl::DataFrame, cfg::FrameworkConfig; grid =
         if nrow(sub) == 0
             push!(panels, _timeline_empty_panel(String(sym), lab)); continue
         end
-        pnl = plot(; xlabel = "forecast origin (Wed mid-date)",
+        pnl = plot(; xlabel = "forecast origin (Thu mid-date)",
                      ylabel = "per participant-day", title = lab, titlefontsize = 9,
                      xrotation = 45, legend = pi == 1 ? :topleft : false, legendfontsize = 7)
         # `obs = nothing` is handled by `_timeline_panel!` (its `obs === nothing && continue` and the
@@ -2548,7 +2552,7 @@ function make_duration_share_fig(ds::DataFrame, cfg::FrameworkConfig; grid = cis
     npanel = length(blocks)
     for (pi, (b, sym, lab)) in enumerate(blocks)
         sub = @subset(ds, :block .== b)
-        pnl = plot(; xlabel = "week (Wed mid-date)", ylabel = "share of contact duration",
+        pnl = plot(; xlabel = "week (Thu mid-date)", ylabel = "share of contact duration",
                      title = lab, titlefontsize = 9, xrotation = 45,
                      legend = pi == 1 ? :topleft : false, legendfontsize = 7)
         dmin, dmax = extrema(sub.week)
@@ -2565,7 +2569,7 @@ function make_duration_share_fig(ds::DataFrame, cfg::FrameworkConfig; grid = cis
     fig = plot(panels...; layout = (npanel, 1), size = (1100, 400 * npanel),
                left_margin = 10Plots.mm, bottom_margin = 10Plots.mm, top_margin = 5Plots.mm,
                plot_title = "Share of reported contact DURATION at home vs away, by age block — " *
-                            "raw CoMix UK, population-weighted within block; bands = UK COVID phases",
+                            "raw CoMix England, population-weighted within block; bands = UK COVID phases",
                plot_titlefontsize = 9)
     mkpath(res_dir)
     savefig(fig, joinpath(res_dir, "14j_duration_share.png"))
@@ -2606,7 +2610,8 @@ same way, so the observed distribution and the three contact-implied ones are re
 susceptibility and infectivity, both of which are age-varying. It is the
 contact-only analogue of `contact_reproduction_draws`' `ρ(C*)`. See `_perron_share`.
 
-⚠ **The incidence panel is ENGLAND (inc2prev); the contact panels are UK (CoMix).**
+Both the incidence panel (inc2prev) and the contact panels (CoMix, England-only roster since the
+`-eng` generation) are **England**.
 
 ⚠ **No `shade_periods!` here** — the x-axis is a numeric age bin, not a Date. `shade_periods!`
 `vspan!`s with Dates and reads `Plots.ylims`; on this axis it would throw or corrupt the panel.

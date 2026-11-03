@@ -6,7 +6,7 @@
 # WHY THIS EXISTS. Stage 1 became a NUTS fit on 2026-08-05 (`cfg.stage1_use_nuts`), and the whole
 # point of paying for NUTS over Pathfinder is that its draws are asymptotically exact — which is
 # only worth anything if the chain actually converged. `_nuts_diagnostics` (joint_model.jl) gives
-# the three numbers cheap enough to compute inside a 504-fit prefit (divergences,
+# the three numbers cheap enough to compute inside a grid prefit (504 fits on the Sunday grid, 536 on `-eng`; divergences,
 # `frac_at_max_depth`, `min_ess`); this file is the expensive, per-origin follow-up.
 #
 # ⚠ ONE CHAIN PER FIT — so there is NO between-chain R̂, exactly as `_nuts_diagnostics` documents.
