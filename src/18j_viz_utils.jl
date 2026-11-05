@@ -363,3 +363,152 @@ function scenario_age_coverage_or_load(cfg::FrameworkConfig, sources, series, gr
     println("age scores and coverage: wrote cache ", cache_path)
     return res
 end
+
+# ══════════════════════════════════════════════════════════════════════════════════════
+# Infections over time with the h1–H forecast fans (2026-11-05, user request), in the form of the
+# COVIDhub ensemble figure: the observed series, and from every `every`-th origin a short median
+# trajectory with its 50% and 95% bands. Two series, hweibull|nbhd with contact only and with contact +
+# variant, labelled as in `OVER_TIME_HIGHLIGHT`. The fans overlap, so every pair of colours has to separate, not just
+# neighbours: the colours are the first three slots of the dataviz reference palette (blue, orange, aqua), which pass
+# its validator on ALL pairs (worst CVD ΔE 9.2, normal-vision 24.0). The X11 steelblue / darkorange / purple they
+# replaced failed it (steelblue reads grey, purple is too dark). Aqua is below 3:1 against white, so it relies on its legend label.
+# ══════════════════════════════════════════════════════════════════════════════════════
+
+const FAN_SERIES = (("weighted-hweibull|neighbourhood",         "hweibull|nbhd: contact only",      "#2a78d6"),
+                    ("weighted-hweibull|neighbourhood-variant", "hweibull|nbhd: contact – variant", "#eb6834"))
+# The second figure adds negbin|mean with contact – variant, in the palette's third slot. Its series list
+# contains FAN_SERIES, so the notebook caches this one list and draws both figures from it.
+const FAN_SERIES_NEGBIN = (FAN_SERIES..., ("unweighted-negbin|mean-variant", "negbin|mean: contact – variant", "#1baf7a"))
+const FAN_LEVELS = (0.025, 0.25, 0.5, 0.75, 0.975)
+
+_qcol(l) = Symbol("q", l)
+
+"18j's own cache of the fan quantiles — per series × origin × horizon × age, no draws."
+fan_quantile_cache_path(cfg::FrameworkConfig; save_dir::AbstractString = "../dt_intermediate") =
+    joinpath(save_dir, "18j_fan_quantiles_$(contacts_label(cfg)).jld2")
+
+"""
+    scenario_fan_quantiles_or_load(cfg, sources, series, grid; origin_max, levels, cache_path, rebuild)
+        -> (; quant, observed)
+
+`quant`: the `levels` quantiles (columns `q0.025` …) of each `series`' forecast per origin ≤ `origin_max` ×
+horizon × age group, the 7 CIS bins plus `"all"` (the quantile of the per-draw SUM over ages, as in 17j's
+panels). `observed`: the truth 9j scored against (`assembly_truth`), one row per target week × age group, with
+`"all"` the sum over the bins. Only the `sources` holding a requested series are read, with `load_9j_assembly`,
+which cannot fit. Cached at `cache_path` and validated as `scenario_age_coverage_or_load` is.
+"""
+function scenario_fan_quantiles_or_load(cfg::FrameworkConfig, sources, series, grid; origin_max::Date,
+                                        levels = FAN_LEVELS, cache_path::AbstractString = fan_quantile_cache_path(cfg),
+                                        rebuild::Bool = false)
+    want_s, want_l = sort(collect(series)), collect(levels)
+    use = [(p, l, f) for (p, l, f) in sources if any(s -> s in Set(series_name.(l, f)), want_s)]
+    if !rebuild && isfile(cache_path)
+        c = load(cache_path)
+        newer = [p for (p, _, _) in use if isfile(p) && mtime(p) > mtime(cache_path)]
+        if c["series"] == want_s && c["origin_max"] == origin_max && c["levels"] == want_l && isempty(newer)
+            println("fan quantiles: loaded cache ", cache_path)
+            return (; quant = c["quant"], observed = c["observed"])
+        end
+        @warn "18j fan cache stale (series/origins/levels changed, or a source is newer) — rebuilding" cache_path newer
+    end
+    A, H = grid.N, length(cfg.horizons)
+    ages = vcat(grid.LAB, "all")
+    rows = NamedTuple[]; obs = nothing
+    for (path, labels, frozen) in use
+        a = load_9j_assembly(cfg; labels, cache_path = path, grid)
+        q, fc = rename_series(a.qall, a.fc_store, frozen)
+        for ((origin, s), f) in fc
+            (origin <= origin_max && s in want_s) || continue
+            for (k, lab) in enumerate(ages), h in 1:H
+                v = k <= A ? f[k, h, :] : vec(sum(f[:, h, :]; dims = 1))
+                push!(rows, merge((; series = s, forecast_date = origin, horizon = h, age_group = lab),
+                                  NamedTuple(_qcol(l) => _fq(v, l) for l in want_l)))
+            end
+        end
+        truth = assembly_truth(q, grid).truth
+        o = DataFrame([(; week = origin + Week(h), age_group = lab,
+                          observed = k <= A ? M[k, h] : sum(M[:, h]))
+                       for (origin, M) in truth, h in 1:H, (k, lab) in enumerate(ages) if origin <= origin_max])
+        u = unique(o)
+        @assert nrow(unique(u, [:week, :age_group])) == nrow(u) "scenario_fan_quantiles_or_load: two observations of one week in $(basename(path))"
+        obs === nothing ? (obs = u) :
+            @assert sort(obs, [:week, :age_group]) == sort(u, [:week, :age_group]) "scenario_fan_quantiles_or_load: truth differs between sources"
+        println(basename(path), ": read")
+    end
+    GC.gc()
+    quant = sort!(DataFrame(rows), [:series, :forecast_date, :horizon, :age_group])
+    @assert Set(quant.series) == Set(want_s) "scenario_fan_quantiles_or_load: series missing from the sources: $(setdiff(want_s, quant.series))"
+    observed = sort!(obs, [:age_group, :week])
+    _atomic_jldsave(cache_path; quant, observed, series = want_s, origin_max, levels = want_l)
+    println("fan quantiles: wrote cache ", cache_path)
+    return (; quant, observed)
+end
+
+"""
+    plot_scenario_fans_over_time(fq, grid; series = FAN_SERIES, every = 4, ncol = 2, yscale = :log10, ycap, title_suffix) -> Plot
+
+One panel per age group (all ages, then the CIS bins), filled row by row into `ncol` columns (8 panels ⇒ 4 × 2). Each panel shows the observed infections (black)
+and, from every `every`-th origin in `fq.quant`, each series' median at h = 1..H (dots) with its 50% (dark) and
+95% (light) bands. `fq` is `scenario_fan_quantiles_or_load`'s result. The y-axis is capped at `ycap ×` the panel's
+observed maximum (default 10 on the log scale, 3 on the linear one; `legend_pos` places the legend in the first panel) and, on the log scale, floored at its minimum ÷
+`ycap`; 95% bands crossing either limit are COUNTED in the title.
+"""
+function plot_scenario_fans_over_time(fq, grid; series = FAN_SERIES, every::Integer = 4, ncol::Integer = 2,
+                                      yscale::Symbol = :log10, legend_pos = :bottomright,
+                                      ycap::Real = (yscale == :identity ? 3.0 : 10.0),
+                                      title_suffix::AbstractString = "")
+    @assert yscale in (:log10, :identity) "plot_scenario_fans_over_time: yscale must be :log10 or :identity"
+    logy = yscale == :log10
+    fmt(y) = y >= 1e6 ? @sprintf("%gM", y / 1e6) : y >= 1e3 ? @sprintf("%gk", y / 1e3) : @sprintf("%g", y)
+    lo95, lo50, med, hi50, hi95 = _qcol.(FAN_LEVELS)
+    origins = sort(unique(fq.quant.forecast_date))[1:every:end]
+    H = maximum(fq.quant.horizon)
+    wmin, wmax = first(origins) + Week(1), last(origins) + Week(H)
+    ages = vcat("all", grid.LAB)
+    nrow_ = cld(length(ages), ncol)
+    panels = Plots.Plot[]
+    for (r, lab) in enumerate(ages)
+        o = sort(@subset(fq.observed, :age_group .== lab, :week .>= wmin, :week .<= wmax), :week)
+        @assert o.week == collect(wmin:Week(1):wmax) "plot_scenario_fans_over_time: observed weeks have gaps for $lab"
+        @assert !logy || all(>(0), o.observed) "plot_scenario_fans_over_time: a non-positive observation for $lab on a log axis"
+        qd = @subset(fq.quant, :age_group .== lab, in.(:forecast_date, Ref(origins)), in.(:series, Ref(first.(series))))
+        @assert nrow(qd) == length(series) * length(origins) * H "plot_scenario_fans_over_time: missing fans for $lab"
+        # the caps; the axis shrinks to the data inside them
+        ymax = ycap * maximum(o.observed)
+        ymin = logy ? minimum(o.observed) / ycap : 0.0
+        ytop = min(ymax, max(maximum(o.observed), maximum(filter(isfinite, qd[!, hi95]))))
+        ybot = logy ? max(ymin, min(minimum(o.observed), minimum(filter(isfinite, qd[!, lo95])))) : 0.0
+        ylim = logy ? (ybot / 1.15, 1.15 * ytop) : (0.0, 1.05 * ytop)
+        n_off = count(d -> any(>(ymax), d[!, hi95]) || (logy && any(<(ymin), d[!, lo95])),
+                      groupby(qd, [:series, :forecast_date]))
+        p = plot(; titlefontsize = 9, yscale, ylim, yformatter = fmt, minorgrid = logy,
+                 legend = (r == 1 ? legend_pos : false),   # default: empty on the log axis, autumn 2021 runs near the top
+                 legendfontsize = 7, xtickfontsize = 7, ytickfontsize = 7,
+                 xlabel = (r > (nrow_ - 1) * ncol ? "week" : ""),
+                 title = (lab == "all" ? "all ages" : "age $lab") *
+                         (n_off > 0 ? "  [$(n_off) 95% band(s) cut at the y-axis limits]" : ""))
+        plot!(p, week_mid.(o.week), o.observed; color = :black, lw = 1.4, marker = :circle, ms = 2.2,
+              msc = :black, label = "observed")
+        clip(v) = max.(v, ylim[1])   # a log axis cannot draw a band edge at or below 0
+        for (s, slab, colr) in series
+            for (j, origin) in enumerate(origins)
+                d = sort(@subset(qd, :series .== s, :forecast_date .== origin), :horizon)
+                @assert d.horizon == collect(1:H) "plot_scenario_fans_over_time: $s at $origin lacks a horizon"
+                x = week_mid.(origin .+ Week.(d.horizon))
+                m = d[!, med]
+                plot!(p, x, m; ribbon = (m .- clip(d[!, lo95]), d[!, hi95] .- m), color = colr,
+                      fillalpha = 0.15, lw = 0, label = "")
+                plot!(p, x, m; ribbon = (m .- clip(d[!, lo50]), d[!, hi50] .- m), color = colr,
+                      fillalpha = 0.35, lw = 1.0, marker = :circle, ms = 2.5, msc = colr,
+                      label = (j == 1 ? slab : ""))
+            end
+        end
+        plot!(p, week_mid.(o.week), o.observed; color = :black, lw = 1.4, label = "")   # again, on top of the fans
+        shade_periods!(p, wmin, wmax; labels = (r <= ncol), fontsize = 6)   # after the Date series; labels on the top row
+        push!(panels, p)
+    end
+    return plot(panels...; layout = (nrow_, ncol), size = (850 * ncol, 330 * nrow_),
+                plot_title = "18j — weekly infections ($(logy ? "log" : "linear") scale) and h1–$(H) forecasts from " *
+                             "every $(every)th origin (dots = median, bands = 50% / 95%)$(title_suffix)",
+                plot_titlefontsize = 10)
+end

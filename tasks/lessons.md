@@ -2894,3 +2894,10 @@ Running the compiled binary by hand is what exposed the exit code.
 **Lesson:** a likelihood with no closed form belongs in a tool that evaluates it in compiled code with analytic
 derivatives, not in a hand-written Stan function under NUTS. If one is ever needed in Stan, every series walk must
 bail out on a non-finite term.
+
+## 2026-11-05 — 18j fan figures: point-intervals were rejected, ribbons stay
+Tried ggdist-style point-intervals (median dot, thick 50% bar, thin 95% line, models dodged ±1–2 days) in place of
+the ribbons in `plot_scenario_fans_over_time`. User verdict: "terrible", reverted. With every 4th origin × 4 horizons
+the intervals tile EVERY week, so the panels become a continuous row of bars and each origin's trajectory disappears.
+**Lesson:** for consecutive multi-horizon forecasts keep the trajectory shape (ribbons); don't swap a figure's form
+without first showing it at full-figure size, not just a zoomed panel.
