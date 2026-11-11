@@ -1093,3 +1093,72 @@ function plot_scenario_bias(by_h::DataFrame, st::DataFrame, cfg; scale::Abstract
                 plot_title = "17j — bias by horizon, $(_nscen(st)) per contact model (> 0 over-, < 0 under-prediction)$(subtitle)",
                 plot_titlefontsize = 10)
 end
+
+# ── One figure: coverage and bias of the contact – variant models against no contact (2026-11-11) ─────────
+"The colours of `plot_variant_coverage_bias`'s contact models, in `models` order (grey and red are the no-contact pair)."
+const VARIANT_CB_COLS = (:steelblue, :darkorange, :seagreen, :purple, :goldenrod)
+
+"""
+    variant_coverage_bias_frame(by_h, models; scale = WIS_SCALE) -> DataFrame
+
+The series of `plot_variant_coverage_bias`, in drawing order: no contact (`NULL_LABEL`), no contact + variant
+(`NULL_VARIANT_LABEL`), then `"<m>-variant"` for each base label in `models` (contact conditional on the t₀+h
+contacts, with the variant renewal). One row per series × horizon with `interval_coverage_50/90`, `bias` and
+`n_origins` read from `by_h` (`by_model_h`-shaped, e.g. `scenario_wis_by_horizon_until`); asserts every series
+has the same horizons.
+"""
+function variant_coverage_bias_frame(by_h::DataFrame, models; scale::AbstractString = WIS_SCALE)
+    short(m) = replace(m, "unweighted-" => "", "weighted-" => "", "neighbourhood" => "nbhd")
+    ser = vcat([(NULL_LABEL, "no contact"), (NULL_VARIANT_LABEL, "no contact + variant")],
+               [(m * "-variant", short(m) * " – variant") for m in models])
+    meta = DataFrame(series = first.(ser), display = last.(ser), order = 1:length(ser))
+    d = innerjoin(meta, select(@subset(by_h, :scale .== scale), :model => :series, :horizon,
+                               :interval_coverage_50, :interval_coverage_90, :bias, :n_origins); on = :series)
+    hs = sort(unique(d.horizon))
+    for r in eachrow(meta)
+        @assert sort(@subset(d, :series .== r.series).horizon) == hs "variant_coverage_bias_frame: $(r.series) lacks a horizon"
+    end
+    return select!(sort!(d, [:order, :horizon]), Not(:order))
+end
+
+"""
+    plot_variant_coverage_bias(by_h, models, cfg; scale = WIS_SCALE, subtitle = "") -> Plot
+
+THREE panels by horizon — 50% interval coverage, 90% interval coverage, bias — for the contact – variant
+models in `models` against no contact and no contact + variant (`variant_coverage_bias_frame`). The two
+no-contact series keep their `SCENARIO_STYLE` colours (grey, red); the contact models take
+`VARIANT_CB_COLS`. Dotted lines: the nominal 0.5 / 0.9 and bias 0 (> 0 over-, < 0 under-prediction).
+"""
+function plot_variant_coverage_bias(by_h::DataFrame, models, cfg; scale::AbstractString = WIS_SCALE,
+                                    subtitle::AbstractString = "")
+    panels = _variant_coverage_bias_panels(variant_coverage_bias_frame(by_h, models; scale), models, cfg)
+    return plot(panels...; layout = (1, 3), size = (1250, 420), left_margin = 4Plots.mm,
+                plot_title = "17j — coverage and bias by horizon: contact – variant models vs no contact$(subtitle)",
+                plot_titlefontsize = 10)
+end
+
+"""
+    _variant_coverage_bias_panels(d, models, cfg; legend = :topright) -> Vector{Plot}
+
+The three panels of `plot_variant_coverage_bias` (50% coverage, 90% coverage, bias) from
+`variant_coverage_bias_frame`'s output `d`, lifted out 2026-11-11 for 18j's summary figure.
+"""
+function _variant_coverage_bias_panels(d::DataFrame, models, cfg; legend = :topright)
+    @assert length(models) <= length(VARIANT_CB_COLS) "plot_variant_coverage_bias: more models than colours"
+    cols = Dict(NULL_LABEL => SCENARIO_STYLE["no contact"][1], NULL_VARIANT_LABEL => SCENARIO_STYLE["variant"][1])
+    for (k, m) in enumerate(models); cols[m * "-variant"] = VARIANT_CB_COLS[k]; end
+    panels = Plots.Plot[]
+    for (k, (col_, ttl, yl, ref, ylab)) in enumerate(((:interval_coverage_50, "50% interval coverage", (0, 1), 0.5, "coverage"),
+                                                      (:interval_coverage_90, "90% interval coverage", (0, 1), 0.9, "coverage"),
+                                                      (:bias, "bias (> 0 over-, < 0 under-prediction)", (-1, 1), 0.0, "bias")))
+        p = plot(; title = ttl, titlefontsize = 9, xlabel = "horizon (weeks)", ylabel = ylab, ylim = yl,
+                 xticks = collect(cfg.horizons), legend = (k == 1 ? legend : false), legendfontsize = 6)
+        hline!(p, [ref]; color = :gray, ls = :dot, label = "")
+        for s in groupby(d, :series; sort = false)
+            plot!(p, s.horizon, s[!, col_]; color = cols[s.series[1]], lw = 1.8, marker = :circle, ms = 3,
+                  msw = 0, label = s.display[1])
+        end
+        push!(panels, p)
+    end
+    return panels
+end

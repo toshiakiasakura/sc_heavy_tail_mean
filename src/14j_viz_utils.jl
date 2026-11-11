@@ -1313,11 +1313,15 @@ roster-derived zeros — so the overlay is like-for-like rather than an independ
 that would differ for uninteresting reasons. It costs 0.35% of contacts (3061 of 865108 over
 2020-10-18…2021-12-26), whose contactee age cannot be assigned to a CIS bin and which
 `prepare_degree_data` drops.
+
+`setting ∈ (:all, :home, :nonhome)` (2026-11-11, for `make_duration_minutes_fig`'s excess column) is passed
+to `prepare_degree_data`, which filters contacts by setting AFTER drawing their contactee bins, so the bins
+(and the roster, hence the zeros) are identical across settings and `K1` is additive: home + non-home = all.
 """
 function observed_contact_means(cfg::FrameworkConfig;
                                 grid = cis_age_grid(),
                                 origins::AbstractVector{Date},
-                                raw = nothing)
+                                raw = nothing, setting::Symbol = :all)
     isempty(origins) && return (; bins = DataFrame(), blocks = DataFrame(), apd = nothing)
     raw === nothing && (raw = load_raw_contact_inputs())
     A = grid.N
@@ -1326,7 +1330,7 @@ function observed_contact_means(cfg::FrameworkConfig;
     win = WeeklyWindow(last(origins); n_fit = length(origins), smax = cfg.smax, horizons = 1:0)
     @assert win.fit_weeks == collect(origins) "origins are not consecutive weekly Mondays — the \
         single-window shortcut above does not hold; build one window per origin instead"
-    apd = prepare_degree_data(win, cfg; grid = grid,
+    apd = prepare_degree_data(win, cfg; grid = grid, setting = setting,
                               df_part_raw = raw.df_part, craw_raw = raw.craw)
 
     # `whist_mean`'s second-moment sibling — `degree_dist.jl` has no `whist_mom2`, and one figure is
@@ -1646,6 +1650,9 @@ function _periods_present(origins)
     return vcat([p for p in PERIOD_ORDER if p in g], _OUTSIDE_PHASES in g ? [_OUTSIDE_PHASES] : String[])
 end
 
+"Coefficient of variation SD/mean (population SD) from a count `n`, `Σx` and `Σx²`; the variance is clamped at 0."
+_cv_from_sums(n, s1, s2) = (m = s1 / n; sqrt(max(s2 / n - m^2, 0.0)) / m)
+
 """
     contact_duration_shares(cfg; grid, origins, raw) -> (; bins, blocks)
 
@@ -1683,6 +1690,17 @@ for **participants only** — home/non-home and duration are contact-level attri
 bin is involved and there is no second call site. It uses the same source frame, the same date
 predicate and the same `unique(...)` roster as `prepare_degree_data`, so its participant draws are
 bit-identical to §4's; the notebook asserts that via `n_pd == apd.n[t, i, 1]`.
+
+`n_pd_any` / `min_per_pd_any` (2026-11-11, for `make_duration_minutes_fig`): the participant-days with
+≥ 1 contact in THAT setting, and the setting's minutes per such participant-day — `min_per_pd` restricted to
+those who had a contact there (blocks: population-weighted over the bins with `n_pd_any > 0`, re-normalised).
+A participant-day whose only away contacts are group contacts counts as having a non-home contact.
+`excess_pos` / `p_any` (2026-11-11): from each participant-day's POOLED duration-weighted degree in the setting,
+`W = Σ minutes / cfg.d_max` over ALL its contacts there (every contactee bin, and the ~0.35% with no bin):
+`excess_pos = E[W²]/E[W]` over the days with `W > 0` and `p_any = P(W > 0) = n_pd_any / n_pd` (blocks:
+population-weighted, as `min_per_pd_any` and `min_per_pd` respectively). `cv_pos` = SD(W)/E[W] over the same days
+(population SD, so `excess_pos = E[W]·(1 + cv_pos²)` exactly per bin). ⚠ NOT a factorisation of §4's excess,
+which SUMS per-contactee-bin terms `(1−p⁰_j)·E[w_j²]/E[w_j]`: `excess_pos · p_any` ≠ that sum.
 
 ⚠ **`n_dur_na` counts individually-reported contacts with NO duration** (~4 250 over this span).
 `duration_weight` maps them to level 1 = 2.5 min, numerically indistinguishable from a group
@@ -1737,6 +1755,19 @@ function contact_duration_shares(cfg::FrameworkConfig; grid = cis_age_grid(),
         r.grp && (ngrp[r.t, r.part_bin, s] += 1)
         r.na  && (nna[r.t, r.part_bin, s]  += 1)
     end
+    # participant-days with ≥ 1 contact in each setting (2026-11-11): the denominator of `min_per_pd_any`
+    npd_any = zeros(Int, length(weeks), A, 2)
+    for r in eachrow(unique(dfC, [:part_id_d, :date, :setting]))
+        npd_any[r.t, r.part_bin, r.setting == "home" ? 1 : 2] += 1
+    end
+    # POOLED duration-weighted degree per participant-day and setting, W = Σ weights over ALL its contacts there
+    # (weight = minutes / d_max, the framework's): Σ W and Σ W² over the days with W > 0 give `excess_pos`.
+    sW = zeros(length(weeks), A, 2); sW2 = zeros(length(weeks), A, 2)
+    for g in groupby(dfC, [:part_id_d, :date, :setting])
+        W = sum(g.min) / cfg.d_max
+        k = (g.t[1], g.part_bin[1], g.setting[1] == "home" ? 1 : 2)
+        sW[k...] += W; sW2[k...] += W^2
+    end
 
     binrows = NamedTuple[]; blockrows = NamedTuple[]
     for (t, o) in enumerate(weeks)
@@ -1750,7 +1781,11 @@ function contact_duration_shares(cfg::FrameworkConfig; grid = cis_age_grid(),
                                   share_pooled = tot == 0 ? NaN : minutes[t, i, s] / tot,
                                   minutes = minutes[t, i, s], n_pd = npd[t, i],
                                   n_contacts = ncnt[t, i, s], n_group = ngrp[t, i, s],
-                                  n_dur_na = nna[t, i, s]))
+                                  n_dur_na = nna[t, i, s], n_pd_any = npd_any[t, i, s],
+                                  min_per_pd_any = npd_any[t, i, s] == 0 ? NaN : minutes[t, i, s] / npd_any[t, i, s],
+                                  excess_pos = sW[t, i, s] == 0 ? NaN : sW2[t, i, s] / sW[t, i, s],
+                                  cv_pos = sW[t, i, s] == 0 ? NaN : _cv_from_sums(npd_any[t, i, s], sW[t, i, s], sW2[t, i, s]),
+                                  p_any = npd[t, i] == 0 ? NaN : npd_any[t, i, s] / npd[t, i]))
             end
         end
         for (b, sym, lab) in blocks
@@ -1760,6 +1795,26 @@ function contact_duration_shares(cfg::FrameworkConfig; grid = cis_age_grid(),
                    for s in 1:2]
             bidx = [i for i in 1:A if blk[i] == b]
             pool = [sum(minutes[t, bidx, s]) for s in 1:2]
+            # the same population weighting, over the bins with ≥ 1 participant-day in the setting
+            lev_any = map(1:2) do s
+                ia = [i for i in bidx if npd_any[t, i, s] > 0]
+                isempty(ia) && return NaN
+                wa = wts[ia] ./ sum(wts[ia])
+                sum(wa .* [minutes[t, i, s] / npd_any[t, i, s] for i in ia])
+            end
+            exc_pos = map(1:2) do s                                     # same weighting as `min_per_pd_any`
+                ia = [i for i in bidx if npd_any[t, i, s] > 0]
+                isempty(ia) && return NaN
+                wa = wts[ia] ./ sum(wts[ia])
+                sum(wa .* [sW2[t, i, s] / sW[t, i, s] for i in ia])
+            end
+            p_any = [isempty(idx) ? NaN : sum(w .* [npd_any[t, i, s] / npd[t, i] for i in idx]) for s in 1:2]
+            cv_pos = map(1:2) do s                                      # same weighting as `excess_pos`
+                ia = [i for i in bidx if npd_any[t, i, s] > 0]
+                isempty(ia) && return NaN
+                wa = wts[ia] ./ sum(wts[ia])
+                sum(wa .* [_cv_from_sums(npd_any[t, i, s], sW[t, i, s], sW2[t, i, s]) for i in ia])
+            end
             for (s, nm) in enumerate(SET)
                 push!(blockrows, (; origin = o, week = week_mid(o), block = b,
                                     block_label = String(sym), block_desc = lab, setting = nm,
@@ -1770,7 +1825,9 @@ function contact_duration_shares(cfg::FrameworkConfig; grid = cis_age_grid(),
                                     n_contacts = sum(ncnt[t, bidx, s]),
                                     n_group = sum(ngrp[t, bidx, s]),
                                     n_dur_na = sum(nna[t, bidx, s]),
-                                    n_bins_present = length(idx)))
+                                    n_bins_present = length(idx),
+                                    n_pd_any = sum(npd_any[t, bidx, s]), min_per_pd_any = lev_any[s],
+                                    excess_pos = exc_pos[s], cv_pos = cv_pos[s], p_any = p_any[s]))
             end
         end
     end
@@ -2573,6 +2630,108 @@ function make_duration_share_fig(ds::DataFrame, cfg::FrameworkConfig; grid = cis
                plot_titlefontsize = 9)
     mkpath(res_dir)
     savefig(fig, joinpath(res_dir, "14j_duration_share.png"))
+    return fig
+end
+
+"""
+    make_duration_minutes_fig(ds, cfg; grid, res_dir) -> fig
+
+§5's twin in MINUTES (2026-11-11, user request) → `14j_duration_minutes.png`. Rows = age blocks; columns:
+- **all participant-days**: `min_per_pd`, the reported contact minutes per participant-day at home and away,
+  zeros included;
+- **participant-days with ≥ 1 contact in the setting**: `min_per_pd_any` — home minutes among those with a home
+  contact, non-home minutes among those with a non-home contact (`contact_duration_shares`).
+Both are population-weighted within the block. Minutes are the coded duration midpoints summed over a
+participant-day's contacts (2.5 / 10 / 37.5 / 150 / `cfg.d_max` min; group contacts `cfg.w_dur_group·cfg.d_max`),
+i.e. contact-minutes, not elapsed time. y starts at 0 and is shared within a column, with headroom for
+`shade_periods!`'s phase names, which is called LAST (Date-axis rule).
+
+`excess` (optional, 2026-11-11) adds a THIRD column: §4's observed duration-weighted excess degree
+`Σ_j (⟨k²⟩/⟨k⟩)·g` (`observed_contact_means(…; setting)`, quantity `"excess"` of `"weighted-hweibull"`), one line per
+setting — a frame with `block, week, setting ∈ ("home", "non-home"), observed`. Its units are duration-weighted
+contacts (weight = coded minutes / `cfg.d_max`), not minutes, so it has its own y-label.
+
+`components = true` (2026-11-11) adds columns 4–5 from `ds`: `cv_pos` = SD(W)/E[W] over W > 0 (was `excess_pos` =
+E[W²]/E[W] until the user swapped it, same day) and `p_any` = P(W > 0) of the
+participant-day's POOLED duration-weighted degree W in the setting (see `contact_duration_shares`). Pooled over
+contactee bins, so column 3 ≠ column 4 × column 5 (column 3 sums per-contactee-bin terms) — user's choice.
+"""
+function make_duration_minutes_fig(ds::DataFrame, cfg::FrameworkConfig; grid = cis_age_grid(),
+                                   res_dir::AbstractString = "../res", excess = nothing, excess_clip_q = 0.99,
+                                   components::Bool = false)
+    _, blocks, _ = _age_blocks(cfg, grid)
+    SET = ("home", "non-home"); COLS = (:seagreen, :indianred)
+    QTY = ((:min_per_pd, "all participant-days"),
+           (:min_per_pd_any, "participant-days with ≥ 1 contact in the setting"))
+    nb = length(blocks)
+    COMP = ((:cv_pos, "CV of W over days with W > 0 (pooled)", "coefficient of variation"),
+            (:p_any, "P(W > 0): days with ≥ 1 contact there", "share of participant-days"))
+    ncol = length(QTY) + (excess === nothing ? 0 : 1) + (components ? length(COMP) : 0)
+    panels = Any[]
+    for (bi, (b, sym, lab)) in enumerate(blocks)
+        short = first(split(lab))                            # "children" / "adults"; full description in column 1
+        sub = @subset(ds, :block .== b)
+        dmin, dmax = extrema(sub.week)
+        for (qi, (col, qlab)) in enumerate(QTY)
+            ytop = maximum(filter(isfinite, ds[!, col]))     # shared within the column, across blocks
+            pnl = plot(; xlabel = bi == nb ? "week (Thu mid-date)" : "", ylabel = qi == 1 ? "minutes per participant-day" : "",
+                         title = "$(qi == 1 ? lab : short) — $(qlab)", titlefontsize = 9, xrotation = 45,
+                         legend = (bi == 1 && qi == 1) ? :topleft : false, legendfontsize = 7,
+                         left_margin = (qi == 1 ? 18 : 14) * Plots.mm, bottom_margin = (bi == nb ? 20 : 12) * Plots.mm)
+            for (s, c) in zip(SET, COLS)
+                sf = sort(@subset(sub, :setting .== s), :week)
+                plot!(pnl, sf.week, sf[!, col]; color = c, lw = 2, label = s, marker = :circle, ms = 2)
+            end
+            ylims!(pnl, (0.0, 1.25 * ytop))                # headroom for the rotated phase names
+            shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = bi == nb)
+            push!(panels, pnl)
+        end
+        if excess !== nothing
+            # §4's observed excess degree, per setting: an empirical SECOND moment, so one mass-contact report
+            # can dominate a week — the axis is capped at the column's `excess_clip_q` quantile (×1.25 headroom)
+            # and the points pushed off-scale are COUNTED in the title, as §4 does.
+            cap = quantile(filter(isfinite, excess.observed), excess_clip_q) * 1.25
+            ex = @subset(excess, :block .== b)
+            n_off = count(>(cap), ex.observed)
+            pnl = plot(; xlabel = bi == nb ? "week (Thu mid-date)" : "", ylabel = "excess degree / participant-day",
+                         title = "$(short) — excess degree (⟨k²⟩/⟨k⟩)·g, duration-weighted" *
+                                 (n_off > 0 ? "  [$(n_off) point(s) above the axis]" : ""),
+                         titlefontsize = 9, xrotation = 45, legend = false,
+                         left_margin = 14Plots.mm,           # its own y-label sits between the columns
+                         bottom_margin = (bi == nb ? 20 : 12) * Plots.mm)
+            for (s, c) in zip(SET, COLS)
+                sf = sort(@subset(ex, :setting .== s), :week)
+                plot!(pnl, sf.week, sf.observed; color = c, lw = 2, label = s, marker = :circle, ms = 2)
+            end
+            ylims!(pnl, (0.0, cap))
+            shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = bi == nb)
+            push!(panels, pnl)
+        end
+        components || continue
+        for (col, qlab, ylab) in COMP
+            ytop = col === :p_any ? 1.0 : maximum(filter(isfinite, ds[!, col]))   # shared within the column
+            pnl = plot(; xlabel = bi == nb ? "week (Thu mid-date)" : "", ylabel = ylab,
+                         title = "$(short) — $(qlab)", titlefontsize = 9, xrotation = 45, legend = false,
+                         left_margin = 14Plots.mm, bottom_margin = (bi == nb ? 20 : 12) * Plots.mm)
+            for (s, c) in zip(SET, COLS)
+                sf = sort(@subset(sub, :setting .== s), :week)
+                plot!(pnl, sf.week, sf[!, col]; color = c, lw = 2, label = s, marker = :circle, ms = 2)
+            end
+            ylims!(pnl, (0.0, 1.25 * ytop))
+            col === :p_any && yticks!(pnl, 0.0:0.2:1.0)
+            shade_periods!(pnl, dmin, dmax; alpha = 0.10, fontsize = 5, labels = bi == nb)
+            push!(panels, pnl)
+        end
+    end
+    fig = plot(panels...; layout = (nb, ncol), size = (720 * ncol, 600 * nb),
+               top_margin = 5Plots.mm,   # left/bottom margins are set PER PANEL above
+               plot_title = "Reported contact minutes per participant-day at home vs away" *
+                            (excess === nothing ? "" : ", and the duration-weighted excess degree") *
+                            (components ? ", the CV of the pooled weighted degree W and P(W > 0)" : "") *
+                            ", by age block — raw CoMix England, population-weighted within block; bands = UK COVID phases",
+               plot_titlefontsize = 9)
+    mkpath(res_dir)
+    savefig(fig, joinpath(res_dir, "14j_duration_minutes.png"))
     return fig
 end
 

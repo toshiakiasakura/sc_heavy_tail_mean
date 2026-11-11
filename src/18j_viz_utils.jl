@@ -121,6 +121,21 @@ top as a smaller filled circle, so that a coinciding pair shows as a circle insi
 """
 function plot_scenario_dots(rk::DataFrame; horizons = (1, 4), title_suffix::AbstractString = "",
                             scale::AbstractString = WIS_SCALE, panel_width::Real = 500)
+    panels, leg = _scenario_dots_panels(rk; horizons, scale)
+    n, leg_width = length(panels), 250
+    width = n * panel_width + leg_width
+    return plot(panels..., leg; layout = Plots.grid(1, n + 1; widths = [fill(panel_width / width, n); leg_width / width]), size = (width, 520),
+                plot_title = "18j — mean WIS relative to no contact – no variant (= 1) at horizons $(join(horizons, ", ", " and "))$(title_suffix)",
+                plot_titlefontsize = 10)
+end
+
+"""
+    _scenario_dots_panels(rk; horizons = (1, 4), scale = WIS_SCALE, titles = nothing) -> (panels, legend_cell)
+
+The panels of `plot_scenario_dots` (one per horizon) and its legend cell, lifted out 2026-11-11 so
+`plot_summary_pre_omicron` can place them in its own layout. `titles` overrides the "horizon h" titles.
+"""
+function _scenario_dots_panels(rk::DataFrame; horizons = (1, 4), scale::AbstractString = WIS_SCALE, titles = nothing)
     models = [NULL_LABEL; scenario_bar_contact_order(rk).order]
     groups = (first.(BAR_CONTACT_ROWS)..., first.(BAR_NULL_ROWS)...)   # frozen first: drawn underneath
     n_dots = length(BAR_NULL_ROWS) + (length(models) - 1) * length(BAR_CONTACT_ROWS)
@@ -136,7 +151,7 @@ function plot_scenario_dots(rk::DataFrame; horizons = (1, 4), title_suffix::Abst
     for (k, h) in enumerate(horizons)
         d = @subset(dots, :horizon .== h, in.(:model, Ref(models)), in.(:scenario, Ref(groups)))
         @assert nrow(d) == n_dots "plot_scenario_dots: h$h has $(nrow(d)) of $n_dots dots"
-        p = plot(; title = "horizon $h", titlefontsize = 10, xlabel = "relative WIS ($scale)", legend = false,
+        p = plot(; title = (titles === nothing ? "horizon $h" : titles[k]), titlefontsize = 10, xlabel = "relative WIS ($scale)", legend = false,
                  yticks = (ys, k == 1 ? [m == NULL_LABEL ? "no contact" : _bar_short(m) for m in models] : fill("", length(ys))),
                  ytickfontsize = 8,
                  xlim = (lo - pad, hi + pad), ylim = (minimum(ys) - 0.6, maximum(ys) + 0.6))
@@ -152,11 +167,7 @@ function plot_scenario_dots(rk::DataFrame; horizons = (1, 4), title_suffix::Abst
     for (sc, lab) in (BAR_NULL_ROWS..., BAR_CONTACT_ROWS...)
         scatter!(leg, [NaN], [NaN]; label = lab, style(sc)...)
     end
-    n, leg_width = length(panels), 250
-    width = n * panel_width + leg_width
-    return plot(panels..., leg; layout = Plots.grid(1, n + 1; widths = [fill(panel_width / width, n); leg_width / width]), size = (width, 520),
-                plot_title = "18j — mean WIS relative to no contact – no variant (= 1) at horizons $(join(horizons, ", ", " and "))$(title_suffix)",
-                plot_titlefontsize = 10)
+    return panels, leg
 end
 
 """
@@ -511,4 +522,332 @@ function plot_scenario_fans_over_time(fq, grid; series = FAN_SERIES, every::Inte
                 plot_title = "18j — weekly infections ($(logy ? "log" : "linear") scale) and h1–$(H) forecasts from " *
                              "every $(every)th origin (dots = median, bands = 50% / 95%)$(title_suffix)",
                 plot_titlefontsize = 10)
+end
+
+# ── Variant-specific γ_SAR over time (2026-11-11) ─────────────────────────────────────────────
+# The per-contact secondary attack rate of the variant models, one γ_SAR per variant category, read by
+# 9j's `collect_variant_gamma` (read-only: `isfile` → `load`, never fits). 9j's `plot_variant_gamma` draws
+# it on a log axis; this is the linear twin, one panel per model with its own y-scale.
+
+const _DEGREE_OF = Dict(degree_label(dm) => dm for dm in (NegBinAgePair(), HurdleWeibullAgePair(), NoContactDegree()))
+const _NGM_OF = Dict(ngm_label(nb) => nb for nb in (MeanNGM(), NeighbourhoodDegreeNGM(), DiagonalMeanNGM(), NullNGM()))
+
+"""
+    variant_gamma_combos(models) -> Vector{Tuple}
+
+`(dm, VariantNGM(nb))` for each base label `"<degree>|<ngm>"` in `models`, asserting that the pair
+round-trips to `"<base>-variant"`, the label its Stage-2 files carry.
+"""
+function variant_gamma_combos(models)
+    map(models) do m
+        d, n = split(m, "|")
+        c = (_DEGREE_OF[d], VariantNGM(_NGM_OF[n]))
+        @assert string(degree_label(c[1]), "|", ngm_label(c[2])) == m * "-variant"
+        c
+    end
+end
+
+"""
+    plot_variant_gamma_over_time(df, models; ylim = (0.0, 1.0),
+                                 free = ("weighted-hweibull|mean", "unweighted-negbin|neighbourhood"),
+                                 ycap = 2.5, title_suffix = "") -> Plot
+
+One panel per base label in `models` (in that order), x = forecast origin, one line per variant category
+(median + 90% band, `VARIANT_COLS`) on the LEFT axis, and each category's genome share in the origin week
+(`share_t0`, dashed, same colour) on a RIGHT axis in PERCENT, 0–100. `df` is `collect_variant_gamma`'s frame,
+whose `model` column carries the `-variant` suffix. Gaps are origins at which a category had no renewal of
+its own; a pooled category's share is the pooled share.
+
+The left axis is LINEAR and fixed at `ylim` (user, 2026-11-11), except for the models in `free` — hweibull|mean,
+whose γ runs past 1, and negbin|nbhd, whose γ ≈ 0.005 would sit on the floor of a 0–1 axis: there the axis
+fits the bands (+5%) but stops at `ycap ×` the largest median. γ_SAR multiplies C*, whose units differ by
+degree model and NGM builder, so even the fixed panels are not comparable with one another. Bands cut by an
+axis limit are counted in the panel title.
+"""
+function plot_variant_gamma_over_time(df::DataFrame, models; ylim = (0.0, 1.0),
+                                      free = ("weighted-hweibull|mean", "unweighted-negbin|neighbourhood"),
+                                      ycap::Real = 2.5, title_suffix::AbstractString = "")
+    nr, nc = panel_grid(length(models))
+    built = [_variant_gamma_panel(df, m; ylim, free, ycap, legend = (k == 1 ? :topleft : false),
+                                  ylabel = ((k - 1) % nc == 0 ? "γ_SAR,v (solid)" : ""), share_key = (k == 1))
+             for (k, m) in enumerate(models)]
+    fig = plot(first.(built)...; layout = (nr, nc), size = (600 * nc, 380 * nr), left_margin = 6Plots.mm,
+               right_margin = 10Plots.mm, bottom_margin = 6Plots.mm,
+               plot_title = "18j — variant-specific secondary attack rate γ_SAR,v (h = 1, median + 90%) and variant " *
+                            "share at the origin$(title_suffix)",
+               plot_titlefontsize = 10)
+    _add_share_axes!(fig, last.(built); ylabel_at = [k % nc == 0 || k == length(models) for k in eachindex(models)])
+    return fig
+end
+
+"""
+    _variant_gamma_panel(df, m; ylim, free, ycap, legend, ylabel, share_key, title = default, xlabel = "") -> (panel, shares)
+
+ONE γ_SAR,v panel of `plot_variant_gamma_over_time` for base label `m` (lifted out 2026-11-11 for the merged
+18j figure): the y-axis rule (`ylim`, or for `m ∈ free` the bands +5% capped at `ycap ×` the largest median),
+one NaN-padded median + 90% line per category, and the cut-band count in the title. `shares` is what
+`_add_share_axes!` draws on the right axis; `share_key` adds that axis's legend entry to this panel.
+"""
+function _variant_gamma_panel(df::DataFrame, m; ylim, free, ycap::Real, legend, ylabel, share_key::Bool,
+                              title = nothing, xlabel = "", titlefontsize = 9)
+    cats = vcat([VARIANT_RESIDUAL], COG_GROUPS[2:end])
+    d = @subset(df, :model .== m * "-variant")
+    @assert nrow(d) > 0 "_variant_gamma_panel: no rows for $m"
+    yl = m in free ? (0.0, min(ycap * maximum(d.gamma_med), 1.05 * maximum(d.gamma_hi))) : ylim
+    n_cut = count(>(yl[2]), d.gamma_hi)
+    ttl = (title === nothing ? _bar_short(m) * " – variant" : title) *
+          (n_cut > 0 ? "  [$(n_cut) band(s) cut at the top]" : "")
+    p = plot(; title = ttl, titlefontsize, ylim = yl, ylabel, xlabel,
+             legend, legendfontsize = 7, xrotation = 45,
+             xtickfontsize = 7, ytickfontsize = 7)
+    origins = sort(unique(d.origin))
+    sh = Tuple{String,Vector{Date},Vector{Float64}}[]
+    for nm in cats
+        s = @subset(d, :variant .== nm)
+        nrow(s) == 0 && continue
+        # NaN at the origins where the category is absent, so the line BREAKS there instead of bridging
+        ix = Dict(o => i for (i, o) in enumerate(s.origin))
+        pick(col) = [haskey(ix, o) ? s[ix[o], col] : NaN for o in origins]
+        med, lo, hi = pick(:gamma_med), pick(:gamma_lo), min.(pick(:gamma_hi), yl[2])
+        plot!(p, origins, med; ribbon = (med .- lo, hi .- med), fillalpha = 0.18,
+              color = get(VARIANT_COLS, nm, :black), lw = 1.6, marker = :circle, ms = 2, msw = 0, label = nm)
+        push!(sh, (nm, origins, pick(:share_t0)))
+    end
+    # legend key for the right axis (an invisible point; the shares themselves go on the twin)
+    share_key && plot!(p, origins[1:1], [NaN]; color = :black, ls = :dash, lw = 1.0, label = "share at origin, % (right)")
+    return (p, sh)
+end
+
+"""
+    _add_share_axes!(fig, shares; ylabel_at, idx = eachindex(shares))
+
+The right-hand variant-share axes (dashed, %, 0–100) on subplots `idx` of the COMPOSED `fig` — a twin made
+inside a standalone panel is an inset subplot, which composing panels into a layout does not carry over
+reliably. `ylabel_at[k]` says whether the k-th one carries the axis label.
+"""
+function _add_share_axes!(fig, shares; ylabel_at, idx = eachindex(shares))
+    for (k, (i, sh)) in enumerate(zip(idx, shares))
+        q = twinx(fig[i])
+        plot!(q; ylim = (0.0, 100.0), yticks = 0:20:100,
+              ylabel = (ylabel_at[k] ? "share at origin, % (dashed)" : ""),
+              legend = false, grid = false, ytickfontsize = 7)
+        for (nm, x, y) in sh
+            plot!(q, x, 100 .* y; color = get(VARIANT_COLS, nm, :black), ls = :dash, lw = 1.0, label = "")
+        end
+    end
+    return fig
+end
+
+# ── Relative susceptibility and infectivity of the variant models (2026-11-11) ─────────────────
+# 9j's `collect_transmission_structure` cannot read a `-variant` file (its `load_transmission_draws` takes
+# `gamma_sar` as a vector, and it also loads every Stage-1 chain), so the susc/inf half is restated here
+# from the Stage-2 file alone, with the SAME arithmetic: pop-weighted super-groups from `supergroup_split`
+# divided per draw by the reference bin `cfg.ref_bin`. The stores have 9j's shape, so `plot_ratio` draws them.
+
+"""
+    susc_inf_ratio_stores(combos, origins, cfg; grid, h = 1, save_dir) -> (; susc, inf, sg_names, ref_lab, labels, frame)
+
+READ-ONLY (`stage2_path` → assert `isfile` → `load`; nothing fits). For each `(dm, nb)` × origin, the median
+and 5/95% of the per-draw susceptibility and infectivity super-group ratios to `cfg.ref_bin`, as
+`Dict(label => (med, lo, hi))` of `nO × nG` matrices keyed by `"<degree>|<ngm>"` (9j's
+`collect_transmission_structure` shape, for `plot_ratio`), plus the same in a long `frame` for the CSV.
+Asserts the reference column is identically 1 and that no model's infectivity is pinned (`plot_ratio`
+is called without `pinned`).
+"""
+function susc_inf_ratio_stores(combos, origins, cfg::FrameworkConfig; grid = cis_age_grid(), h::Integer = 1,
+                               save_dir::AbstractString = "../dt_intermediate")
+    ref = cfg.ref_bin
+    sg_groups, sg_names = supergroup_split(grid, ref)
+    nO, nG = length(origins), length(sg_groups)
+    labels = [string(degree_label(dm), "|", ngm_label(nb)) for (dm, nb) in combos]
+    mk() = Dict(l => (med = fill(NaN, nO, nG), lo = fill(NaN, nO, nG), hi = fill(NaN, nO, nG)) for l in labels)
+    susc, inf = mk(), mk()
+    rows = NamedTuple[]
+    for ((dm, nb), lbl) in zip(combos, labels)
+        pinned = true
+        for (oi, o) in enumerate(origins)
+            p = stage2_path(dm, nb, o, h; contacts = contacts_label(cfg), save_dir = save_dir)
+            @assert isfile(p) "susc_inf_ratio_stores: missing $p"
+            pooled = load(p, "pooled")
+            pinned &= all(==(1.0), pooled.inf)
+            for (q, V, dst) in (("susceptibility", pooled.susc, susc), ("infectivity", pooled.inf, inf))
+                den = view(V, :, ref)
+                @assert all(==(1.0), den) "susc_inf_ratio_stores: $lbl $o $q reference bin is not ≡ 1"
+                r = aggregate_supergroups(V, grid.POP; groups = sg_groups) ./ den
+                for g in 1:nG
+                    m, lo, hi = median(r[:, g]), quantile(r[:, g], 0.05), quantile(r[:, g], 0.95)
+                    dst[lbl].med[oi, g] = m; dst[lbl].lo[oi, g] = lo; dst[lbl].hi[oi, g] = hi
+                    push!(rows, (; model = lbl, origin = o, h, quantity = q, age_group = sg_names[g],
+                                   ratio_med = m, ratio_lo = lo, ratio_hi = hi))
+                end
+            end
+        end
+        @assert !pinned "susc_inf_ratio_stores: $lbl has infectivity pinned ≡ 1 — pass `pinned` to plot_ratio"
+    end
+    return (; susc, inf, sg_names, ref_lab = grid.LAB[ref], labels, frame = DataFrame(rows))
+end
+
+"`susc_inf_ratio_stores` for the `-variant` twins of the base labels in `models` (`variant_gamma_combos`)."
+collect_variant_susc_inf(models, origins, cfg::FrameworkConfig; kw...) =
+    susc_inf_ratio_stores(variant_gamma_combos(models), origins, cfg; kw...)
+
+"Log-axis ticks at the powers of 2 inside `yl`, labelled as plain ratios (\"0.25\", \"1\", \"4\") rather than 10^x."
+function _pow2_ticks(yl)
+    tk = filter(t -> yl[1] <= t <= yl[2], 2.0 .^ (-6:6))
+    return (tk, [t >= 1 ? string(Int(t)) : string(t) for t in tk])
+end
+
+"""
+    plot_variant_transmission_grid(vg, tr, models, origins; free, ycap, title_suffix) -> Plot
+
+ONE figure (2026-11-11): rows γ_SAR,v · susceptibility · infectivity, one column per base label in `models`
+(all `-variant`). Row 1 is `_variant_gamma_panel` with the variant shares on a right axis in %
+(`_add_share_axes!`); rows 2–3 are 9j's `_ratio_panel` on `tr.susc` / `tr.inf` (`collect_variant_susc_inf`),
+log axis with `_pow2_ticks`, one range per row from that row's medians (`_median_ylims`), so a wide band
+can run off the panel; no prior band (user's choice). The γ row keeps the 0–1 axis except for `free` models. Column titles on the top row,
+row labels on the first column, x label on the bottom row; legends: variants in the γ row, age groups in
+the susceptibility row.
+"""
+function plot_variant_transmission_grid(vg::DataFrame, tr, models, origins;
+                                        free = ("weighted-hweibull|mean", "unweighted-negbin|neighbourhood"),
+                                        ycap::Real = 2.5, title_suffix::AbstractString = "")
+    nc = length(models)
+    lbls = [m * "-variant" for m in models]
+    @assert all(in(tr.labels), lbls) "plot_variant_transmission_grid: susc/inf stores lack $(setdiff(lbls, tr.labels))"
+    pri = nothing   # no prior 90% band (user, 2026-11-11)
+    built = [_variant_gamma_panel(vg, m; ylim = (0.0, 1.0), free, ycap, legend = (k == 1 ? :topleft : false),
+                                  ylabel = (k == 1 ? "γ_SAR,v (solid)" : ""), share_key = (k == 1), titlefontsize = 10)
+             for (k, m) in enumerate(models)]
+    panels = Plots.Plot[first.(built)...]
+    for (r, (q, st)) in enumerate((("susceptibility", tr.susc), ("infectivity", tr.inf)))
+        yl = _median_ylims(vcat([vec(st[l].med) for l in lbls]...); log = true)
+        for (k, l) in enumerate(lbls)
+            push!(panels, _ratio_panel(st, l, origins; gnames = tr.sg_names, ref_lab = tr.ref_lab, pri, yl,
+                                       yticks = _pow2_ticks(yl), title = "",
+                                       ylabel = (k == 1 ? "$q ratio to $(tr.ref_lab)" : ""),
+                                       xlabel = (r == 2 ? "forecast origin" : ""),
+                                       legend = (r == 1 && k == 1 ? :topleft : false), first_panel = (k == 1),
+                                       marker_kw = (; msw = 0)))   # no black outline: it swamps the 2-px markers and legend swatches
+        end
+    end
+    # ⚠ `save_show` → `pad_margins` OVERRIDES left/bottom margins on every subplot (8 / 12 mm by default); the notebook
+    # passes `l = 16Plots.mm` there, because the infectivity row's "0.125" ticks push its label off the left edge.
+    fig = plot(panels...; layout = (3, nc), size = (540 * nc, 380 * 3), left_margin = 16Plots.mm,
+               right_margin = 10Plots.mm, bottom_margin = 12Plots.mm,
+               plot_title = "18j — variant models: γ_SAR,v with variant share (%, right), and susceptibility / " *
+                            "infectivity ratio to $(tr.ref_lab) (log) (h = 1, median + 90%)$(title_suffix)",
+               plot_titlefontsize = 11)
+    _add_share_axes!(fig, last.(built); ylabel_at = [k == nc for k in 1:nc], idx = 1:nc)
+    return fig
+end
+
+# ── Summary figure: scenario dots + coverage/bias (left) and the 19r Tweedie forest plot (right) (2026-11-11) ──
+# The forest plot is 19r's `19r_fixed_effects_tweedie.png` redrawn with Plots from `res/19r_fixed_effects.csv`
+# (19r's ggplot figure is untouched), with the DERIVED block moved to the middle and cut to the two
+# future-vs-frozen contrasts (user's choice).
+
+"Blocks of the forest plot, top to bottom, and their terms (`X_TERMS` / `DERIVED_TERMS` in `19r_utils.R`)."
+const FOREST_BLOCKS = ("contact – variant usage" => ["ctc_future", "ctc_frozen", "variant", "ctc_future_variant", "ctc_frozen_variant"],
+                       "derived"                 => ["future vs frozen (variant)", "future vs frozen (no variant)"],
+                       "contact model"           => ["duration", "nbhd", "duration_nbhd", "diagonal"])
+"19r's horizon colours (light → dark), as in `19r_fixed_effects_tweedie.png`."
+const FOREST_H_COLS = ("#7fa7c9", "#3d8bd1", "#1c4f96", "#08306b")
+
+"""
+    tweedie_forest_frame(eff; family = "tweedie", blocks = FOREST_BLOCKS, sort_h = 4) -> DataFrame
+
+The rows of the forest plot from 19r's `19r_fixed_effects.csv` (`eff`): one row per term × horizon with
+`block`, `term`, `horizon`, `ratio_median/lo/hi` (median and 90% interval of exp(b)) and `rank` — the term's
+position within its block, sorted by the `sort_h` median, largest WIS reduction first (19r's rule). Asserts
+every listed term has every horizon.
+"""
+function tweedie_forest_frame(eff::DataFrame; family::AbstractString = "tweedie", blocks = FOREST_BLOCKS, sort_h::Integer = 4)
+    d = @subset(eff, :family .== family)
+    hs = sort(unique(d.horizon))
+    out = DataFrame[]
+    for (bname, terms) in blocks
+        b = @subset(d, in.(:term, Ref(terms)))
+        for t in terms
+            @assert sort(@subset(b, :term .== t).horizon) == hs "tweedie_forest_frame: $t lacks a horizon"
+        end
+        ord = sort(@subset(b, :horizon .== sort_h), :ratio_median).term
+        b = transform(b, :term => ByRow(t -> findfirst(==(t), ord)) => :rank)
+        b.block .= bname
+        push!(out, select(b, :block, :term, :horizon, :ratio_median, :ratio_lo, :ratio_hi, :rank))
+    end
+    return sort!(vcat(out...), [order(:block; by = bl -> findfirst(p -> first(p) == bl, collect(blocks))), :rank, :horizon])
+end
+
+"""
+    _tweedie_forest_panel(f; title, xlabel, ticks) -> Plot
+
+ONE forest-plot subplot from `tweedie_forest_frame`: a row per term (block by block, a labelled header row
+and a grey separator between blocks), the horizons dodged top (h1) → bottom (h4) as median + 90% interval in
+`FOREST_H_COLS`, log x-axis with plain-value ticks, dashed line at 1 (< 1 = lowers WIS).
+"""
+function _tweedie_forest_panel(f::DataFrame; title = "19r — Tweedie: effects on WIS by horizon",
+                               xlabel = "multiplicative effect on log-scale WIS (median, 90% interval; < 1 = better)",
+                               ticks = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75])
+    hs = sort(unique(f.horizon))
+    @assert length(hs) <= length(FOREST_H_COLS) "_tweedie_forest_panel: more horizons than colours"
+    off = Dict(h => 0.3 - 0.6 * (i - 1) / max(length(hs) - 1, 1) for (i, h) in enumerate(hs))   # h1 on top
+    # y positions: a header row per block, then its terms, going down
+    ypos = Dict{String,Float64}(); headers = Tuple{String,Float64}[]; seps = Float64[]
+    y = 0.0
+    blocks = unique(f.block)
+    for (k, bl) in enumerate(blocks)
+        k > 1 && (push!(seps, y + 0.4); y -= 0.3)
+        push!(headers, (bl, y)); y -= 1
+        for t in unique(sort(@subset(f, :block .== bl), :rank).term)
+            ypos[t] = y; y -= 1
+        end
+    end
+    xl = (min(minimum(f.ratio_lo), 1.0) / 1.04, max(maximum(f.ratio_hi), 1.0) * 1.04)
+    tk = filter(t -> xl[1] <= t <= xl[2], ticks)
+    terms = collect(keys(ypos))
+    p = plot(; title, titlefontsize = 10, xlabel, xguidefontsize = 9, xscale = :log10, xlim = xl,
+             xticks = (tk, string.(tk)), yticks = ([ypos[t] for t in terms], terms), ytickfontsize = 8,
+             ylim = (y + 0.4, 0.6), legend = :topright, legendfontsize = 7, legendtitle = "horizon",
+             legendtitlefontsize = 7, grid = :x)
+    vline!(p, [1.0]; color = :grey40, ls = :dash, lw = 1, label = "")
+    isempty(seps) || hline!(p, seps; color = :grey75, lw = 0.8, label = "")
+    for (i, h) in enumerate(hs)
+        s = @subset(f, :horizon .== h)
+        yy = [ypos[t] + off[h] for t in s.term]
+        xs = reduce(vcat, [[lo, hi, NaN] for (lo, hi) in zip(s.ratio_lo, s.ratio_hi)])
+        plot!(p, xs, reduce(vcat, [[v, v, NaN] for v in yy]); color = FOREST_H_COLS[i], lw = 1.6, label = "")
+        scatter!(p, s.ratio_median, yy; color = FOREST_H_COLS[i], ms = 3.5, msw = 0, label = "h$h")
+    end
+    for (bl, yh) in headers
+        annotate!(p, xl[1] * 1.01, yh, text(bl, 8, :left, :grey20, Plots.default(:fontfamily)))   # the figure's font, not GR's sans default
+    end
+    return p
+end
+
+"""
+    plot_summary_pre_omicron(rk, wis_pre, eff, cfg; models, title_suffix = "") -> Plot
+
+ONE figure (2026-11-11). Left column: `_scenario_dots_panels` at h1 and h4 (relative WIS, with its legend cell)
+above `_variant_coverage_bias_panels` (50% / 90% coverage, bias, for the contact – variant `models` vs no
+contact and no contact + variant, from `variant_coverage_bias_frame(wis_pre, models)`). Right column:
+`_tweedie_forest_panel(tweedie_forest_frame(eff))`. `rk` = 17j's pre-Omicron ranking, `wis_pre` =
+`scenario_wis_by_horizon_until(…)`, `eff` = 19r's `19r_fixed_effects.csv`.
+"""
+function plot_summary_pre_omicron(rk::DataFrame, wis_pre::DataFrame, eff::DataFrame, cfg::FrameworkConfig;
+                                  models, title_suffix::AbstractString = "")
+    dp, leg = _scenario_dots_panels(rk; horizons = (1, 4), titles = ["relative WIS, horizon 1", "relative WIS, horizon 4"])
+    cb = _variant_coverage_bias_panels(variant_coverage_bias_frame(wis_pre, models), models, cfg)
+    fp = _tweedie_forest_panel(tweedie_forest_frame(eff))
+    # `@layout` cannot size a nested group, so the grid is built directly: left column 64%, its top row
+    # (two dot panels + legend cell) and bottom row (three coverage/bias panels) sized separately.
+    l = Plots.grid(1, 2; widths = [0.64, 0.36])
+    l[1, 1] = Plots.grid(2, 1)
+    l[1, 1][1, 1] = Plots.grid(1, 3; widths = [0.39, 0.39, 0.22])
+    l[1, 1][2, 1] = Plots.grid(1, 3)
+    # ⚠ `save_show` → `pad_margins` resets every subplot's left/bottom margin; the notebook passes `l = 12Plots.mm`,
+    # which the 50% coverage panel's y-label needs.
+    return plot(dp..., leg, cb..., fp; layout = l, size = (2300, 1100), left_margin = 12Plots.mm,
+                bottom_margin = 12Plots.mm,
+                plot_title = "Pre-Omicron summary: relative WIS (18j), coverage and bias (17j), and Tweedie fixed effects (19r)$(title_suffix)",
+                plot_titlefontsize = 11)
 end

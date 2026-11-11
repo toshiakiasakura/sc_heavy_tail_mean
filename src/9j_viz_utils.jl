@@ -134,9 +134,10 @@ notebook (`SAVE_DPI[] = 300`) for high-resolution exports. Plots scales the pixe
 by `dpi/100`, so the layout is unchanged — only sharper. The inline display keeps the default."""
 const SAVE_DPI = Ref{Union{Nothing,Int}}(nothing)
 
-"Secure label margins (`pad_margins`), save `fig` to `path` (at `dpi`, see `SAVE_DPI`) and display it inline; returns `fig`."
-function save_show(fig, path::AbstractString; dpi = SAVE_DPI[])
-    pad_margins(fig)
+"""Secure label margins (`pad_margins`, with its `l`/`b` defaults unless given — note it SETS them on every subplot,
+overriding any margin the figure chose), save `fig` to `path` (at `dpi`, see `SAVE_DPI`) and display it inline; returns `fig`."""
+function save_show(fig, path::AbstractString; dpi = SAVE_DPI[], l = 8Plots.mm, b = 12Plots.mm)
+    pad_margins(fig; l, b)
     if dpi === nothing
         savefig(fig, path)
     else
@@ -1377,43 +1378,73 @@ into a sliver at the bottom, and squashed `mean-diagonal` (0.19–1.9) to a flat
 ⇒ the age profile is prior-driven, not estimated. `pinned` (optional, `tr.inf_pinned`) marks the
 models whose parameter is a PIN rather than a fit; their panel title is flagged and the prior band
 is suppressed, because a pinned value has no prior to be read against.
+
+`yscale`/`ylims`/`yticks` (2026-11-11, for 18j's variant figures) default to the log axis, the
+median-based limits above and Plots' own ticks, so 9j's call is unchanged; `ylims` overrides the limits
+outright and `yticks` (e.g. `(vals, labels)`) is passed through only when given; `marker_kw` goes to `_ratio_panel`.
 """
 function plot_ratio(store, labels4, origins, ttl::AbstractString;
-                    gnames, ref_lab::AbstractString, cfg = nothing, pinned = nothing)
-    yl = _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]); log = true)
+                    gnames, ref_lab::AbstractString, cfg = nothing, pinned = nothing,
+                    yscale::Symbol = :log10, ylims = nothing, yticks = nothing, marker_kw = (;))
+    logy = yscale == :log10
+    yl = ylims === nothing ? _median_ylims(reduce(vcat, [vec(store[l].med) for l in labels4]); log = logy) : ylims
     pri = cfg === nothing ? nothing : _prior_ratio_band(cfg)
     ps = Plots.Plot[]
     for (k, lbl) in enumerate(labels4)
         is_pin = pinned !== nothing && get(pinned, lbl, false)
-        p = plot(; title = is_pin ? "$lbl  [PINNED ≡ 1, not fitted]" : lbl, titlefontsize = 8,
-                 titlefontcolor = is_pin ? :firebrick : :black,
-                 xlabel = "forecast origin",
-                 ylabel = "ratio to $(ref_lab) (log)", legend = (k == 1 ? :topright : false),
-                 legendfontsize = 6, xrotation = 45, yscale = :log10, ylims = yl)
-        # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis.
-        # (A leading `hline!` here initialises a numeric axis and collapses the Dates.)
-        plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash,
-              label = "$(ref_lab) (ref)")
-        # Prior band UNDER the posterior series, and only where a prior exists. Drawn as a ribbon on
-        # a two-point date series so it cannot disturb the date axis (same trap as the ref line).
-        if pri !== nothing && !is_pin
-            xs = [first(origins), last(origins)]
-            plot!(p, xs, fill(pri[2], 2); color = :grey40, ls = :dot, lw = 1.0,
-                  label = (k == 1 ? "prior 90% (per bin)" : ""),
-                  ribbon = (fill(pri[2] - pri[1], 2), fill(pri[3] - pri[2], 2)),
-                  fillalpha = 0.10, fillcolor = :grey60)
-        end
-        for g in eachindex(gnames)
-            gnames[g] == ref_lab && continue     # ≡ 1 by construction — the dashed line above IS it
-            m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
-            plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, label = gnames[g],
-                  ribbon = (m .- lo, hi .- m), fillalpha = 0.15)
-        end
-        push!(ps, p)
+        push!(ps, _ratio_panel(store, lbl, origins; gnames, ref_lab, pri, yl, yscale, yticks, is_pin, marker_kw,
+                               title = is_pin ? "$lbl  [PINNED ≡ 1, not fitted]" : lbl,
+                               ylabel = "ratio to $(ref_lab)" * (logy ? " (log)" : ""),
+                               legend = (k == 1 ? :topright : false), first_panel = (k == 1)))
     end
     nr, nc = panel_grid(length(ps))
     return plot(ps...; layout = (nr, nc), size = (575 * nc, 390 * nr),
                 plot_title = ttl, plot_titlefontsize = 11)
+end
+
+"""
+    _ratio_panel(store, lbl, origins; gnames, ref_lab, pri, yl, yscale, yticks, is_pin, title, ylabel,
+                 xlabel = "forecast origin", legend, first_panel, titlefontsize = 8) -> Plot
+
+ONE `plot_ratio` panel (lifted out 2026-11-11 so 18j's merged figure can place it in its own grid): the
+dashed reference at 1 drawn FIRST (it establishes the Date axis), the prior band `pri` under the series
+(skipped when `pri === nothing` or `is_pin`), then one median + 90% ribbon per super-group except
+`ref_lab`. `first_panel` only decides whether the prior band carries a legend label; `marker_kw` (e.g. `(; msw = 0)`, which
+drops Plots' default black marker outline) is splatted into the series calls.
+"""
+function _ratio_panel(store, lbl, origins; gnames, ref_lab::AbstractString, pri, yl, yscale::Symbol = :log10,
+                      yticks = nothing, is_pin::Bool = false, title, ylabel, xlabel = "forecast origin",
+                      legend, first_panel::Bool, titlefontsize = 8, marker_kw = (;))
+    p = plot(; title, titlefontsize,
+             titlefontcolor = is_pin ? :firebrick : :black,
+             xlabel,
+             ylabel, legend,
+             legendfontsize = 6, xrotation = 45, yscale = yscale, ylims = yl,
+             (yticks === nothing ? (;) : (; yticks))...)
+    # Reference at 1 as a Date-valued series FIRST → establishes the date x-axis.
+    # (A leading `hline!` here initialises a numeric axis and collapses the Dates.)
+    plot!(p, [first(origins), last(origins)], [1.0, 1.0]; color = :gray, ls = :dash,
+          label = "$(ref_lab) (ref)")
+    # Prior band UNDER the posterior series, and only where a prior exists. Drawn as a ribbon on
+    # a two-point date series so it cannot disturb the date axis (same trap as the ref line).
+    if pri !== nothing && !is_pin
+        xs = [first(origins), last(origins)]
+        plot!(p, xs, fill(pri[2], 2); color = :grey40, ls = :dot, lw = 1.0,
+              label = (first_panel ? "prior 90% (per bin)" : ""),
+              ribbon = (fill(pri[2] - pri[1], 2), fill(pri[3] - pri[2], 2)),
+              fillalpha = 0.10, fillcolor = :grey60)
+    elseif pri === nothing
+        # No band: an invisible placeholder takes its series slot, because the automatic colours follow the
+        # series INDEX — without it every age group shifts one colour (2-15 green → orange) against 9j's figures.
+        plot!(p, [first(origins)], [NaN]; label = "")
+    end
+    for g in eachindex(gnames)
+        gnames[g] == ref_lab && continue     # ≡ 1 by construction — the dashed line above IS it
+        m, lo, hi = store[lbl].med[:, g], store[lbl].lo[:, g], store[lbl].hi[:, g]
+        plot!(p, origins, m; lw = 1.8, marker = :circle, ms = 2, label = gnames[g],
+              ribbon = (m .- lo, hi .- m), fillalpha = 0.15, marker_kw...)
+    end
+    return p
 end
 
 """
