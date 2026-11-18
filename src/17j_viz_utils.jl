@@ -13,6 +13,91 @@
 # ⚠ `assemble_or_load_forecasts(…; frozen = true)` FITS ON MISS, like the conditional path. Call
 # `assert_h0_artefacts` first — that assert is the no-refit guard.
 
+# The MAIN-RESULT phase bands (2026-11-17, user's table — phases 4–11, revised by the user the same day), used by 18j's
+# shading and 17j's by-period WIS figure; 9j/14j and 17j's other figures keep 9j's `PERIODS`. CONTIGUOUS (asserted: each
+# band starts the day after the previous ends), so no week is unshaded. They differ from `PERIODS`: "Pre Lockdown 2"
+# (everything on and before 2020-11-04; it starts at 2020-08-31, the first origin's first fit week = the earliest date any
+# 17j/18j figure draws) in place of the added "Tiers", Lockdown 3 easing to 07-18, Opening up 07-19 … 2021-11-29 (the
+# table said 1 Nov) and no "Plan B / Omicron".
+const PERIODS_MAIN = [
+    ("Pre Lockdown 2",               Date(2020, 8, 31),  Date(2020, 11, 4)),
+    ("Lockdown 2",                   Date(2020, 11, 5),  Date(2020, 12, 2)),
+    ("Lockdown 2 easing",            Date(2020, 12, 3),  Date(2020, 12, 19)),
+    ("Christmas",                    Date(2020, 12, 20), Date(2021, 1, 4)),
+    ("Lockdown 3",                   Date(2021, 1, 5),   Date(2021, 3, 8)),
+    ("Lockdown 3 with schools open", Date(2021, 3, 9),   Date(2021, 3, 28)),
+    ("Lockdown 3 easing",            Date(2021, 3, 29),  Date(2021, 7, 18)),
+    ("Opening up",                   Date(2021, 7, 19),  Date(2021, 11, 29)),
+]
+@assert all(lo <= hi for (_, lo, hi) in PERIODS_MAIN) &&
+        all(PERIODS_MAIN[k + 1][2] == PERIODS_MAIN[k][3] + Day(1) for k in 1:length(PERIODS_MAIN) - 1) "PERIODS_MAIN: bands must be contiguous (no gap, no overlap)"
+const PERIOD_ABBR_MAIN = Dict(
+    "Pre Lockdown 2"               => "Pre-L2",
+    "Lockdown 2"                   => "L2",
+    "Lockdown 2 easing"            => "L2 easing",
+    "Christmas"                    => "Xmas",
+    "Lockdown 3"                   => "L3",
+    "Lockdown 3 with schools open" => "L3 schools",
+    "Lockdown 3 easing"            => "L3 easing",
+    "Opening up"                   => "Opening up",
+)
+"`shade_periods!` (9j) with the main-result phase table: every other phase grey, the rest unfilled, meeting halfway between days (user, 2026-11-17)."
+shade_periods_main!(p, dmin::Date, dmax::Date; kw...) = shade_periods!(p, dmin, dmax; periods = PERIODS_MAIN, abbr = PERIOD_ABBR_MAIN,
+                                                                        seamless = true, style = :grey_only, kw...)   # grey / no fill alternating, meeting halfway (user)
+
+"""
+    main_period_label(d) -> Union{String,Missing}
+
+The `PERIODS_MAIN` phase containing origin `d`; `missing` before the first phase or after the last (the origins after
+2021-11-29). The table is contiguous, so there is no gap to resolve.
+"""
+function main_period_label(d::Date)
+    for (nm, lo, hi) in PERIODS_MAIN
+        lo <= d <= hi && return nm
+    end
+    return missing
+end
+
+
+# ── Publication style (2026-11-17/18, user; after Fig 1 of PLOS Comput Biol 10.1371/journal.pcbi.1011200) ─────────────
+# Shared by 17j's by-period figure and 18j's publication figures (18j includes this file). Helvetica, a bold panel letter
+# and its title ABOVE every panel, large fonts, no figure title.
+"Font sizes of the publication figures (`plot_fans_and_parameters`), on its 1100 px-wide canvas."
+const PUB_FONT = (; title = 13, guide = 12, tick = 10, legend = 10, phase = 8)
+"Panel A of the publication figures: the data fill the bottom `PUB_TOP_FRAC` of the panel, the phase names start at `PUB_PHASE_FRAC`."
+const PUB_TOP_FRAC   = 0.68
+"The publication figures' font (user, 2026-11-17: Helvetica), and its bold for the panel letters."
+const PUB_FAMILY      = "Helvetica"
+const PUB_FAMILY_BOLD = "Helvetica Bold"
+"Panel head: baseline at `PUB_HEAD_Y` of the plot height (above it), the title `PUB_HEAD_DX` of the width after the letter."
+const PUB_HEAD_Y  = 1.045
+const PUB_HEAD_DX = 0.025
+const PUB_PHASE_FRAC = 0.85
+
+"""
+    _pub_fonts!(p; font = PUB_FONT)
+
+Helvetica (`PUB_FAMILY`) and the `PUB_FONT` sizes for a panel's axis labels, tick labels and legend; its title is cleared
+(the head is annotated by `_pub_head!`).
+"""
+_pub_fonts!(p; font = PUB_FONT) =
+    plot!(p; title = "", guidefontsize = font.guide, tickfontsize = font.tick, legendfontsize = font.legend,
+          guidefontfamily = PUB_FAMILY, tickfontfamily = PUB_FAMILY, legendfontfamily = PUB_FAMILY)
+
+"""
+    _pub_head!(p, k, head; font = PUB_FONT, y = PUB_HEAD_Y, dx = PUB_HEAD_DX)
+
+The panel head ABOVE the plot area: letter `'A' + k − 1` in Helvetica Bold at the plot's left edge and `head` in Helvetica
+`dx` of the plot width after it, on ONE baseline at `y` of the plot height. Two annotations, because a title string cannot
+mix the two weights and Unicode-bold capitals fall back to a serif font. `y`/`dx` are RELATIVE, so a panel much shorter or
+narrower than the 1100 × ~300 px default needs its own values.
+"""
+function _pub_head!(p, k::Integer, head::AbstractString; font = PUB_FONT, y::Real = PUB_HEAD_Y, dx::Real = PUB_HEAD_DX)
+    annotate!(p, (0.0, y), text(string(Char('A' + k - 1)), font.title + 1, :left, :bottom, PUB_FAMILY_BOLD))
+    annotate!(p, (dx, y), text(head, font.title, :left, :bottom, PUB_FAMILY))
+    return p
+end
+
 const SCHEMES      = ("conditional", "frozen")
 const SCHEME_STYLE = Dict("conditional" => :solid, "frozen" => :dash)
 
@@ -759,34 +844,45 @@ end
 const SCENARIO_PERIOD_ORDER = vcat(["before $(PERIOD_ORDER[1])"], PERIOD_ORDER, ["after $(PERIOD_ORDER[end])"])
 
 """
-    scenario_wis_by_period(by_dt_h, st; scale) -> DataFrame
+    scenario_wis_by_period(by_dt_h, st; scale, label = scenario_period_label) -> DataFrame
 
 Mean WIS (`scale`, log by default) per contact model × scenario × period × horizon over the origins in
-that period, with `n_origins`. Periods from `scenario_period_label`.
+that period, with `n_origins`. Periods from `label(origin)` (default `scenario_period_label`, 9j's `PERIODS`;
+the notebook passes `main_period_label`); origins it labels `missing` are DROPPED.
 """
-function scenario_wis_by_period(by_dt_h::DataFrame, st::DataFrame; scale::AbstractString = WIS_SCALE)
+function scenario_wis_by_period(by_dt_h::DataFrame, st::DataFrame; scale::AbstractString = WIS_SCALE,
+                                label = scenario_period_label)
     d = @subset(by_dt_h, :scale .== scale)
     d = innerjoin(d, select(st, :series, :contact, :scenario); on = :model => :series)
-    d.period = scenario_period_label.(d.forecast_date)
+    d.period = label.(d.forecast_date)
+    d = dropmissing!(d, :period)
     return sort!(combine(groupby(d, [:contact, :scenario, :period, :horizon]),
                          :wis => mean => :wis, :forecast_date => (x -> length(unique(x))) => :n_origins),
                  [:contact, :period, :scenario, :horizon])
 end
 
 """
-    plot_scenario_wis_by_period(agg, contact, cfg; scale) -> Plot
+    plot_scenario_wis_by_period(agg, contact, cfg; scale, order = SCENARIO_PERIOD_ORDER, periods = nothing, layout = nothing) -> Plot
 
-ABSOLUTE mean WIS by horizon, one panel per pandemic period (`SCENARIO_PERIOD_ORDER`, those present),
+ABSOLUTE mean WIS by horizon, one panel per pandemic period (`order`, those present),
 the scenarios present as lines — the absolute-scale twin of 9j's `plot_rwis_by_period`. Each panel has its
-own y-axis from 0 (periods differ by an order of magnitude); `n` origins in the title.
+own y-axis from 0 (periods differ by an order of magnitude); `n` origins in the title, and the phase's dates when
+`periods` (a `PERIODS`-style table) is given. `layout = (rows, cols)` (default: 3 columns). `publication = true`
+(2026-11-18, user): heads A, B… above the panels (`_pub_head!`) carrying the phase name and `n` only (no dates, user),
+Helvetica, larger fonts, no figure title.
 """
-function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cfg; scale::AbstractString = WIS_SCALE)
+function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cfg; scale::AbstractString = WIS_SCALE,
+                                     order = SCENARIO_PERIOD_ORDER, periods = nothing, layout = nothing,
+                                     publication::Bool = false)
     a = @subset(agg, :contact .== contact)
-    present = [p for p in SCENARIO_PERIOD_ORDER if p in a.period]
+    present = [p for p in order if p in a.period]
+    @assert issubset(Set(a.period), Set(present)) "plot_scenario_wis_by_period: a period is not in `order`"
+    span = periods === nothing ? Dict{String,String}() :
+           Dict(nm => ", $(Dates.format(lo, "yyyy-mm-dd")) – $(Dates.format(hi, "yyyy-mm-dd"))" for (nm, lo, hi) in periods)
     panels = Plots.Plot[]
     for (k, per) in enumerate(present)
         ap = @subset(a, :period .== per)
-        p = plot(; title = "$(per) (n = $(maximum(ap.n_origins)))", titlefontsize = 8,
+        p = plot(; title = "$(per)$(get(span, per, "")) (n = $(maximum(ap.n_origins)))", titlefontsize = 8,
                  xlabel = "horizon (weeks)", ylabel = "WIS ($scale)", xticks = collect(cfg.horizons),
                  ylim = (0, maximum(ap.wis) * 1.08), legend = (k == 1 ? :topleft : false), legendfontsize = 5)
         for sc in filter(in(Set(a.scenario)), SCENARIO_ORDER)
@@ -794,12 +890,108 @@ function plot_scenario_wis_by_period(agg::DataFrame, contact::AbstractString, cf
             colr, ls, mk = SCENARIO_STYLE[sc]
             plot!(p, s.horizon, s.wis; color = colr, ls = ls, marker = mk, ms = 3, msc = colr, lw = 1.8, label = sc)
         end
+        if publication   # (2026-11-18, user) head A, B… above the panel, Helvetica, larger fonts
+            font = merge(PUB_FONT, (; title = 11, legend = 9))
+            _pub_fonts!(p; font)
+            _pub_head!(p, k, "$(per) (n = $(maximum(ap.n_origins)))"; font, y = 1.05, dx = 0.07)   # no dates (user)
+        end
         push!(panels, p)
     end
-    nc = min(3, length(panels)); nr = cld(length(panels), nc)
+    nr, nc = layout === nothing ? (cld(length(panels), min(3, length(panels))), min(3, length(panels))) : layout
+    @assert nr * nc >= length(panels) "plot_scenario_wis_by_period: layout $(layout) holds fewer than $(length(panels)) panels"
+    publication && return plot(panels...; layout = (nr, nc), size = (500 * nc, 400 * nr), left_margin = 10Plots.mm,
+                               right_margin = 3Plots.mm, top_margin = 9Plots.mm, bottom_margin = 10Plots.mm)
     return plot(panels...; layout = (nr, nc), size = (420 * nc, 320 * nr),
                 plot_title = "17j — $(contact): mean WIS by horizon per pandemic period, $(length(unique(a.scenario))) scenarios ($(scale) scale)",
                 plot_titlefontsize = 10)
+end
+
+"""
+    scenario_rel_wis_by_period(agg; ref = "no contact") -> DataFrame
+
+`agg` (`scenario_wis_by_period`) plus `rel_wis` = a scenario's mean WIS ÷ the `ref` scenario's, per contact model × period
+× horizon (the ratio of the two MEANS over the period's origins). `ref`'s own rows are 1. Asserts every cell has a `ref`
+over the same origins.
+"""
+function scenario_rel_wis_by_period(agg::DataFrame; ref::AbstractString = "no contact")
+    r = rename(select(@subset(agg, :scenario .== ref), :contact, :period, :horizon, :wis, :n_origins),
+               :wis => :wis_ref, :n_origins => :n_ref)
+    @assert nrow(unique(r, [:contact, :period, :horizon])) == nrow(r) "scenario_rel_wis_by_period: duplicate $(ref) rows"
+    out = leftjoin(agg, r; on = [:contact, :period, :horizon], order = :left)
+    @assert !any(ismissing, out.wis_ref) "scenario_rel_wis_by_period: a cell lacks the $(ref) scenario"
+    @assert out.n_origins == out.n_ref "scenario_rel_wis_by_period: $(ref) is scored on different origins"
+    out.rel_wis = out.wis ./ disallowmissing(out.wis_ref)
+    return select!(out, Not([:wis_ref, :n_ref]))
+end
+
+"""
+    plot_scenario_rel_wis_by_period(agg, contact, cfg; order, layout = (2, 4), ref = "no contact") -> Plot
+
+PUBLICATION twin of `plot_scenario_wis_by_period` (2026-11-18, user): each scenario's mean WIS RELATIVE to `ref` (no
+contact) at each horizon (`scenario_rel_wis_by_period`), one panel per period in `order`, the reference as the grey line
+at 1. ONE y axis for every panel (log scale, ticks at powers of 2), so its tick labels appear only in the first column
+and the horizon's only in the bottom row, and each axis has ONE title, centred on the grid. Heads "A  <period> (n = …)", Helvetica, large fonts, one legend in a
+strip under the panels.
+"""
+function plot_scenario_rel_wis_by_period(agg::DataFrame, contact::AbstractString, cfg; order, layout = (2, 4),
+                                         ref::AbstractString = "no contact")
+    a = scenario_rel_wis_by_period(@subset(agg, :contact .== contact); ref)
+    present = [p for p in order if p in a.period]
+    @assert Set(a.period) == Set(present) "plot_scenario_rel_wis_by_period: a period is not in `order`"
+    nr, nc = layout
+    @assert nr * nc >= length(present) "plot_scenario_rel_wis_by_period: layout $(layout) holds fewer than $(length(present)) panels"
+    others = filter(sc -> sc != ref && sc in Set(a.scenario), SCENARIO_ORDER)
+    rv = @subset(a, in.(:scenario, Ref(Set(others)))).rel_wis
+    yl = (min(1.0, minimum(rv)) / 1.2, max(1.0, maximum(rv)) * 1.2)                      # one range for every panel
+    tk = [2.0^e for e in ceil(Int, log2(yl[1])):floor(Int, log2(yl[2]))]
+    tl = [t >= 1 ? string(round(Int, t)) : string(t) for t in tk]
+    font = (; title = 15, guide = 17, tick = 15, legend = 15)
+    hs = collect(cfg.horizons)
+    panels = Plots.Plot[]
+    for (k, per) in enumerate(present)
+        ap = @subset(a, :period .== per)
+        row, col = cld(k, nc), mod1(k, nc)
+        bottom = row == nr || k + nc > length(present)                                  # nothing drawn below it
+        p = plot(; yscale = :log10, ylim = yl, yticks = (tk, col == 1 ? tl : fill("", length(tk))),
+                 xlim = (first(hs) - 0.25, last(hs) + 0.25),
+                 xticks = (hs, bottom ? string.(hs) : fill("", length(hs))),   # the axis titles: ONE each, below
+                 legend = false)
+        hline!(p, [1.0]; color = first(SCENARIO_STYLE[ref]), lw = 2.2, label = "")
+        for sc in others
+            s = sort(@subset(ap, :scenario .== sc), :horizon)
+            @assert s.horizon == hs "plot_scenario_rel_wis_by_period: $(sc) lacks a horizon in $(per)"
+            colr, ls, mk = SCENARIO_STYLE[sc]
+            plot!(p, s.horizon, s.rel_wis; color = colr, ls = ls, marker = mk, ms = 5, msw = 0, lw = 2.4, label = sc)
+        end
+        _pub_fonts!(p; font)
+        _pub_head!(p, k, "$(per) (n = $(maximum(ap.n_origins)))"; font, y = 1.04, dx = 0.07)
+        push!(panels, p)
+    end
+    # ONE y title centred on the rows and ONE x title centred on the columns, annotated on the bottom-left panel in its
+    # relative coordinates; gy / gx = the gap between panels as a fraction of a panel's plot height / width (measured)
+    @assert length(present) == nr * nc "plot_scenario_rel_wis_by_period: the shared axis titles assume a full grid"
+    gy, gx = 0.25, 0.15
+    bl = panels[(nr - 1) * nc + 1]
+    annotate!(bl, (-0.24, (nr * (1 + gy) - gy) / 2), text("relative WIS", font.guide, :center, :center, PUB_FAMILY; rotation = 90))
+    annotate!(bl, ((nc * (1 + gx) - gx) / 2, -0.24), text("horizon (weeks)", font.guide, :center, :center, PUB_FAMILY))
+    # ONE legend, in a strip under the panels (in panel A it covered the data): empty series in the panels' styles
+    leg = plot(; framestyle = :none, xlim = (0, 1), ylim = (0, 1), legend = :top, legend_column = 3,     # 2 rows × 3: one row overflows the width
+               fg_legend = :transparent, bg_legend = :transparent)
+    plot!(leg, [NaN], [NaN]; color = first(SCENARIO_STYLE[ref]), lw = 2.2, label = "$(ref) (reference)")
+    for sc in others
+        colr, ls, mk = SCENARIO_STYLE[sc]
+        plot!(leg, [NaN], [NaN]; color = colr, ls = ls, marker = mk, ms = 5, msw = 0, lw = 2.4, label = sc)
+    end
+    _pub_fonts!(leg; font)
+    lay = Plots.grid(2, 1; heights = [0.9, 0.1])
+    lay[1, 1] = Plots.grid(nr, nc)
+    fig = plot(panels..., leg; layout = lay, size = (450 * nc, 380 * nr + 100), right_margin = 2Plots.mm)
+    for k in eachindex(panels)    # per subplot: the inner columns need no room for y labels, the upper rows none for x labels
+        col = mod1(k, nc); bottom = cld(k, nc) == nr || k + nc > length(panels)
+        plot!(fig[k]; left_margin = (col == 1 ? 14 : 2) * Plots.mm, top_margin = 9Plots.mm,
+              bottom_margin = (bottom ? 12 : 1) * Plots.mm)
+    end
+    return fig
 end
 
 """

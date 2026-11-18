@@ -100,21 +100,43 @@ overlay would collapse the date axis — see the date-axis gotcha). Bands use a 
 the lines underneath stay legible.
 """
 function shade_periods!(p, dmin::Date, dmax::Date; alpha::Real = 0.10,
-                        fontsize::Integer = 5, labels::Bool = true)
+                        fontsize::Integer = 5, labels::Bool = true,
+                        periods = PERIODS, abbr = PERIOD_ABBR,   # 17j/18j pass the main-result table (`PERIODS_MAIN`, 17j utils)
+                        seamless::Bool = false, style::Symbol = :bands,
+                        label_frac::Union{Nothing,Real} = nothing, label_family = nothing)
+    @assert style in (:bands, :lines, :grey_only) "shade_periods!: style must be :bands, :lines or :grey_only"
     yl   = Plots.ylims(p)
-    ytxt = yl[1] + 0.93 * (yl[2] - yl[1])
+    # `label_frac` (2026-11-17, 18j's publication figures): the names start at that fraction of the plot height, in the
+    # axis's OWN scale (log-aware), so they can be kept inside the panel; `nothing` = the old linear 0.93
+    ytxt = label_frac === nothing ? yl[1] + 0.93 * (yl[2] - yl[1]) :
+           p[1][:yaxis][:scale] == :log10 ? yl[1] * (yl[2] / yl[1])^label_frac : yl[1] + label_frac * (yl[2] - yl[1])
     cols = (:gray, :steelblue)
     j = 0
-    for (nm, lo, hi) in PERIODS
+    for (nm, lo, hi) in periods
         plo = max(lo, dmin); phi = min(hi, dmax)
         plo <= phi || continue
         j += 1
-        vspan!(p, [plo, phi]; color = cols[mod1(j, 2)], fillalpha = alpha,
-               linealpha = 0, label = "")
+        # `seamless` (2026-11-17, user): a band covers its days in full, so consecutive bands (hi, hi + 1) meet at the
+        # midnight between them instead of leaving a one-day white strip; the panel's own edges stay where they are
+        xs = seamless ? [plo > dmin ? Dates.value(plo) - 0.5 : Dates.value(plo),
+                         phi < dmax ? Dates.value(phi) + 0.5 : Dates.value(phi)] : [plo, phi]
+        if style == :bands
+            vspan!(p, xs; color = cols[mod1(j, 2)], fillalpha = alpha,
+                   linealpha = 0, label = "")
+        elseif style == :grey_only
+            # (2026-11-17, user) the grey bands as in `:bands`, the blue ones left UNFILLED — grey/white alternation
+            isodd(j) && vspan!(p, xs; color = cols[1], fillalpha = alpha, linealpha = 0, label = "")
+        else
+            # `:lines` (2026-11-17, user): NO fill — a thin grey line where a phase starts or ends inside the panel,
+            # at the midnight between its first/last day and the neighbouring one; the names stay at the top
+            lo > dmin && vline!(p, [Dates.value(lo) - 0.5]; color = :grey55, lw = 0.8, label = "")
+            hi < dmax && vline!(p, [Dates.value(hi) + 0.5]; color = :grey55, lw = 0.8, label = "")
+        end
         labels || continue
         mid = plo + Day(div((phi - plo).value, 2))
         annotate!(p, mid, ytxt,
-                  text(get(PERIOD_ABBR, nm, nm), fontsize, :center, :bottom; rotation = 90))
+                  text(get(abbr, nm, nm), fontsize, :center, :bottom,
+                       (label_family === nothing ? () : (label_family,))...; rotation = 90))   # family: e.g. the figure's serif
     end
     return p
 end
@@ -136,8 +158,8 @@ const SAVE_DPI = Ref{Union{Nothing,Int}}(nothing)
 
 """Secure label margins (`pad_margins`, with its `l`/`b` defaults unless given — note it SETS them on every subplot,
 overriding any margin the figure chose), save `fig` to `path` (at `dpi`, see `SAVE_DPI`) and display it inline; returns `fig`."""
-function save_show(fig, path::AbstractString; dpi = SAVE_DPI[], l = 8Plots.mm, b = 12Plots.mm)
-    pad_margins(fig; l, b)
+function save_show(fig, path::AbstractString; dpi = SAVE_DPI[], l = 8Plots.mm, b = 12Plots.mm, pad::Bool = true)
+    pad && pad_margins(fig; l, b)    # `pad = false`: the figure set its own margins (e.g. rows that must touch)
     if dpi === nothing
         savefig(fig, path)
     else
