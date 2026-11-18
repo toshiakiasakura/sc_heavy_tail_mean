@@ -974,15 +974,29 @@ function plot_scenario_rel_wis_by_period(agg::DataFrame, contact::AbstractString
     bl = panels[(nr - 1) * nc + 1]
     annotate!(bl, (-0.24, (nr * (1 + gy) - gy) / 2), text("relative WIS", font.guide, :center, :center, PUB_FAMILY; rotation = 90))
     annotate!(bl, ((nc * (1 + gx) - gx) / 2, -0.24), text("horizon (weeks)", font.guide, :center, :center, PUB_FAMILY))
-    # ONE legend, in a strip under the panels (in panel A it covered the data): empty series in the panels' styles
-    leg = plot(; framestyle = :none, xlim = (0, 1), ylim = (0, 1), legend = :top, legend_column = 3,     # 2 rows × 3: one row overflows the width
-               fg_legend = :transparent, bg_legend = :transparent)
-    plot!(leg, [NaN], [NaN]; color = first(SCENARIO_STYLE[ref]), lw = 2.2, label = "$(ref) (reference)")
-    for sc in others
+    # ONE legend, in a strip under the panels (in panel A it covered the data), drawn BY HAND (user): 3 columns × 2 rows in
+    # the user's order, and a frozen entry's dashes drawn as separate segments (GR's dash on a legend sample is unclear)
+    leg = plot(; framestyle = :none, grid = false, xticks = false, yticks = false, legend = false, xlim = (0, 1), ylim = (0, 1))
+    leg_order = [(ref, "$(ref) (reference)"), ("contact (frozen)", "contact (frozen)"), ("contact", "contact"),
+                 ("variant", "variant"), ("variant + contact (frozen)", "contact (frozen) – variant"),
+                 ("variant + contact", "contact – variant")]
+    leg_order = filter(e -> e[1] == ref || e[1] in Set(others), leg_order)
+    for (k, (sc, lab)) in enumerate(leg_order)
+        col, row = mod1(k, 3), cld(k, 3)
+        x0 = 0.10 + 0.29 * (col - 1); x1 = x0 + 0.06; yy = row == 1 ? 0.72 : 0.28
         colr, ls, mk = SCENARIO_STYLE[sc]
-        plot!(leg, [NaN], [NaN]; color = colr, ls = ls, marker = mk, ms = 5, msw = 0, lw = 2.4, label = sc)
+        if ls == :dash
+            xs = Float64[]; ys = Float64[]
+            for a in x0:0.0135:x1   # dash 0.009, gap 0.0045 of the strip's width
+                append!(xs, [a, min(a + 0.009, x1), NaN]); append!(ys, [yy, yy, NaN])
+            end
+            plot!(leg, xs, ys; color = colr, lw = 2.4, label = "")
+        else
+            plot!(leg, [x0, x1], [yy, yy]; color = colr, lw = (sc == ref ? 2.2 : 2.4), label = "")
+        end
+        sc == ref || scatter!(leg, [(x0 + x1) / 2], [yy]; color = colr, marker = mk, ms = 6, msw = 0, label = "")
+        annotate!(leg, x1 + 0.01, yy, text(lab, font.legend, :left, :vcenter, PUB_FAMILY))
     end
-    _pub_fonts!(leg; font)
     lay = Plots.grid(2, 1; heights = [0.9, 0.1])
     lay[1, 1] = Plots.grid(nr, nc)
     fig = plot(panels..., leg; layout = lay, size = (450 * nc, 380 * nr + 100), right_margin = 2Plots.mm)

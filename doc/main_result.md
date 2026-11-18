@@ -26,7 +26,6 @@ TODO: degree distribution difference.
 Figure 2. Forecasting result every 4 weeks for observed, hweibull|nbhd contact only, hweibull|nbhd contact - variant, neigbin|mean contact -variant. 
 
 
-Merging the following: 
 ![Caption](../res/18j_summary_pre_omicron.png)
 Figure 4. Effects of each model component. 
 
@@ -44,9 +43,6 @@ Secondary attack rates, and infectivity and susceptiblity.
 ![Caption](../res/18j_fans_patterns_parameters_pre_omicron_column_parameters.png)
 
 ## Contact characteristics
-Merge the following:
-
-
 ![Caption](../res/18j_contact_rate_reproduction_pre_omicron.png)
 
 

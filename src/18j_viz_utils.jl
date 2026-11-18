@@ -266,35 +266,54 @@ function plot_scenario_age_heatmap(rel::DataFrame, rk::DataFrame, grid; horizons
     val = Dict((r.series, r.horizon, r.age_group) => r.rel_wis for r in eachrow(rel))
     d = cap === nothing ? maximum(abs.(rel.rel_wis .- 1)) : cap
     capped = cap === nothing ? "" : "; colours capped at 1 ± $(cap)"
-    F = PUB_FONT
+    F = SUMMARY_FONT   # (user) every text larger than `PUB_FONT`: ticks 15, axis and panel titles 17
     panels = Plots.Plot[]
     for (k, h) in enumerate(horizons)
         M = [val[(s, h, grid.LAB[a])] for a in 1:A, s in series]
         lab_x = publication || k == length(horizons)
-        p = heatmap(1:n, 1:A, M; c = cgrad(:RdBu; rev = true), clims = (1 - d, 1 + d), title = "horizon $h",
-                    titlefontsize = 10, ylabel = "age group", yticks = (1:A, grid.LAB), ytickfontsize = 8,
+        p = heatmap(1:n, 1:A, M; c = cgrad(:balance), clims = (1 - d, 1 + d),   # cmocean, blue < 1 < red (user)
+                    title = "horizon $h",
+                    # publication: the age labels and title are hand-drawn after the layout (below), close to the axis
+                    titlefontsize = 10, ylabel = (publication ? "" : "age group"),
+                    yticks = (1:A, publication ? fill("", A) : grid.LAB), ytickfontsize = 8,
                     xticks = (1:n, lab_x ? rows.tick : fill("", n)), xtickfontsize = 7, xrotation = 45,
                     colorbar_title = "relative WIS",   # (user) the cap note dropped from the publication title too
                     grid = false, ylim = (0.5, A + 1))
         vline!(p, breaks; color = :black, lw = 0.8, label = "")
         for a in 1:A, j in 1:n
-            annotate!(p, j, a, text(@sprintf("%.2f", M[a, j]), publication ? 10 : 5, abs(M[a, j] - 1) > (publication ? 0.6 : 0.8) * d ? :white : :black,   # (user) larger cell values; white on the darker cells
+            annotate!(p, j, a, text(@sprintf("%.2f", M[a, j]), publication ? 11 : 5, abs(M[a, j] - 1) > (publication ? 0.5 : 0.8) * d ? :white : :black,   # (user) larger cell values; white on the darker cells
                                     (publication ? (PUB_FAMILY,) : ())...))
         end
         for (lab, x) in headings
-            annotate!(p, x, A + 0.75, text(lab, publication ? 14 : 8, :center, (publication ? (PUB_FAMILY,) : ())...))   # (user) larger block headings
+            annotate!(p, x, A + 0.75, text(lab, publication ? 16 : 8, :center, (publication ? (PUB_FAMILY,) : ())...))   # (user) larger block headings
         end
         if publication
-            _pub_fonts!(p)
+            _pub_fonts!(p; font = F)
             plot!(p; colorbar_titlefontsize = F.guide, colorbar_titlefontfamily = PUB_FAMILY,
                   colorbar_tickfontsize = F.tick, colorbar_tickfontfamily = PUB_FAMILY)
-            _pub_head!(p, k, "Mean WIS ($(scale) scale) relative to no contact – no variant, by age, horizon $(h)"; y = 1.03, dx = 0.022)
+            _pub_head!(p, k, "Mean WIS ($(scale) scale) relative to no contact – no variant, by age, horizon $(h)"; font = F, y = 1.03, dx = 0.025)
         end
         push!(panels, p)
     end
-    publication && return plot(panels...; layout = (length(panels), 1), size = (1350, 540 * length(panels)),
-                               left_margin = 6Plots.mm, right_margin = 4Plots.mm, top_margin = 9Plots.mm,
-                               bottom_margin = 6Plots.mm)
+    if publication
+        fig = plot(panels...; layout = (length(panels), 1), size = (1600, 660 * length(panels)),   # wide enough for the 16 pt block headings
+                   # the 45° x labels reach left of the first column and below the panel
+                   left_margin = 33Plots.mm, right_margin = 4Plots.mm, top_margin = 9Plots.mm, bottom_margin = 10Plots.mm)
+        # (user) the age labels 3.2 mm from the axis, as in the summary figure: GR puts tick labels 1.5% of the FIGURE's
+        # width away (~10 mm here) — so they are drawn by hand from the computed plot areas
+        Plots.prepare_output(fig)
+        gap = 3.2; labw = maximum(length.(grid.LAB)) * 0.6 * F.tick * 0.254   # mm (≈ 0.6 em per character)
+        for k in eachindex(panels)
+            pa = Plots.plotarea(fig[k]); w = Plots.width(pa).value
+            yr(y) = (y - 0.5) / (A + 0.5)   # the y axis runs 0.5 … A + 1
+            for a in 1:A
+                annotate!(fig, (-gap / w, yr(a)), text(grid.LAB[a], F.tick, :right, :vcenter, PUB_FAMILY); subplot = k)
+            end
+            annotate!(fig, (-(gap + labw + 13) / w, yr((A + 1) / 2)),   # clear of the labels (measured)
+                      text("age group", F.guide, :center, :center, PUB_FAMILY; rotation = 90); subplot = k)
+        end
+        return fig
+    end
     return plot(panels...; layout = (length(panels), 1), size = (1350, 860),
                 plot_title = "18j — mean WIS ($(scale) scale) relative to no contact – no variant, by age$(title_suffix)$(capped)",
                 plot_titlefontsize = 10)
@@ -1513,9 +1532,9 @@ end
 
 # ── Contact rate per age block + relative contact reproduction number, merged (2026-11-18, user) ──────────────────
 "The three contact models of `plot_contact_rate_reproduction`: (NGM label, degree, 14j quantity, legend) — each NGM's input."
-const CR_MODELS = (("unweighted-negbin|mean",          "unweighted-negbin", "K1",     "negbin|mean: mean degree"),
-                   ("weighted-hweibull|mean",          "weighted-hweibull", "K1",     "hweibull|mean: mean degree"),
-                   ("weighted-hweibull|neighbourhood", "weighted-hweibull", "excess", "hweibull|nbhd: excess degree"))
+const CR_MODELS = (("unweighted-negbin|mean",          "unweighted-negbin", "K1",     "negbin: mean degree"),
+                   ("weighted-hweibull|mean",          "weighted-hweibull", "K1",     "hweibull: mean degree"),
+                   ("weighted-hweibull|neighbourhood", "weighted-hweibull", "excess", "hweibull: nbhd degree"))   # legends (user)
 
 """
     plot_contact_rate_reproduction(tl, rn; origins) -> (; fig, data)
@@ -1562,7 +1581,7 @@ function plot_contact_rate_reproduction(tl::DataFrame, rn::DataFrame; origins)
         push!(heads, "Fitted contact rate in the origin week, " * replace(desc, "bins " => "age groups ", r"\+(?=\d)" => ", "))   # "70+" keeps its +
     end
     r = @subset(rn, :panel .== "contact_rel_R", in.(:origin, Ref(os)), in.(:label, Ref(first.(CR_MODELS))))
-    p = plot(; ylabel = "relative contact R; national R", legend = :topright,
+    p = plot(; ylabel = "relative contact Rt\nnational Rt", legend = :topright,
              ylim = (0, 1.45 * max(maximum(r.hi), maximum(r.national_R))))
     hline!(p, [1.0]; color = :grey50, ls = :dash, lw = 1, label = "")
     for ((m, _, _, lab), c) in zip(CR_MODELS, cols)
@@ -1570,11 +1589,11 @@ function plot_contact_rate_reproduction(tl::DataFrame, rn::DataFrame; origins)
         @assert s.origin == origins "plot_contact_rate_reproduction: $m lacks an origin"
         @assert all(s.week_mid .== week_mid.(s.contact_week)) && all(s.contact_week .== s.origin .+ Week(1))
         plot!(p, s.week_mid, s.med; ribbon = (s.med .- s.lo, s.hi .- s.med), fillalpha = 0.2, color = c, lw = 1.8,
-              marker = :circle, ms = 2, msw = 0, label = replace(lab, r":.*" => ""))
+              marker = :circle, ms = 2, msw = 0, label = _bar_short(m))   # the NGM model: negbin|mean, …
         push!(data, DataFrame(panel = "contact_rel_R", series = m, origin = s.origin, x = s.week_mid, med = s.med, lo = s.lo, hi = s.hi))
     end
     nr = sort(combine(groupby(r, [:origin, :week_mid]), :national_R => (v -> (@assert allequal(v); first(v))) => :national_R), :origin)
-    plot!(p, nr.week_mid, nr.national_R; color = :black, lw = 1.8, label = "national R (inc2prev, England; absolute)")
+    plot!(p, nr.week_mid, nr.national_R; color = :black, lw = 1.8, label = "national R (absolute)")   # (user)
     push!(data, DataFrame(panel = "national_R", series = "inc2prev", origin = nr.origin, x = nr.week_mid,
                           med = nr.national_R, lo = missing, hi = missing))
     shade_periods_main!(p, x0, x1; labels = false)
@@ -1675,6 +1694,25 @@ function _summary_x_axis(fq, vg::DataFrame, tr, model::AbstractString; every::In
 end
 
 """
+    _ref_legend_in_age_order!(p, gnames, ref_lab) -> p
+
+Puts the reference group's legend entry ("<ref_lab> (ref)") in AGE order among the groups (user: 2-15, 16-24, 25-34 (ref),
+35-49, 50+). `_ratio_panel` must DRAW the reference first — a Date-valued series is what makes the axis a date axis — and
+an extra legend-only series would shift every later group's automatic colour, so the entry is moved in the subplot's
+series list AFTER plotting (the legend follows that list; colours are already fixed).
+"""
+function _ref_legend_in_age_order!(p, gnames, ref_lab::AbstractString)
+    sl = p[1].series_list
+    i = findfirst(sr -> sr[:label] == "$(ref_lab) (ref)", sl)
+    k = findfirst(==(ref_lab), gnames)
+    (i === nothing || k === nothing || k == length(gnames)) && return p
+    r = popat!(sl, i)
+    j = findfirst(sr -> sr[:label] == gnames[k + 1], sl)   # the next older group
+    j === nothing ? push!(sl, r) : insert!(sl, j, r)
+    return p
+end
+
+"""
     _variant_param_panels(vg, tr, model, xo; letters) -> (; gamma, share, susc, inf)
 
 γ_SAR,v (`_variant_gamma_panel`, 0–1, shares returned for `_add_share_axes!`), then susceptibility and infectivity as
@@ -1686,30 +1724,29 @@ function _variant_param_panels(vg::DataFrame, tr, model::AbstractString, xo; let
     # `publication` (2026-11-17, user): γ in %, its shares dashed on the SAME axis (no twin), "relative …" labels,
     # infectivity fixed at 1/8 … 8 and fraction tick labels
     pg, sh = _variant_gamma_panel(vg, model; ylim = (publication ? (0.0, 100.0) : (0.0, 1.0)), free = (), ycap = 2.5, legend = :right,
-                                  ylabel = (publication ? "variant γ_SAR, % (solid)" : "γ_SAR,v (solid)"),
+                                  ylabel = (publication ? "variant SAR, % (solid)\nshare of variant, % (dashed)" : "γ_SAR,v (solid)"),
                                   share_key = !publication, titlefontsize = 10, scale = (publication ? 100 : 1),
                                   title = "($(letters[1])) per-contact secondary attack rate by variant, fitted at each origin (h = 1 fit)")
     if publication
         for (nm, x, y) in sh
             plot!(pg, x, 100 .* y; color = get(VARIANT_COLS, nm, :black), ls = :dash, lw = 1.2, label = "")
         end
-        plot!(pg, sh[1][2][1:1], [NaN]; color = :black, ls = :dash, lw = 1.2, label = "share at origin, %")   # short: one legend row spaces every entry by the LONGEST label
-        # the legend in ONE row in a band above 100 %: inside the data it sat on Delta and the shares
-        plot!(pg; ylims = (0.0, 122.0), yticks = 0:20:100, legend = :top, legend_column = -1)
+        plot!(pg, sh[1][2][1:1], [NaN]; color = :black, ls = :dash, lw = 1.2, label = "share of variant")   # short: one legend row spaces every entry by the LONGEST label
+        # (user, 2026-11-18) the legend VERTICAL at the right, in the empty band between Delta's solid and dashed lines
+        plot!(pg; ylims = (0.0, 105.0), yticks = 0:20:100, legend = (0.878, 0.675))   # (x of the text, y of the first row): centred on 60 %, the text at C's x (user)
     end
     ratio(st, q, letter, leg; yl = _median_ylims(vec(st[lbl].med); log = true)) =
         _ratio_panel(st, lbl, xo; gnames = tr.sg_names, ref_lab = tr.ref_lab, pri = nothing, yl,
                      yticks = _pow2_ticks(yl; frac = publication), title = "($(letter)) $(q) ratio to $(tr.ref_lab), fitted at each origin (h = 1 fit, log axis)",
                      ylabel = (publication ? "relative $(q)" : "$(q) ratio"), xlabel = "", legend = leg, first_panel = true, titlefontsize = 10,
                      marker_kw = (; msw = 0))
-    # publication: susceptibility's legend in one row above the data (×2.4 headroom on the log axis)
-    susc = publication ? (yl = _median_ylims(vec(tr.susc[lbl].med); log = true);
-                          ratio(tr.susc, "susceptibility", letters[2], :top; yl = (yl[1], 2.4 * yl[2]))) :
-                         ratio(tr.susc, "susceptibility", letters[2], :bottomright)
-    publication && plot!(susc; legend_column = -1)
-    return (; gamma = pg, share = sh, susc,
-            inf = (publication ? ratio(tr.inf, "infectivity", letters[3], false; yl = (1 / 8, 8.0)) :
-                                 ratio(tr.inf, "infectivity", letters[3], false)))
+    # publication (user, 2026-11-18): VERTICAL legends at the right, where the panel is empty — susceptibility at the bottom
+    # right (below the curves from Sep), infectivity (now with its own legend) at the top right of its 1/16 … 16 axis
+    susc = ratio(tr.susc, "susceptibility", letters[2], :bottomright)
+    inf = publication ? ratio(tr.inf, "infectivity", letters[3], (0.878, 0.985); yl = (1 / 16, 16.0)) :   # top, clear of the bands; C's x (user)
+                        ratio(tr.inf, "infectivity", letters[3], false)
+    publication && foreach(p -> _ref_legend_in_age_order!(p, tr.sg_names, tr.ref_lab), (susc, inf))
+    return (; gamma = pg, share = sh, susc, inf)
 end
 
 """
